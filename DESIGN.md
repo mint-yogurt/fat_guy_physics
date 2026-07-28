@@ -204,10 +204,10 @@ Current goals:
 * Chunky voxel terrain.
 * Low-poly models.
 * Vertex colors where practical.
-* Low texture memory usage.
+* Low texture memory usage. (see https://daivuk.itch.io/quod-textures)
 * Texture atlases where appropriate.
-* Simple shaders.
-* Mild retro-inspired post-processing.
+* Simple shader(s).
+* Mild post-processing.
 
 Current effects being considered:
 
