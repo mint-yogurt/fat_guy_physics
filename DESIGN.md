@@ -260,7 +260,7 @@ No additional gameplay systems are required until this is working.
 
 ---
 
-# Development Roadmap
+# Development Roadmap (README added to as each step gets worked on)
 
 ## Phase 0
 
