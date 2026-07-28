@@ -12,6 +12,7 @@ add_executable(fatguyphysics
     voxel/ChunkMesher.cpp
     voxel/ChunkMesh.cpp
     voxel/TerrainGenerator.cpp
+    voxel/Vegetation.cpp
     voxel/World.cpp
     voxel/VoxelRaycast.cpp
     voxel/Collision.cpp

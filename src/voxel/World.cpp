@@ -9,7 +9,7 @@
 
 namespace fgp {
 
-World::World(int seed, int loadRadiusChunks) : generator_(seed), loadRadiusChunks_(loadRadiusChunks) {}
+World::World(int seed, int loadRadiusChunks) : generator_(seed), seed_(seed), loadRadiusChunks_(loadRadiusChunks) {}
 
 void World::loadChunk(ChunkCoord coord) {
     auto chunk = std::make_unique<Chunk>(coord);
@@ -18,7 +18,9 @@ void World::loadChunk(ChunkCoord coord) {
     auto mesh = std::make_unique<ChunkMesh>();
     mesh->upload(buildChunkMesh(*chunk));
 
-    loaded_[coord] = LoadedChunk{std::move(chunk), std::move(mesh)};
+    VegetationBatch vegetation = generateVegetation(generator_, coord, seed_);
+
+    loaded_[coord] = LoadedChunk{std::move(chunk), std::move(mesh), std::move(vegetation.trees), std::move(vegetation.bushes)};
 }
 
 void World::update(glm::vec3 cameraWorldPos) {
@@ -135,6 +137,20 @@ void World::draw(const Shader& shader) const {
         const glm::mat4 model = glm::translate(glm::mat4(1.0f), loadedChunk.chunk->worldOrigin());
         shader.setMat4("uModel", model);
         loadedChunk.mesh->draw();
+
+        for (const VegetationInstance& tree : loadedChunk.trees) {
+            shader.setMat4("uModel", glm::translate(glm::mat4(1.0f), tree.origin));
+            tree.mesh->draw();
+        }
+    }
+}
+
+void World::drawBushes(const Shader& shader) const {
+    for (const auto& [coord, loadedChunk] : loaded_) {
+        for (const VegetationInstance& bush : loadedChunk.bushes) {
+            shader.setMat4("uModel", glm::translate(glm::mat4(1.0f), bush.origin));
+            bush.mesh->draw();
+        }
     }
 }
 

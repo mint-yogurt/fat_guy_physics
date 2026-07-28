@@ -21,8 +21,15 @@ const vec3 kAmbient = vec3(0.55);
 const vec3 kSunColor = vec3(0.65);
 
 void main() {
-    vec3 detail = texture(uTexture, vUV, kTextureLodBias).rgb;
+    vec4 detail = texture(uTexture, vUV, kTextureLodBias);
+    // Alpha-cutout rather than blending: lets billboard sprites (bush.png)
+    // share this shader/opaque-geometry depth pass with terrain and trees
+    // instead of needing a sorted transparent pass. Opaque textures (cobble,
+    // white) are alpha=1 everywhere, so this is a no-op for them.
+    if (detail.a < 0.5) {
+        discard;
+    }
     float ndotl = max(dot(normalize(vNormal), normalize(kSunDirection)), 0.0);
     vec3 lighting = kAmbient + kSunColor * ndotl;
-    FragColor = vec4(detail * vColor * lighting, 1.0);
+    FragColor = vec4(detail.rgb * vColor * lighting, 1.0);
 }

@@ -305,6 +305,7 @@ int run() {
 
         fgp::Texture cobbleTexture(fgp::executableDir() / "assets" / "textures" / "cobble.png");
         fgp::Texture whiteTexture(fgp::executableDir() / "assets" / "textures" / "white.png");
+        fgp::Texture bushTexture(fgp::executableDir() / "assets" / "billboard" / "bush.png");
         shader.use();
         shader.setInt("uTexture", 0);
 
@@ -369,6 +370,14 @@ int run() {
 
             cobbleTexture.bind(0);
             world.draw(shader);
+
+            // Cross-quad billboards (see Vegetation.cpp): each is only
+            // wound for one side, same as the placeholder player mesh below,
+            // so face culling has to be off for both sides to render.
+            bushTexture.bind(0);
+            glDisable(GL_CULL_FACE);
+            world.drawBushes(shader);
+            glEnable(GL_CULL_FACE);
 
             if (g_camera.perspective() == fgp::CameraPerspective::ThirdPerson) {
                 const glm::mat4 model = glm::translate(glm::mat4(1.0f), g_player.bodyCenter()) *

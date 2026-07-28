@@ -6,6 +6,7 @@
 #include "Chunk.hpp"
 #include "ChunkMesh.hpp"
 #include "TerrainGenerator.hpp"
+#include "Vegetation.hpp"
 #include "../Shader.hpp"
 
 namespace fgp {
@@ -24,7 +25,14 @@ public:
     explicit World(int seed, int loadRadiusChunks = 6);
 
     void update(glm::vec3 cameraWorldPos);
+    // Draws terrain plus trees (both use whatever texture unit 0 is bound to
+    // when called, per main.cpp's convention of binding cobbleTexture once
+    // for all opaque world geometry).
     void draw(const Shader& shader) const;
+    // Bushes are alpha-cutout billboards using a different texture, so
+    // they're a separate draw call — the caller binds the bush texture (and
+    // disables face culling, same as the placeholder player mesh) around it.
+    void drawBushes(const Shader& shader) const;
 
     int surfaceHeightVoxels(int worldX, int worldZ) const { return generator_.surfaceHeight(worldX, worldZ); }
 
@@ -40,6 +48,8 @@ private:
     struct LoadedChunk {
         std::unique_ptr<Chunk> chunk;
         std::unique_ptr<ChunkMesh> mesh;
+        std::vector<VegetationInstance> trees;
+        std::vector<VegetationInstance> bushes;
     };
 
     static constexpr int kVerticalChunkMin = 0;
@@ -48,6 +58,7 @@ private:
     void loadChunk(ChunkCoord coord);
 
     TerrainGenerator generator_;
+    int seed_;
     int loadRadiusChunks_;
     std::unordered_map<ChunkCoord, LoadedChunk, ChunkCoordHash> loaded_;
     bool hasCenter_ = false;
