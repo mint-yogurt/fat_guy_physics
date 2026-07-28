@@ -1,3 +1,9 @@
+// physics/mechanics
+items can be thrown  // e.g. a shovel is thrown like a spear and sticks into a wooden board, but bounces off stone etc. 
+shirt represents player health // turns to rags lower hp you get
+
+objects have health and can be repaired/healed // e.g. a pumpkin is thrown, but doesnt break the first time just takes x damage (based on mass, velocity, and what it hit). a wood 2x4 same thing, but if you swing a hammer at it you can repair it
+
 // items
 
 
@@ -5,4 +11,8 @@
 // constructions
 trampoline
 catapult
+all manner of ramps/tubes/halfpipes
+riding mower "barn engine"
+ghetto backhoe
+roller coasters but for fat guy orbs
 

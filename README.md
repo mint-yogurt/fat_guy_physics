@@ -47,3 +47,10 @@ See the [Development Roadmap](DESIGN.md#development-roadmap-readme-added-to-as-e
 - [x] Rendering (OpenGL 3.3 core, GLFW + glad)
 - [x] Camera
 - [x] Basic application framework
+
+### Phase 1 — Voxel terrain
+
+- [x] Chunk storage (32³ voxels, ~10cm each)
+- [x] Procedural generation (heightmap via layered/fractal Perlin noise)
+- [x] Meshing (greedy meshing, vertex-colored by material)
+- [x] Streaming (radius around the camera, load/unload on chunk-boundary crossing)

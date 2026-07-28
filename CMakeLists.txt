@@ -23,4 +23,5 @@ include(cmake/Dependencies.cmake)
 include(cmake/CompilerWarnings.cmake)
 
 add_subdirectory(third_party/glad)
+add_subdirectory(third_party/fastnoiselite)
 add_subdirectory(src)
