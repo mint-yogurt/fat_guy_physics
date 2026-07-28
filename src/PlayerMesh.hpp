@@ -25,10 +25,18 @@ std::vector<Vertex> buildPlayerSphereMesh(glm::vec3 color, int latSegments = 10,
 // same contract buildPlayerSphereMesh's output satisfies — so it drops
 // into the existing translate(bodyCenter) * rotate * scale(bodyRadius)
 // model matrix in main.cpp unchanged, regardless of the source mesh's
-// authored scale or pivot. Per-vertex color comes from each primitive's
-// material base_color_factor (white if no material); texture sampling
-// isn't wired up yet, so a textured model will render flat white-tinted.
+// authored scale or pivot. Every vertex gets the given flat color (source
+// materials/textures aren't read — the current model is untextured, same
+// placeholder-color treatment as buildPlayerSphereMesh).
+//
+// mirrorAxis: if 0/1/2 (X/Y/Z), each primitive's local-space geometry is
+// reflected across that axis and appended alongside the original — for a
+// source mesh authored with a Mirror modifier that was never applied
+// before export, so only one half made it into the file. Pass -1 for a
+// mesh that's already whole.
+//
 // Returns std::nullopt if the file doesn't exist or fails to parse.
-std::optional<std::vector<Vertex>> loadPlayerMeshFromGltf(const std::filesystem::path& path);
+std::optional<std::vector<Vertex>> loadPlayerMeshFromGltf(const std::filesystem::path& path, glm::vec3 color,
+                                                            int mirrorAxis = -1);
 
 } // namespace fgp

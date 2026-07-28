@@ -81,9 +81,15 @@ public:
 
 private:
     void updateVectors();
+    // Ground-plane movement direction from input, relative to look direction
+    // (front_/right_ flattened to XZ) — shared by Walking and Ragball since
+    // both steer the same way, they just apply the result differently
+    // (direct velocity vs. accelerate-toward).
+    glm::vec3 wishDirection(const PlayerInput& input) const;
     void updateWalking(const PlayerInput& input, float dt, const World& world);
     void updateRagball(const PlayerInput& input, float dt, const World& world);
     void updateBodyOrientation(float dt);
+    void updateFacingOrientation();
     void respawnIfBelowKillPlane(const World& world);
 
     glm::vec3 position_; // feet

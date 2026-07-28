@@ -82,19 +82,28 @@ glm::vec3 Player::bodyCenter() const {
 
 void Player::update(const PlayerInput& input, float dt, const World& world) {
     if (mode_ == PlayerMode::Walking) {
+        // No walk animation yet, so the body doesn't roll with movement
+        // (that's a Ragball-only look, see updateBodyOrientation) — it
+        // just turns to keep facing the camera's look direction and
+        // otherwise slides along the ground.
         updateWalking(input, dt, world);
+        updateFacingOrientation();
     } else {
         updateRagball(input, dt, world);
+        updateBodyOrientation(dt);
     }
 
-    updateBodyOrientation(dt);
     respawnIfBelowKillPlane(world);
 }
 
-void Player::updateWalking(const PlayerInput& input, float dt, const World& world) {
+glm::vec3 Player::wishDirection(const PlayerInput& input) const {
     const glm::vec3 flatFront = glm::normalize(glm::vec3(front_.x, 0.0f, front_.z));
     const glm::vec3 flatRight = glm::normalize(glm::vec3(right_.x, 0.0f, right_.z));
-    const glm::vec3 wishDir = flatFront * input.moveAxis.y + flatRight * input.moveAxis.x;
+    return flatFront * input.moveAxis.y + flatRight * input.moveAxis.x;
+}
+
+void Player::updateWalking(const PlayerInput& input, float dt, const World& world) {
+    const glm::vec3 wishDir = wishDirection(input);
     const glm::vec3 wishVel =
         (glm::length(wishDir) > 1e-5f ? glm::normalize(wishDir) : glm::vec3(0.0f)) * walkSpeed;
 
@@ -118,9 +127,7 @@ void Player::updateWalking(const PlayerInput& input, float dt, const World& worl
 }
 
 void Player::updateRagball(const PlayerInput& input, float dt, const World& world) {
-    const glm::vec3 flatFront = glm::normalize(glm::vec3(front_.x, 0.0f, front_.z));
-    const glm::vec3 flatRight = glm::normalize(glm::vec3(right_.x, 0.0f, right_.z));
-    const glm::vec3 wishDir = flatFront * input.moveAxis.y + flatRight * input.moveAxis.x;
+    const glm::vec3 wishDir = wishDirection(input);
 
     if (glm::length(wishDir) > 1e-5f) {
         velocity_ += glm::normalize(wishDir) * ragballAccel * dt;
@@ -162,6 +169,33 @@ void Player::updateBodyOrientation(float dt) {
     const glm::vec3 axis = glm::normalize(glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), horizVel));
     const float angle = speed * dt / bodyRadius();
     orientation_ = glm::angleAxis(angle, axis) * orientation_;
+}
+
+void Player::updateFacingOrientation() {
+    // playermodel_v1.glb has no walk animation, so all Walking does is yaw
+    // the whole body to keep facing the camera's look direction (not
+    // pitch — the body shouldn't tip forward/back when looking up/down).
+    //
+    // kPlayerModelFaceLocalDirection is the mesh's own chest-forward axis,
+    // in the local space loadPlayerMeshFromGltf's mirroring/recentering
+    // leaves it in (see PlayerMesh.hpp). It's a guess pending visual
+    // confirmation: with orientation_ at identity (no rotation at all),
+    // the left arm — not the chest — was observed pointing along local
+    // +Z, and an arm sticks out roughly perpendicular to the chest, so
+    // the chest direction is taken as +Z rotated 90 degrees around the up
+    // axis, i.e. local +X. If the body ends up facing sideways or
+    // backwards instead of forward, this is the constant to flip
+    // (try -X or -Z).
+    constexpr glm::vec3 kPlayerModelFaceLocalDirection(1.0f, 0.0f, 0.0f);
+
+    const glm::vec3 flatFront = glm::normalize(glm::vec3(front_.x, 0.0f, front_.z));
+
+    // Both vectors are flattened to the XZ plane, so aligning their
+    // atan2(x, z) angles is a pure yaw rotation — avoids hand-deriving
+    // glm::angleAxis's rotation-direction convention for this case.
+    const float faceAngle = std::atan2(kPlayerModelFaceLocalDirection.x, kPlayerModelFaceLocalDirection.z);
+    const float targetAngle = std::atan2(flatFront.x, flatFront.z);
+    orientation_ = glm::angleAxis(targetAngle - faceAngle, glm::vec3(0.0f, 1.0f, 0.0f));
 }
 
 void Player::respawnIfBelowKillPlane(const World& world) {

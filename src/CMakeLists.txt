@@ -23,6 +23,13 @@ find_package(Threads REQUIRED)
 target_link_libraries(fatguyphysics PRIVATE glfw glad glm::glm fastnoiselite stb_image cgltf Threads::Threads)
 fgp_set_warnings(fatguyphysics)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Suppressing X11 key autorepeat while focused (see main.cpp's
+    # setX11AutoRepeat) calls Xlib directly, not just through GLFW's API.
+    find_package(X11 REQUIRED)
+    target_link_libraries(fatguyphysics PRIVATE X11::X11)
+endif()
+
 if(WIN32)
     # Console output (std::cout) is convenient for a prototype; switch to
     # WIN32_EXECUTABLE once a real logging system replaces it.

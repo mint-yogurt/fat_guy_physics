@@ -12,7 +12,22 @@ objects have health and can be repaired/healed // e.g. a pumpkin is thrown, but 
 
 trees // trees are procgen and comprised of 2 sections, trunks and branches. branches are just bunches of green voxels, spawns sticks when destroyed or scooped. sticks can be lit on fire or built with. trunks, when broken, have the rest of the trunk fall over using the physics engine (which means it can break other stuff) further processing of trunks becomes logs, which can be turned into boards/planks/beams etc
 
+
+// materials/resources
+stone // building material, used as weight for physics stuff/contraptions
+wood // harvested from breaking up tree trunks. turned into wheels, plywood/2x4s/planks etcwron
+uranium // found deep under ground
+iron //
+clay // 
+sand // 
+fossil // dino-bones under ground. procudes oil when scooped/gathered. oil is used as fuel, and for crafting
+trash // found randomly scattered, also produced from eating candy. used in crafting when plastic is needed
+goo // found in puddles in the halloween biome, and from killing critters
+
+
+
 // items
+tape // made out of plastic and goo. use
 slingshot // shoots single voxel of material
 shovel // for flattening areas/heaping up material
 rope // made from either leaves or hair. can be tied to objects to manually pull, or tying objects together. can be cut manually or snap under too much force

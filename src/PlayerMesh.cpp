@@ -58,7 +58,8 @@ std::vector<Vertex> buildPlayerSphereMesh(glm::vec3 color, int latSegments, int 
     return vertices;
 }
 
-std::optional<std::vector<Vertex>> loadPlayerMeshFromGltf(const std::filesystem::path& path) {
+std::optional<std::vector<Vertex>> loadPlayerMeshFromGltf(const std::filesystem::path& path, glm::vec3 color,
+                                                            int mirrorAxis) {
     if (!std::filesystem::exists(path)) {
         return std::nullopt;
     }
@@ -117,26 +118,20 @@ std::optional<std::vector<Vertex>> loadPlayerMeshFromGltf(const std::filesystem:
                 continue;
             }
 
-            glm::vec3 color(1.0f);
-            if (prim.material != nullptr && prim.material->has_pbr_metallic_roughness) {
-                const cgltf_float* c = prim.material->pbr_metallic_roughness.base_color_factor;
-                color = glm::vec3(c[0], c[1], c[2]);
-            }
-
             const cgltf_size vertexCount = positionAccessor->count;
-            std::vector<glm::vec3> positions(vertexCount);
-            std::vector<glm::vec3> normals(vertexCount, glm::vec3(0.0f, 1.0f, 0.0f));
+            std::vector<glm::vec3> localPositions(vertexCount);
+            std::vector<glm::vec3> localNormals(vertexCount, glm::vec3(0.0f, 1.0f, 0.0f));
             std::vector<glm::vec2> uvs(vertexCount, glm::vec2(0.0f));
 
             for (cgltf_size v = 0; v < vertexCount; ++v) {
                 float p[3];
                 cgltf_accessor_read_float(positionAccessor, v, p, 3);
-                positions[v] = glm::vec3(worldMatrix * glm::vec4(p[0], p[1], p[2], 1.0f));
+                localPositions[v] = glm::vec3(p[0], p[1], p[2]);
 
                 if (normalAccessor != nullptr) {
                     float n[3];
                     cgltf_accessor_read_float(normalAccessor, v, n, 3);
-                    normals[v] = glm::normalize(normalMatrix * glm::vec3(n[0], n[1], n[2]));
+                    localNormals[v] = glm::vec3(n[0], n[1], n[2]);
                 }
                 if (uvAccessor != nullptr) {
                     float uv[2];
@@ -158,9 +153,35 @@ std::optional<std::vector<Vertex>> loadPlayerMeshFromGltf(const std::filesystem:
                 }
             }
 
-            vertices.reserve(vertices.size() + indices.size());
-            for (cgltf_uint index : indices) {
-                vertices.push_back({positions[index], color, uvs[index], normals[index]});
+            // Transforms one (position, normal) pair from local mesh space
+            // into world space and appends every indexed triangle vertex.
+            auto emit = [&](const std::vector<glm::vec3>& positionsLocal, const std::vector<glm::vec3>& normalsLocal) {
+                vertices.reserve(vertices.size() + indices.size());
+                for (cgltf_uint index : indices) {
+                    const glm::vec3 worldPosition = glm::vec3(worldMatrix * glm::vec4(positionsLocal[index], 1.0f));
+                    const glm::vec3 worldNormal = glm::normalize(normalMatrix * normalsLocal[index]);
+                    vertices.push_back({worldPosition, color, uvs[index], worldNormal});
+                }
+            };
+
+            emit(localPositions, localNormals);
+
+            if (mirrorAxis >= 0 && mirrorAxis <= 2) {
+                // Rebuilds the other half of a mesh authored with an
+                // unapplied Mirror modifier: reflect every vertex across
+                // the given axis in local mesh space (matching where the
+                // modifier itself would have generated geometry, before
+                // this node's own rotation/translation is applied below).
+                // Winding isn't flipped to match — main.cpp draws the
+                // player mesh with face culling disabled, so it doesn't
+                // matter which way the mirrored triangles wind.
+                std::vector<glm::vec3> mirroredPositions = localPositions;
+                std::vector<glm::vec3> mirroredNormals = localNormals;
+                for (cgltf_size v = 0; v < vertexCount; ++v) {
+                    mirroredPositions[v][mirrorAxis] *= -1.0f;
+                    mirroredNormals[v][mirrorAxis] *= -1.0f;
+                }
+                emit(mirroredPositions, mirroredNormals);
             }
         }
     }

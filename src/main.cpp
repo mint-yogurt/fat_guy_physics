@@ -10,6 +10,20 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#if defined(__linux__)
+// X11 key autorepeat delivers a continuous stream of synthetic KeyPress
+// events while a key is held — confirmed (via an XTest-driven repro
+// isolating this one variable) to starve out cursor-motion event delivery
+// on this system, causing look() to stop being called entirely for as
+// long as a movement key is held. Suppressing it while the game window
+// has focus, restoring it the instant that focus is lost (see
+// windowFocusCallback below), fixes that without touching the user's
+// desktop otherwise.
+#define GLFW_EXPOSE_NATIVE_X11
+#include <GLFW/glfw3native.h>
+#include <X11/Xlib.h>
+#endif
+
 #include "Camera.hpp"
 #include "Crosshair.hpp"
 #include "HudText.hpp"
@@ -88,6 +102,16 @@ fgp::Camera g_camera;
 float g_lastMouseX = kInitialWidth / 2.0f;
 float g_lastMouseY = kInitialHeight / 2.0f;
 bool g_firstMouse = true;
+// Accumulated here by cursorPosCallback (which can fire multiple times per
+// frame — GLFW drains its whole platform event queue on one glfwPollEvents()
+// call) and applied to the player exactly once per frame, right before
+// physics runs. This keeps look() off the event-pump's call stack entirely:
+// it used to run per-motion-event, so a frame with a burst of queued events
+// (e.g. after any stall) did several partial, non-atomic yaw/pitch updates
+// instead of one coherent one, and the fixed-timestep substep loop below
+// could see front_/right_ change mid-way through queued events it had
+// nothing to do with.
+glm::vec2 g_lookDelta(0.0f);
 float g_digCooldown = 0.0f;
 bool g_digAnchored = false;
 glm::vec3 g_digAnchorOrigin(0.0f);
@@ -117,6 +141,24 @@ void framebufferSizeCallback(GLFWwindow*, int width, int height) {
     glViewport(0, 0, width, height);
 }
 
+#if defined(__linux__)
+void setX11AutoRepeat(bool enabled) {
+    Display* display = glfwGetX11Display();
+    if (display == nullptr) {
+        return;
+    }
+    if (enabled) {
+        XAutoRepeatOn(display);
+    } else {
+        XAutoRepeatOff(display);
+    }
+}
+
+void windowFocusCallback(GLFWwindow*, int focused) {
+    setX11AutoRepeat(focused == GLFW_FALSE);
+}
+#endif
+
 void cursorPosCallback(GLFWwindow*, double xpos, double ypos) {
     if (g_firstMouse) {
         g_lastMouseX = static_cast<float>(xpos);
@@ -131,9 +173,11 @@ void cursorPosCallback(GLFWwindow*, double xpos, double ypos) {
     g_lastMouseY = static_cast<float>(ypos);
 
     // While the cursor is free (window-management mode), ordinary mouse
-    // movement over the client area shouldn't also spin the camera.
+    // movement over the client area shouldn't also spin the camera. Only
+    // accumulate here — see g_lookDelta's comment for why it's applied to
+    // the player once per frame instead of directly from this callback.
     if (!g_cursorFree) {
-        g_player.look(xOffset, yOffset);
+        g_lookDelta += glm::vec2(xOffset, yOffset);
     }
 }
 
@@ -323,8 +367,23 @@ int run() {
     // Starts free/visible (see g_cursorFree) — click into the viewport to
     // capture it for mouselook.
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    // Reads relative motion straight from the input device instead of
+    // GLFW's default warp-and-diff virtualization for disabled-cursor mode
+    // — more accurate in general. No-op whenever cursor mode isn't
+    // DISABLED, so it's safe to set once up front rather than toggling it
+    // alongside every GLFW_CURSOR change.
+    if (glfwRawMouseMotionSupported()) {
+        glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+    }
     glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
     glfwSetCursorPosCallback(window, cursorPosCallback);
+#if defined(__linux__)
+    // See setX11AutoRepeat's comment above. Exclusive fullscreen at launch
+    // means this window has focus immediately, so turn it off right away
+    // rather than waiting for a focus event that's already happened.
+    glfwSetWindowFocusCallback(window, windowFocusCallback);
+    setX11AutoRepeat(false);
+#endif
 
     if (!gladLoadGL(reinterpret_cast<GLADloadfunc>(glfwGetProcAddress))) {
         std::fprintf(stderr, "failed to load OpenGL via glad\n");
@@ -363,11 +422,18 @@ int run() {
         // Player body — see PlayerMesh.hpp. Uploaded once; a unit-radius,
         // origin-centered mesh is reused every frame via uModel (translate
         // * rotate * scale), same as chunks reuse their mesh via translate.
-        // Loads assets/meshes/player.glb if present, otherwise falls back
-        // to the placeholder sphere.
+        // Loads assets/meshes/playermodel_v1.glb if present, otherwise
+        // falls back to the placeholder sphere. Same body doubles as the
+        // ragball — the model has no animation yet, so both modes just
+        // reuse this static mesh with the rotation driven by physics.
         fgp::ChunkMesh playerMesh;
-        const std::filesystem::path playerMeshPath = fgp::executableDir() / "assets" / "meshes" / "player.glb";
-        if (auto loadedMesh = fgp::loadPlayerMeshFromGltf(playerMeshPath)) {
+        const std::filesystem::path playerMeshPath =
+            fgp::executableDir() / "assets" / "meshes" / "playermodel_v1.glb";
+        // mirrorAxis=2 (Z): the source mesh was authored with an unapplied
+        // Mirror modifier, so only half the body is in the file. Blender's
+        // Y (its mirror axis) becomes glTF/local Z under the standard
+        // Blender->glTF Z-up-to-Y-up axis conversion.
+        if (auto loadedMesh = fgp::loadPlayerMeshFromGltf(playerMeshPath, kPlayerBodyColor, /*mirrorAxis=*/2)) {
             playerMesh.upload(*loadedMesh);
         } else {
             playerMesh.upload(fgp::buildPlayerSphereMesh(kPlayerBodyColor));
@@ -397,6 +463,13 @@ int run() {
             }
 
             processNonMovementInput(window, frameTime, world);
+
+            // Apply this frame's accumulated look delta exactly once, before
+            // anything reads front_/right_ (movement input below, then
+            // physics) — see g_lookDelta's comment.
+            g_player.look(g_lookDelta.x, g_lookDelta.y);
+            g_lookDelta = glm::vec2(0.0f);
+
             const fgp::PlayerInput input = gatherPlayerInput(window);
 
             // Stream chunks around the player before stepping physics, so
@@ -504,6 +577,11 @@ int run() {
         }
     }
 
+#if defined(__linux__)
+    // Safety net in case the window closed without ever losing focus
+    // (the normal path — see windowFocusCallback).
+    setX11AutoRepeat(true);
+#endif
     glfwTerminate();
     return EXIT_SUCCESS;
 }
