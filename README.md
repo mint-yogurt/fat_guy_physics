@@ -71,5 +71,3 @@ See the [Development Roadmap](DESIGN.md#development-roadmap-readme-added-to-as-e
 
 Also added: first/third-person camera toggle (V), live FOV adjustment (-/=), per-face baked lighting (fixes flat/blended terrain shading), FPS/FOV/crosshair-distance HUD readout plus a worst-frame-time-per-second readout (WORST, in ms, unclamped/unsmoothed — for spotting stalls the heavily-smoothed FPS number can't show), click-to-capture mouse with fullscreen-by-default window (sidesteps window-manager resize/cursor-capture conflicts).
 
-Known issues (to revisit):
-- Player occasionally still gets stuck against a ledge or fails to jump over one — the step-up assist and jump/ground-probe timing have had two rounds of fixes but aren't fully reliable yet.
