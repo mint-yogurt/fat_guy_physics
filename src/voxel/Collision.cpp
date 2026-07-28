@@ -32,12 +32,21 @@ float sweepBoxAxis(const World& world, glm::vec3 minCorner, glm::vec3 maxCorner,
     const int otherA = (axis + 1) % 3;
     const int otherB = (axis + 2) % 3;
 
-    const glm::ivec3 voxMin(static_cast<int>(std::floor(sweptMin.x / kVoxelSize)),
-                             static_cast<int>(std::floor(sweptMin.y / kVoxelSize)),
-                             static_cast<int>(std::floor(sweptMin.z / kVoxelSize)));
-    const glm::ivec3 voxMax(static_cast<int>(std::ceil(sweptMax.x / kVoxelSize)) - 1,
-                             static_cast<int>(std::ceil(sweptMax.y / kVoxelSize)) - 1,
-                             static_cast<int>(std::ceil(sweptMax.z / kVoxelSize)) - 1);
+    // Bias the bounds inward by kEpsilon before floor/ceil: a resting position
+    // is expected to sit exactly on a voxel boundary (e.g. feet flush on a
+    // ground layer's top face), but repeated float accumulation (step-up
+    // lifts, gravity integration) drifts it a hair below the true value
+    // (6.8f can land as 6.79999589...). Un-biased floor()/ceil() then pulls
+    // in one extra voxel layer that's actually behind the box's own edge —
+    // for an upward sweep that means the ground the box is standing on gets
+    // scanned as if it were a ceiling ahead, via the same formula below,
+    // clamping all upward movement (jump, step-up headroom) to 0.
+    const glm::ivec3 voxMin(static_cast<int>(std::floor((sweptMin.x + kEpsilon) / kVoxelSize)),
+                             static_cast<int>(std::floor((sweptMin.y + kEpsilon) / kVoxelSize)),
+                             static_cast<int>(std::floor((sweptMin.z + kEpsilon) / kVoxelSize)));
+    const glm::ivec3 voxMax(static_cast<int>(std::ceil((sweptMax.x - kEpsilon) / kVoxelSize)) - 1,
+                             static_cast<int>(std::ceil((sweptMax.y - kEpsilon) / kVoxelSize)) - 1,
+                             static_cast<int>(std::ceil((sweptMax.z - kEpsilon) / kVoxelSize)) - 1);
 
     float allowed = delta;
 

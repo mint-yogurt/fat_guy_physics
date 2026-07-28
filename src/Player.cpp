@@ -15,7 +15,7 @@ namespace {
 constexpr float kGravity = -18.0f;
 constexpr float kGroundAccel = 30.0f;
 constexpr float kAirAccel = 8.0f;
-constexpr float kStepHeight = 0.31f; // a hair over 3 voxels
+constexpr float kStepHeight = 0.51f; // a hair over 5 voxels
 // Rolling friction: horizontal ragball speed decays at this rate (1/s)
 // while grounded, so the ball coasts down slopes but settles on flat
 // ground instead of sliding forever. Walking has no equivalent — ground
