@@ -69,10 +69,10 @@ constexpr float kFpsSmoothing = 0.1f;
 constexpr int kHudMarginX = 10;
 constexpr int kHudLineHeight = 28;
 
-// Fixed-timestep physics: chunk generation is synchronous (see World's
-// streaming comment) and can spike a frame by hundreds of ms. At 0.1m
-// voxels, integrating a big raw deltaTime in one step would tunnel the
-// player through terrain. Substepping at a small fixed dt bounds how far
+// Fixed-timestep physics: the initial full-radius chunk load is synchronous
+// (see World's streaming comment) and can spike a frame by hundreds of ms.
+// At 0.1m voxels, integrating a big raw deltaTime in one step would tunnel
+// the player through terrain. Substepping at a small fixed dt bounds how far
 // any single step can move regardless of frame time.
 constexpr float kFixedTimestep = 1.0f / 120.0f;
 constexpr float kMaxFrameTime = 0.1f;
@@ -101,6 +101,13 @@ bool g_escapeKeyWasDown = false;
 // movable on launch; a click into the viewport captures it for mouselook.
 bool g_cursorFree = true;
 float g_fpsSmoothed = 0.0f;
+// Worst *unclamped* frame time seen in the last second, in milliseconds.
+// The FPS readout above clamps to kMaxFrameTime and heavily smooths, so a
+// hitch that lasts a single frame barely moves it — this exists to actually
+// see stalls the FPS number can't show.
+float g_worstFrameMsInWindow = 0.0f;
+float g_worstFrameMsDisplay = 0.0f;
+float g_worstFrameWindowElapsed = 0.0f;
 // Defaults picked to be visible but not distracting; both are dialable
 // in-game with [ / ] (aberration) and ; / ' (bleed).
 float g_aberrationStrength = 0.0f;
@@ -340,6 +347,7 @@ int run() {
         fgp::Crosshair crosshair;
         fgp::HudText hudFov;
         fgp::HudText hudFps;
+        fgp::HudText hudWorst;
         fgp::HudText hudDist;
         fgp::HudText hudCa;
         fgp::HudText hudBleed;
@@ -363,13 +371,22 @@ int run() {
 
         while (!glfwWindowShouldClose(window)) {
             const float currentFrameTime = static_cast<float>(glfwGetTime());
-            const float frameTime = std::min(currentFrameTime - lastFrameTime, kMaxFrameTime);
+            const float rawFrameTime = currentFrameTime - lastFrameTime;
+            const float frameTime = std::min(rawFrameTime, kMaxFrameTime);
             lastFrameTime = currentFrameTime;
 
             if (frameTime > 0.0f) {
                 const float instantFps = 1.0f / frameTime;
                 g_fpsSmoothed = g_fpsSmoothed <= 0.0f ? instantFps
                                                        : glm::mix(g_fpsSmoothed, instantFps, kFpsSmoothing);
+            }
+
+            g_worstFrameMsInWindow = std::max(g_worstFrameMsInWindow, rawFrameTime * 1000.0f);
+            g_worstFrameWindowElapsed += frameTime;
+            if (g_worstFrameWindowElapsed >= 1.0f) {
+                g_worstFrameMsDisplay = g_worstFrameMsInWindow;
+                g_worstFrameMsInWindow = 0.0f;
+                g_worstFrameWindowElapsed = 0.0f;
             }
 
             processNonMovementInput(window, frameTime, world);
@@ -461,15 +478,17 @@ int run() {
 
             const std::string fovText = "FOV:" + std::to_string(static_cast<int>(std::lround(g_camera.fovDegrees)));
             const std::string fpsText = "FPS:" + std::to_string(static_cast<int>(std::lround(g_fpsSmoothed)));
+            const std::string worstText = "WORST:" + std::to_string(static_cast<int>(std::lround(g_worstFrameMsDisplay)));
             // CA/bleed are fractional (see their ranges above), so scale to
             // whole numbers for this digits-only-friendly HUD font.
             const std::string caText = "CA:" + std::to_string(static_cast<int>(std::lround(g_aberrationStrength * 1000.0f)));
             const std::string bleedText = "BLEED:" + std::to_string(static_cast<int>(std::lround(g_bleedStrength * 100.0f)));
             hudFov.draw(crosshairShader, fovText, width, height, kHudMarginX, kHudMarginX);
             hudFps.draw(crosshairShader, fpsText, width, height, kHudMarginX, kHudMarginX + kHudLineHeight);
-            hudDist.draw(crosshairShader, distText, width, height, kHudMarginX, kHudMarginX + 2 * kHudLineHeight);
-            hudCa.draw(crosshairShader, caText, width, height, kHudMarginX, kHudMarginX + 3 * kHudLineHeight);
-            hudBleed.draw(crosshairShader, bleedText, width, height, kHudMarginX, kHudMarginX + 4 * kHudLineHeight);
+            hudWorst.draw(crosshairShader, worstText, width, height, kHudMarginX, kHudMarginX + 2 * kHudLineHeight);
+            hudDist.draw(crosshairShader, distText, width, height, kHudMarginX, kHudMarginX + 3 * kHudLineHeight);
+            hudCa.draw(crosshairShader, caText, width, height, kHudMarginX, kHudMarginX + 4 * kHudLineHeight);
+            hudBleed.draw(crosshairShader, bleedText, width, height, kHudMarginX, kHudMarginX + 5 * kHudLineHeight);
             glEnable(GL_CULL_FACE);
             glEnable(GL_DEPTH_TEST);
 

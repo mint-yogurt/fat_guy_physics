@@ -315,8 +315,8 @@ std::vector<Vertex> buildBushMesh(std::uint32_t bushHash) {
 
 } // namespace
 
-VegetationBatch generateVegetation(const TerrainGenerator& generator, ChunkCoord coord, int seed) {
-    VegetationBatch batch;
+VegetationPlacementBatch generateVegetation(const TerrainGenerator& generator, ChunkCoord coord, int seed) {
+    VegetationPlacementBatch batch;
 
     const glm::ivec3 chunkOrigin = coord * kChunkSize;
     const auto uSeed = static_cast<std::uint32_t>(seed);
@@ -345,14 +345,10 @@ VegetationBatch generateVegetation(const TerrainGenerator& generator, ChunkCoord
 
             if (roll < kTreeChance) {
                 const std::uint32_t treeHash = hash32(static_cast<std::uint32_t>(worldX), static_cast<std::uint32_t>(worldZ), uSeed, 3);
-                auto mesh = std::make_unique<ChunkMesh>();
-                mesh->upload(buildTreeMesh(treeHash));
-                batch.trees.push_back(VegetationInstance{root, std::move(mesh)});
+                batch.trees.push_back(VegetationPlacement{root, buildTreeMesh(treeHash)});
             } else if (roll < kTreeChance + kBushChance) {
                 const std::uint32_t bushHash = hash32(static_cast<std::uint32_t>(worldX), static_cast<std::uint32_t>(worldZ), uSeed, 4);
-                auto mesh = std::make_unique<ChunkMesh>();
-                mesh->upload(buildBushMesh(bushHash));
-                batch.bushes.push_back(VegetationInstance{root, std::move(mesh)});
+                batch.bushes.push_back(VegetationPlacement{root, buildBushMesh(bushHash)});
             }
         }
     }

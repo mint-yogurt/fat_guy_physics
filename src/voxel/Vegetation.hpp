@@ -22,9 +22,19 @@ struct VegetationInstance {
     std::unique_ptr<ChunkMesh> mesh;
 };
 
-struct VegetationBatch {
-    std::vector<VegetationInstance> trees;
-    std::vector<VegetationInstance> bushes;
+// CPU-only counterpart to VegetationInstance: vertex data plus the origin
+// it should be translated to, without a GPU mesh attached yet. This is what
+// worker threads produce, since ChunkMesh's constructor makes GL calls and
+// GL is only valid on the main thread — the caller uploads each of these
+// into a real ChunkMesh once it's back on that thread.
+struct VegetationPlacement {
+    glm::vec3 origin;
+    std::vector<Vertex> vertices;
+};
+
+struct VegetationPlacementBatch {
+    std::vector<VegetationPlacement> trees;
+    std::vector<VegetationPlacement> bushes;
 };
 
 // Deterministically scatters trees/bushes across one chunk's column
@@ -36,6 +46,9 @@ struct VegetationBatch {
 // would spawn its own copy of the same tree. Each column's vegetation is
 // therefore only spawned by the one chunk layer whose Y range contains that
 // column's surface voxel; every other layer skips it.
-VegetationBatch generateVegetation(const TerrainGenerator& generator, ChunkCoord coord, int seed);
+//
+// Pure CPU work (noise + vertex generation, no GL calls), so this is safe
+// to call from a worker thread.
+VegetationPlacementBatch generateVegetation(const TerrainGenerator& generator, ChunkCoord coord, int seed);
 
 } // namespace fgp

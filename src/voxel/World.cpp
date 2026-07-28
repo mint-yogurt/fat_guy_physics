@@ -1,7 +1,7 @@
 #include "World.hpp"
 
+#include <algorithm>
 #include <cmath>
-#include <unordered_set>
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -9,21 +9,122 @@
 
 namespace fgp {
 
-World::World(int seed, int loadRadiusChunks) : generator_(seed), seed_(seed), loadRadiusChunks_(loadRadiusChunks) {}
+World::World(int seed, int loadRadiusChunks) : generator_(seed), seed_(seed), loadRadiusChunks_(loadRadiusChunks) {
+    const unsigned int hw = std::thread::hardware_concurrency();
+    const int workerCount = std::max(1, static_cast<int>(hw) - 1);
+    workers_.reserve(static_cast<std::size_t>(workerCount));
+    for (int i = 0; i < workerCount; ++i) {
+        workers_.emplace_back([this] { workerLoop(); });
+    }
+}
 
-void World::loadChunk(ChunkCoord coord) {
+World::~World() {
+    {
+        std::lock_guard<std::mutex> lock(jobMutex_);
+        stop_ = true;
+    }
+    jobCv_.notify_all();
+    for (std::thread& worker : workers_) {
+        worker.join();
+    }
+}
+
+World::ChunkLoadResult World::buildChunkLoadResult(ChunkCoord coord) const {
     auto chunk = std::make_unique<Chunk>(coord);
     generator_.generate(*chunk);
+    std::vector<Vertex> meshVertices = buildChunkMesh(*chunk);
+    VegetationPlacementBatch vegetation = generateVegetation(generator_, coord, seed_);
+    return ChunkLoadResult{coord, std::move(chunk), std::move(meshVertices), std::move(vegetation)};
+}
 
+void World::finalizeResult(ChunkLoadResult&& result) {
     auto mesh = std::make_unique<ChunkMesh>();
-    mesh->upload(buildChunkMesh(*chunk));
+    mesh->upload(result.meshVertices);
 
-    VegetationBatch vegetation = generateVegetation(generator_, coord, seed_);
+    std::vector<VegetationInstance> trees;
+    trees.reserve(result.vegetation.trees.size());
+    for (VegetationPlacement& placement : result.vegetation.trees) {
+        auto instanceMesh = std::make_unique<ChunkMesh>();
+        instanceMesh->upload(placement.vertices);
+        trees.push_back(VegetationInstance{placement.origin, std::move(instanceMesh)});
+    }
 
-    loaded_[coord] = LoadedChunk{std::move(chunk), std::move(mesh), std::move(vegetation.trees), std::move(vegetation.bushes)};
+    std::vector<VegetationInstance> bushes;
+    bushes.reserve(result.vegetation.bushes.size());
+    for (VegetationPlacement& placement : result.vegetation.bushes) {
+        auto instanceMesh = std::make_unique<ChunkMesh>();
+        instanceMesh->upload(placement.vertices);
+        bushes.push_back(VegetationInstance{placement.origin, std::move(instanceMesh)});
+    }
+
+    loaded_[result.coord] = LoadedChunk{std::move(result.chunk), std::move(mesh), std::move(trees), std::move(bushes)};
+}
+
+void World::submitJob(ChunkCoord coord) {
+    inFlight_.insert(coord);
+    {
+        std::lock_guard<std::mutex> lock(jobMutex_);
+        jobQueue_.push_back(coord);
+    }
+    jobCv_.notify_one();
+}
+
+void World::workerLoop() {
+    while (true) {
+        ChunkCoord coord;
+        {
+            std::unique_lock<std::mutex> lock(jobMutex_);
+            jobCv_.wait(lock, [this] { return stop_ || !jobQueue_.empty(); });
+            if (stop_) {
+                // Exiting: bail immediately rather than draining whatever's
+                // still queued — nobody needs those results anymore, and
+                // waiting for them would stall shutdown.
+                return;
+            }
+            coord = jobQueue_.front();
+            jobQueue_.pop_front();
+        }
+
+        ChunkLoadResult result = buildChunkLoadResult(coord);
+
+        std::lock_guard<std::mutex> lock(resultMutex_);
+        results_.push_back(std::move(result));
+    }
+}
+
+void World::drainCompleted() {
+    int budget = kMaxMeshUploadsPerFrame;
+    while (budget > 0) {
+        ChunkLoadResult result;
+        {
+            std::lock_guard<std::mutex> lock(resultMutex_);
+            if (results_.empty()) {
+                return;
+            }
+            result = std::move(results_.front());
+            results_.pop_front();
+        }
+
+        inFlight_.erase(result.coord);
+        if (desired_.find(result.coord) == desired_.end()) {
+            // Player moved away from this coord before the worker finished
+            // it — drop it rather than uploading terrain nobody needs.
+            continue;
+        }
+
+        const int meshCount =
+            1 + static_cast<int>(result.vegetation.trees.size()) + static_cast<int>(result.vegetation.bushes.size());
+        finalizeResult(std::move(result));
+        budget -= meshCount;
+    }
 }
 
 void World::update(glm::vec3 cameraWorldPos) {
+    // Must run every frame regardless of whether the chunk center moved —
+    // otherwise finished background loads sit in the queue until the next
+    // boundary crossing and the world looks like it stopped streaming.
+    drainCompleted();
+
     const float chunkWorldSize = static_cast<float>(kChunkSize) * kVoxelSize;
     const int centerX = static_cast<int>(std::floor(cameraWorldPos.x / chunkWorldSize));
     const int centerZ = static_cast<int>(std::floor(cameraWorldPos.z / chunkWorldSize));
@@ -31,11 +132,12 @@ void World::update(glm::vec3 cameraWorldPos) {
     if (hasCenter_ && centerX == centerX_ && centerZ == centerZ_) {
         return;
     }
+    const bool isInitialLoad = !hasCenter_;
     hasCenter_ = true;
     centerX_ = centerX;
     centerZ_ = centerZ;
 
-    std::unordered_set<ChunkCoord, ChunkCoordHash> desired;
+    desired_.clear();
     const int radiusSq = loadRadiusChunks_ * loadRadiusChunks_;
     for (int dx = -loadRadiusChunks_; dx <= loadRadiusChunks_; ++dx) {
         for (int dz = -loadRadiusChunks_; dz <= loadRadiusChunks_; ++dz) {
@@ -43,22 +145,33 @@ void World::update(glm::vec3 cameraWorldPos) {
                 continue;
             }
             for (int cy = kVerticalChunkMin; cy <= kVerticalChunkMax; ++cy) {
-                desired.insert(ChunkCoord(centerX + dx, cy, centerZ + dz));
+                desired_.insert(ChunkCoord(centerX + dx, cy, centerZ + dz));
             }
         }
     }
 
     for (auto it = loaded_.begin(); it != loaded_.end();) {
-        if (desired.find(it->first) == desired.end()) {
+        if (desired_.find(it->first) == desired_.end()) {
             it = loaded_.erase(it);
         } else {
             ++it;
         }
     }
 
-    for (const ChunkCoord& coord : desired) {
-        if (loaded_.find(coord) == loaded_.end()) {
-            loadChunk(coord);
+    if (isInitialLoad) {
+        // First-ever load: main.cpp streams chunks before stepping physics
+        // this frame (see its call site), and there's no previously-loaded
+        // terrain to show while an async load catches up, so this one pass
+        // stays synchronous exactly like the old single-threaded path.
+        for (const ChunkCoord& coord : desired_) {
+            finalizeResult(buildChunkLoadResult(coord));
+        }
+        return;
+    }
+
+    for (const ChunkCoord& coord : desired_) {
+        if (loaded_.find(coord) == loaded_.end() && inFlight_.find(coord) == inFlight_.end()) {
+            submitJob(coord);
         }
     }
 }

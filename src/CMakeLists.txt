@@ -19,7 +19,8 @@ add_executable(fatguyphysics
     voxel/Collision.cpp
 )
 
-target_link_libraries(fatguyphysics PRIVATE glfw glad glm::glm fastnoiselite stb_image)
+find_package(Threads REQUIRED)
+target_link_libraries(fatguyphysics PRIVATE glfw glad glm::glm fastnoiselite stb_image Threads::Threads)
 fgp_set_warnings(fatguyphysics)
 
 if(WIN32)
