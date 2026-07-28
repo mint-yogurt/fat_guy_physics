@@ -4,6 +4,7 @@ add_executable(fatguyphysics
     Player.cpp
     PlayerMesh.cpp
     Shader.cpp
+    PostProcess.cpp
     Paths.cpp
     Crosshair.cpp
     HudText.cpp

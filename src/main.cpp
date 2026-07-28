@@ -16,6 +16,7 @@
 #include "Paths.hpp"
 #include "Player.hpp"
 #include "PlayerMesh.hpp"
+#include "PostProcess.hpp"
 #include "Shader.hpp"
 #include "Texture.hpp"
 #include "voxel/ChunkMesh.hpp"
@@ -27,21 +28,34 @@ namespace {
 constexpr int kInitialWidth = 640;
 constexpr int kInitialHeight = 360;
 
-constexpr float kDigTickSeconds = 0.15f;
+constexpr float kDigTickSeconds = 0.35f;
 constexpr float kDigReachMeters = 5.0f;
 constexpr float kDigRadiusMeters = 0.35f;
 
-// Bare-handed digging (no shovel/tool exists yet) ramps up to the full
-// scoop radius over a few ticks of holding still on the same spot, rather
-// than instantly carving the full hole — a shovel would presumably reach
-// full radius on tick one; hands shouldn't.
-constexpr int kDigTicksToFullRadius = 3;
-constexpr float kDigStreakPositionEpsilon = 0.01f; // meters
-constexpr float kDigStreakDirectionEpsilon = 0.999f; // cos(angle); ~2.6 degrees
+// A scoop is a single gesture, not a continuous stream: re-raycasting every
+// tick made the dig point creep deeper along the view ray as each tick
+// cleared the voxels the previous raycast had stopped at, drilling a tunnel
+// instead of hollowing out one spot. So the aim is latched once per gesture
+// and only re-raycast once it drifts past these thresholds — small holding
+// jitter keeps re-targeting the same already-carved spot, which is a no-op.
+constexpr float kDigReanchorPositionEpsilon = 0.05f; // meters
+constexpr float kDigReanchorDirectionEpsilon = 0.995f; // cos(angle); ~5.7 degrees
 
 constexpr float kFovAdjustDegreesPerSecond = 40.0f;
 constexpr float kMinFovDegrees = 30.0f;
 constexpr float kMaxFovDegrees = 120.0f;
+
+// Chromatic aberration offset is in UV space (fraction of screen), so its
+// useful range is tiny; color bleed is an additive strength on top of the
+// mip-blurred scene, so it can run higher before washing the image out.
+// Both sweep their full range in ~2 seconds of holding the key, matching
+// the FOV adjustment's feel above.
+constexpr float kAberrationAdjustPerSecond = 0.01f;
+constexpr float kMinAberration = 0.0f;
+constexpr float kMaxAberration = 0.02f;
+constexpr float kBleedAdjustPerSecond = 0.5f;
+constexpr float kMinBleed = 0.0f;
+constexpr float kMaxBleed = 1.0f;
 
 // How far out the crosshair-distance HUD readout looks for something to
 // report on; matches the projection's far clip plane so it can report
@@ -75,9 +89,9 @@ float g_lastMouseX = kInitialWidth / 2.0f;
 float g_lastMouseY = kInitialHeight / 2.0f;
 bool g_firstMouse = true;
 float g_digCooldown = 0.0f;
-int g_digStreakTicks = 0;
-glm::vec3 g_digStreakOrigin(0.0f);
-glm::vec3 g_digStreakDirection(0.0f, 0.0f, -1.0f);
+bool g_digAnchored = false;
+glm::vec3 g_digAnchorOrigin(0.0f);
+glm::vec3 g_digAnchorDirection(0.0f, 0.0f, -1.0f);
 bool g_ragballKeyWasDown = false;
 bool g_perspectiveKeyWasDown = false;
 bool g_cursorFreeKeyWasDown = false;
@@ -87,6 +101,10 @@ bool g_escapeKeyWasDown = false;
 // movable on launch; a click into the viewport captures it for mouselook.
 bool g_cursorFree = true;
 float g_fpsSmoothed = 0.0f;
+// Defaults picked to be visible but not distracting; both are dialable
+// in-game with [ / ] (aberration) and ; / ' (bleed).
+float g_aberrationStrength = 0.0f;
+float g_bleedStrength = 0.12f;
 
 void framebufferSizeCallback(GLFWwindow*, int width, int height) {
     glViewport(0, 0, width, height);
@@ -193,6 +211,24 @@ void processNonMovementInput(GLFWwindow* window, float deltaTime, fgp::World& wo
         g_camera.fovDegrees += kFovAdjustDegreesPerSecond * deltaTime;
     }
     g_camera.fovDegrees = std::clamp(g_camera.fovDegrees, kMinFovDegrees, kMaxFovDegrees);
+
+    // '['/']' dial chromatic aberration, ';'/''' dial color bleed — same
+    // hold-to-adjust convention as FOV above, on keys FOV isn't already using.
+    if (glfwGetKey(window, GLFW_KEY_LEFT_BRACKET) == GLFW_PRESS) {
+        g_aberrationStrength -= kAberrationAdjustPerSecond * deltaTime;
+    }
+    if (glfwGetKey(window, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) {
+        g_aberrationStrength += kAberrationAdjustPerSecond * deltaTime;
+    }
+    g_aberrationStrength = std::clamp(g_aberrationStrength, kMinAberration, kMaxAberration);
+
+    if (glfwGetKey(window, GLFW_KEY_SEMICOLON) == GLFW_PRESS) {
+        g_bleedStrength -= kBleedAdjustPerSecond * deltaTime;
+    }
+    if (glfwGetKey(window, GLFW_KEY_APOSTROPHE) == GLFW_PRESS) {
+        g_bleedStrength += kBleedAdjustPerSecond * deltaTime;
+    }
+    g_bleedStrength = std::clamp(g_bleedStrength, kMinBleed, kMaxBleed);
     if (consumeKeyPress(window, GLFW_KEY_R, g_ragballKeyWasDown)) {
         g_player.toggleMode(world);
         // Ragball defaults to third-person (seeing the ball roll is the
@@ -214,29 +250,30 @@ void processNonMovementInput(GLFWwindow* window, float deltaTime, fgp::World& wo
             const glm::vec3 origin = g_player.eyePosition();
             const glm::vec3 direction = g_player.front();
 
-            const bool sameSpot = g_digStreakTicks > 0 &&
-                                   glm::distance(origin, g_digStreakOrigin) <= kDigStreakPositionEpsilon &&
-                                   glm::dot(direction, g_digStreakDirection) >= kDigStreakDirectionEpsilon;
-            g_digStreakTicks = sameSpot ? std::min(g_digStreakTicks + 1, kDigTicksToFullRadius) : 1;
-            g_digStreakOrigin = origin;
-            g_digStreakDirection = direction;
-
-            const auto hit = fgp::raycastVoxel(world, origin, direction, kDigReachMeters);
-            if (hit) {
-                const glm::vec3 hitCenter = (glm::vec3(*hit) + 0.5f) * fgp::kVoxelSize;
-                const float radius =
-                    kDigRadiusMeters * static_cast<float>(g_digStreakTicks) / static_cast<float>(kDigTicksToFullRadius);
-                world.digSphere(hitCenter, radius);
+            const bool sameAnchor = g_digAnchored &&
+                                     glm::distance(origin, g_digAnchorOrigin) <= kDigReanchorPositionEpsilon &&
+                                     glm::dot(direction, g_digAnchorDirection) >= kDigReanchorDirectionEpsilon;
+            if (!sameAnchor) {
+                const auto hit = fgp::raycastVoxel(world, origin, direction, kDigReachMeters);
+                if (hit) {
+                    g_digAnchored = true;
+                    g_digAnchorOrigin = origin;
+                    g_digAnchorDirection = direction;
+                    const glm::vec3 hitCenter = (glm::vec3(*hit) + 0.5f) * fgp::kVoxelSize;
+                    world.digSphere(hitCenter, kDigRadiusMeters);
+                } else {
+                    g_digAnchored = false;
+                }
             }
             g_digCooldown = kDigTickSeconds;
         }
     } else {
-        // A quick tap must always produce exactly one (small, first-tick)
-        // scoop; resetting to 0 (rather than letting the cooldown run
-        // negative) also stops a release-then-repress from firing a
-        // queued burst of digs. Releasing also resets the ramp-up streak.
+        // Resetting to 0 (rather than letting the cooldown run negative)
+        // stops a release-then-repress from firing a queued burst of digs.
+        // Releasing also drops the anchor so the next press always starts a
+        // fresh gesture.
         g_digCooldown = 0.0f;
-        g_digStreakTicks = 0;
+        g_digAnchored = false;
     }
 }
 
@@ -298,10 +335,14 @@ int run() {
         const std::filesystem::path shaderDir = fgp::executableDir() / "assets" / "shaders";
         fgp::Shader shader(shaderDir / "basic.vert", shaderDir / "basic.frag");
         fgp::Shader crosshairShader(shaderDir / "crosshair.vert", shaderDir / "crosshair.frag");
+        fgp::Shader postProcessShader(shaderDir / "postprocess.vert", shaderDir / "postprocess.frag");
+        fgp::PostProcess postProcess;
         fgp::Crosshair crosshair;
         fgp::HudText hudFov;
         fgp::HudText hudFps;
         fgp::HudText hudDist;
+        fgp::HudText hudCa;
+        fgp::HudText hudBleed;
 
         fgp::Texture cobbleTexture(fgp::executableDir() / "assets" / "textures" / "cobble.png");
         fgp::Texture whiteTexture(fgp::executableDir() / "assets" / "textures" / "white.png");
@@ -353,13 +394,19 @@ int run() {
 
             g_camera.sync(g_player, world);
 
-            glClearColor(0.53f, 0.72f, 0.86f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
             int width = 0;
             int height = 0;
             glfwGetFramebufferSize(window, &width, &height);
             const float aspect = height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+
+            // The 3D scene renders into an offscreen target so the
+            // chromatic-aberration/color-bleed composite pass below can
+            // distort it as a whole; screen-space UI (crosshair, HUD) draws
+            // straight to the default framebuffer afterwards, undistorted.
+            postProcess.begin(width, height);
+
+            glClearColor(0.53f, 0.72f, 0.86f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
             const glm::mat4 view = g_camera.viewMatrix();
             const glm::mat4 projection = glm::perspective(glm::radians(g_camera.fovDegrees), aspect, 0.1f, 100.0f);
@@ -391,6 +438,11 @@ int run() {
                 glEnable(GL_CULL_FACE);
             }
 
+            // Composite the offscreen scene back to the default framebuffer
+            // with chromatic aberration + color bleed applied, before any
+            // undistorted screen-space UI draws on top of it.
+            postProcess.end(postProcessShader, g_aberrationStrength, g_bleedStrength);
+
             glDisable(GL_DEPTH_TEST);
             // HudText's screen-space quads aren't wound consistently with GL's
             // default CCW front face, so without this they get silently
@@ -409,9 +461,15 @@ int run() {
 
             const std::string fovText = "FOV:" + std::to_string(static_cast<int>(std::lround(g_camera.fovDegrees)));
             const std::string fpsText = "FPS:" + std::to_string(static_cast<int>(std::lround(g_fpsSmoothed)));
+            // CA/bleed are fractional (see their ranges above), so scale to
+            // whole numbers for this digits-only-friendly HUD font.
+            const std::string caText = "CA:" + std::to_string(static_cast<int>(std::lround(g_aberrationStrength * 1000.0f)));
+            const std::string bleedText = "BLEED:" + std::to_string(static_cast<int>(std::lround(g_bleedStrength * 100.0f)));
             hudFov.draw(crosshairShader, fovText, width, height, kHudMarginX, kHudMarginX);
             hudFps.draw(crosshairShader, fpsText, width, height, kHudMarginX, kHudMarginX + kHudLineHeight);
             hudDist.draw(crosshairShader, distText, width, height, kHudMarginX, kHudMarginX + 2 * kHudLineHeight);
+            hudCa.draw(crosshairShader, caText, width, height, kHudMarginX, kHudMarginX + 3 * kHudLineHeight);
+            hudBleed.draw(crosshairShader, bleedText, width, height, kHudMarginX, kHudMarginX + 4 * kHudLineHeight);
             glEnable(GL_CULL_FACE);
             glEnable(GL_DEPTH_TEST);
 
