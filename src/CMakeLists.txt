@@ -20,7 +20,7 @@ add_executable(fatguyphysics
 )
 
 find_package(Threads REQUIRED)
-target_link_libraries(fatguyphysics PRIVATE glfw glad glm::glm fastnoiselite stb_image Threads::Threads)
+target_link_libraries(fatguyphysics PRIVATE glfw glad glm::glm fastnoiselite stb_image cgltf Threads::Threads)
 fgp_set_warnings(fatguyphysics)
 
 if(WIN32)

@@ -360,11 +360,18 @@ int run() {
 
         fgp::World world(/*seed=*/1337);
 
-        // Placeholder player body — see PlayerMesh.hpp. Uploaded once; a
-        // unit sphere is reused every frame via uModel (translate * rotate
-        // * scale), same as chunks reuse their mesh via translate.
+        // Player body — see PlayerMesh.hpp. Uploaded once; a unit-radius,
+        // origin-centered mesh is reused every frame via uModel (translate
+        // * rotate * scale), same as chunks reuse their mesh via translate.
+        // Loads assets/meshes/player.glb if present, otherwise falls back
+        // to the placeholder sphere.
         fgp::ChunkMesh playerMesh;
-        playerMesh.upload(fgp::buildPlayerSphereMesh(kPlayerBodyColor));
+        const std::filesystem::path playerMeshPath = fgp::executableDir() / "assets" / "meshes" / "player.glb";
+        if (auto loadedMesh = fgp::loadPlayerMeshFromGltf(playerMeshPath)) {
+            playerMesh.upload(*loadedMesh);
+        } else {
+            playerMesh.upload(fgp::buildPlayerSphereMesh(kPlayerBodyColor));
+        }
 
         float lastFrameTime = static_cast<float>(glfwGetTime());
         float accumulator = 0.0f;

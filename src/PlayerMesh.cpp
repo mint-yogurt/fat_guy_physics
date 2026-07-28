@@ -1,6 +1,10 @@
 #include "PlayerMesh.hpp"
 
+#include <algorithm>
 #include <cmath>
+
+#include <cgltf.h>
+#include <glm/gtc/type_ptr.hpp>
 
 namespace fgp {
 
@@ -49,6 +53,143 @@ std::vector<Vertex> buildPlayerSphereMesh(glm::vec3 color, int latSegments, int 
             vertices.push_back({p11, color, uv11, p11});
             vertices.push_back({p01, color, uv01, p01});
         }
+    }
+
+    return vertices;
+}
+
+std::optional<std::vector<Vertex>> loadPlayerMeshFromGltf(const std::filesystem::path& path) {
+    if (!std::filesystem::exists(path)) {
+        return std::nullopt;
+    }
+
+    cgltf_options options{};
+    cgltf_data* data = nullptr;
+    if (cgltf_parse_file(&options, path.string().c_str(), &data) != cgltf_result_success) {
+        return std::nullopt;
+    }
+    // Resolves and reads external/embedded buffers referenced by accessors;
+    // without this, accessor reads below would see null data even though
+    // parsing itself succeeded.
+    if (cgltf_load_buffers(&options, data, path.string().c_str()) != cgltf_result_success) {
+        cgltf_free(data);
+        return std::nullopt;
+    }
+
+    std::vector<Vertex> vertices;
+
+    // Iterate every node with a mesh directly (rather than walking the
+    // scene graph) so nothing is missed if a node isn't reachable from the
+    // default scene; cgltf_node_transform_world walks each node's own
+    // ancestor chain regardless of which scene(s) reference it.
+    for (cgltf_size nodeIdx = 0; nodeIdx < data->nodes_count; ++nodeIdx) {
+        const cgltf_node& node = data->nodes[nodeIdx];
+        if (node.mesh == nullptr) {
+            continue;
+        }
+
+        float worldMatrixArr[16];
+        cgltf_node_transform_world(&node, worldMatrixArr);
+        const glm::mat4 worldMatrix = glm::make_mat4(worldMatrixArr);
+        const glm::mat3 normalMatrix = glm::mat3(worldMatrix);
+
+        const cgltf_mesh& mesh = *node.mesh;
+        for (cgltf_size primIdx = 0; primIdx < mesh.primitives_count; ++primIdx) {
+            const cgltf_primitive& prim = mesh.primitives[primIdx];
+            if (prim.type != cgltf_primitive_type_triangles) {
+                continue;
+            }
+
+            const cgltf_accessor* positionAccessor = nullptr;
+            const cgltf_accessor* normalAccessor = nullptr;
+            const cgltf_accessor* uvAccessor = nullptr;
+            for (cgltf_size attrIdx = 0; attrIdx < prim.attributes_count; ++attrIdx) {
+                const cgltf_attribute& attr = prim.attributes[attrIdx];
+                if (attr.type == cgltf_attribute_type_position) {
+                    positionAccessor = attr.data;
+                } else if (attr.type == cgltf_attribute_type_normal) {
+                    normalAccessor = attr.data;
+                } else if (attr.type == cgltf_attribute_type_texcoord && attr.index == 0) {
+                    uvAccessor = attr.data;
+                }
+            }
+            if (positionAccessor == nullptr) {
+                continue;
+            }
+
+            glm::vec3 color(1.0f);
+            if (prim.material != nullptr && prim.material->has_pbr_metallic_roughness) {
+                const cgltf_float* c = prim.material->pbr_metallic_roughness.base_color_factor;
+                color = glm::vec3(c[0], c[1], c[2]);
+            }
+
+            const cgltf_size vertexCount = positionAccessor->count;
+            std::vector<glm::vec3> positions(vertexCount);
+            std::vector<glm::vec3> normals(vertexCount, glm::vec3(0.0f, 1.0f, 0.0f));
+            std::vector<glm::vec2> uvs(vertexCount, glm::vec2(0.0f));
+
+            for (cgltf_size v = 0; v < vertexCount; ++v) {
+                float p[3];
+                cgltf_accessor_read_float(positionAccessor, v, p, 3);
+                positions[v] = glm::vec3(worldMatrix * glm::vec4(p[0], p[1], p[2], 1.0f));
+
+                if (normalAccessor != nullptr) {
+                    float n[3];
+                    cgltf_accessor_read_float(normalAccessor, v, n, 3);
+                    normals[v] = glm::normalize(normalMatrix * glm::vec3(n[0], n[1], n[2]));
+                }
+                if (uvAccessor != nullptr) {
+                    float uv[2];
+                    cgltf_accessor_read_float(uvAccessor, v, uv, 2);
+                    uvs[v] = glm::vec2(uv[0], uv[1]);
+                }
+            }
+
+            std::vector<cgltf_uint> indices;
+            if (prim.indices != nullptr) {
+                indices.resize(prim.indices->count);
+                cgltf_accessor_unpack_indices(prim.indices, indices.data(), sizeof(cgltf_uint), indices.size());
+            } else {
+                // Non-indexed primitive: positions are already in
+                // draw-order triangle triples.
+                indices.resize(vertexCount);
+                for (cgltf_size i = 0; i < vertexCount; ++i) {
+                    indices[i] = static_cast<cgltf_uint>(i);
+                }
+            }
+
+            vertices.reserve(vertices.size() + indices.size());
+            for (cgltf_uint index : indices) {
+                vertices.push_back({positions[index], color, uvs[index], normals[index]});
+            }
+        }
+    }
+
+    cgltf_free(data);
+
+    if (vertices.empty()) {
+        return std::nullopt;
+    }
+
+    // Recenter on the bounding-box center and rescale to a unit-radius
+    // bounding sphere — see the header comment for why this has to match
+    // buildPlayerSphereMesh's contract.
+    glm::vec3 boundsMin = vertices.front().position;
+    glm::vec3 boundsMax = vertices.front().position;
+    for (const Vertex& vertex : vertices) {
+        boundsMin = glm::min(boundsMin, vertex.position);
+        boundsMax = glm::max(boundsMax, vertex.position);
+    }
+    const glm::vec3 center = (boundsMin + boundsMax) * 0.5f;
+
+    float maxDistance = 0.0f;
+    for (const Vertex& vertex : vertices) {
+        maxDistance = std::max(maxDistance, glm::length(vertex.position - center));
+    }
+    const float scale = maxDistance > 0.0f ? 1.0f / maxDistance : 1.0f;
+
+    for (Vertex& vertex : vertices) {
+        vertex.position = (vertex.position - center) * scale;
     }
 
     return vertices;
