@@ -3,14 +3,17 @@ add_executable(fatguyphysics
     Camera.cpp
     Shader.cpp
     Paths.cpp
+    Crosshair.cpp
+    Texture.cpp
     voxel/Voxel.cpp
     voxel/ChunkMesher.cpp
     voxel/ChunkMesh.cpp
     voxel/TerrainGenerator.cpp
     voxel/World.cpp
+    voxel/VoxelRaycast.cpp
 )
 
-target_link_libraries(fatguyphysics PRIVATE glfw glad glm::glm fastnoiselite)
+target_link_libraries(fatguyphysics PRIVATE glfw glad glm::glm fastnoiselite stb_image)
 fgp_set_warnings(fatguyphysics)
 
 if(WIN32)

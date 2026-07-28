@@ -16,6 +16,7 @@ public:
 
     void use() const;
     void setMat4(const char* name, const glm::mat4& value) const;
+    void setInt(const char* name, int value) const;
 
 private:
     unsigned int id_ = 0;

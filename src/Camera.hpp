@@ -17,6 +17,7 @@ public:
 
     glm::mat4 viewMatrix() const;
     glm::vec3 position() const { return position_; }
+    glm::vec3 front() const { return front_; }
 
     float fovDegrees = 70.0f;
     float moveSpeed = 5.0f;

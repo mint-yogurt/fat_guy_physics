@@ -1,18 +1,31 @@
+// engine
+    sound // thinking about build-in tiny synthesizer code, and in game sounds are just recipes to generate sounds thru synth engine. very basic sine/tri/square/noise with fm capabilities. everything from menu clicks to sound of trees breaking apart is all synthesized. this means we could do procgen music too, set a mode and key and just let it generate ambient music/sounds
+
 // physics/mechanics
-items can be thrown  // e.g. a shovel is thrown like a spear and sticks into a wooden board, but bounces off stone etc. 
+
+scoop // basic unarmed left mouse button move. removes voxel material from whatever is in range and aimed at. can break stuff like trees. picks up items
+good
+items can be thrown when held  // e.g. a shovel is thrown like a spear and sticks into a wooden board, but bounces off stone etc. 
 shirt represents player health // turns to rags lower hp you get
 
 objects have health and can be repaired/healed // e.g. a pumpkin is thrown, but doesnt break the first time just takes x damage (based on mass, velocity, and what it hit). a wood 2x4 same thing, but if you swing a hammer at it you can repair it
 
-// items
+trees // trees are procgen and comprised of 2 sections, trunks and branches. branches are just bunches of green voxels, spawns sticks when destroyed or scooped. sticks can be lit on fire or built with. trunks, when broken, have the rest of the trunk fall over using the physics engine (which means it can break other stuff) further processing of trunks becomes logs, which can be turned into boards/planks/beams etc
 
+// items
+slingshot // shoots single voxel of material
+shovel // for flattening areas/heaping up material
+meteor hammer // crafted using rope and idk something heavy. mid range voxel destroyer, rope can get tangled on stuff
+grappler // rope plus hook. used to pull items, reach high up areas, swing off of things like indiana jones
 
 
 // constructions
+toilet // entry for liquid physics, connects to pipes to push liquid
 trampoline
 catapult
 all manner of ramps/tubes/halfpipes
 riding mower "barn engine"
 ghetto backhoe
 roller coasters but for fat guy orbs
+launchpad // shoots objects straight upwards, requires fuel
 

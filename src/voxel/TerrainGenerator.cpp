@@ -21,8 +21,8 @@ int TerrainGenerator::surfaceHeight(int worldX, int worldZ) const {
 
 Material TerrainGenerator::materialForDepth(int depthBelowSurface) const {
     if (depthBelowSurface == 0) return Material::Dirt;
-    if (depthBelowSurface <= 3) return Material::Gravel;
-    if (depthBelowSurface <= 8) return Material::Rock;
+    if (depthBelowSurface <= 15) return Material::Gravel;
+    if (depthBelowSurface <= 24) return Material::Rock;
     return Material::Granite;
 }
 

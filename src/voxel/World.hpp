@@ -28,6 +28,14 @@ public:
 
     int surfaceHeightVoxels(int worldX, int worldZ) const { return generator_.surfaceHeight(worldX, worldZ); }
 
+    // Air for voxels in unloaded chunks, not just voxels that are actually Air.
+    Material materialAt(glm::ivec3 worldVoxel) const;
+
+    // Removes hand-diggable material within radiusMeters of centerWorld,
+    // skipping voxels in unloaded chunks (never force-loads), and re-meshes
+    // only the chunks actually touched.
+    void digSphere(glm::vec3 centerWorld, float radiusMeters);
+
 private:
     struct LoadedChunk {
         std::unique_ptr<Chunk> chunk;

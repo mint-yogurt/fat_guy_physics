@@ -54,3 +54,10 @@ See the [Development Roadmap](DESIGN.md#development-roadmap-readme-added-to-as-e
 - [x] Procedural generation (heightmap via layered/fractal Perlin noise)
 - [x] Meshing (greedy meshing, vertex-colored by material)
 - [x] Streaming (radius around the camera, load/unload on chunk-boundary crossing)
+
+### Phase 2 — Terrain editing
+
+- [x] Scoop mechanic (hold left mouse to dig a sphere at the crosshair; ramps up to full radius over a few ticks of holding still on one spot)
+- [x] Material hardness (bare-handed digging only removes soft materials; Rock/Granite/Ice need a future tool)
+- [x] Mesh regeneration (touched chunks re-meshed and re-uploaded in place after each dig)
+- [x] Collision updates (dig raycast reads live voxel data directly, no separate/stale collision structure)

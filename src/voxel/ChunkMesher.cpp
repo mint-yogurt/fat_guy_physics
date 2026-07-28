@@ -28,23 +28,34 @@ void emitQuad(std::vector<Vertex>& out, glm::ivec3 origin, glm::ivec3 du, glm::i
     const glm::vec3 c2 = glm::vec3(origin + du + dv) * kVoxelSize;
     const glm::vec3 c3 = glm::vec3(origin + dv) * kVoxelSize;
 
+    // du/dv have exactly one nonzero (positive) component each, equal to
+    // the quad's width/height in voxels; summing components extracts it.
+    // UV spans (0,0)-(w,h) so the texture tiles once per voxel via
+    // GL_REPEAT instead of stretching across a greedy-meshed quad.
+    const float w = static_cast<float>(du.x + du.y + du.z);
+    const float h = static_cast<float>(dv.x + dv.y + dv.z);
+    const glm::vec2 uv0(0.0f, 0.0f);
+    const glm::vec2 uv1(w, 0.0f);
+    const glm::vec2 uv2(w, h);
+    const glm::vec2 uv3(0.0f, h);
+
     // (u, v, d) is a cyclic permutation of (x, y, z), so cross(du, dv)
     // points in +d; frontFace quads keep that winding, backFace quads
     // reverse it so the visible normal points toward -d instead.
     if (!backFace) {
-        out.push_back({c0, color});
-        out.push_back({c1, color});
-        out.push_back({c2, color});
-        out.push_back({c0, color});
-        out.push_back({c2, color});
-        out.push_back({c3, color});
+        out.push_back({c0, color, uv0});
+        out.push_back({c1, color, uv1});
+        out.push_back({c2, color, uv2});
+        out.push_back({c0, color, uv0});
+        out.push_back({c2, color, uv2});
+        out.push_back({c3, color, uv3});
     } else {
-        out.push_back({c0, color});
-        out.push_back({c2, color});
-        out.push_back({c1, color});
-        out.push_back({c0, color});
-        out.push_back({c3, color});
-        out.push_back({c2, color});
+        out.push_back({c0, color, uv0});
+        out.push_back({c2, color, uv2});
+        out.push_back({c1, color, uv1});
+        out.push_back({c0, color, uv0});
+        out.push_back({c3, color, uv3});
+        out.push_back({c2, color, uv2});
     }
 }
 
