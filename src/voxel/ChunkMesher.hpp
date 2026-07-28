@@ -12,6 +12,7 @@ struct Vertex {
     glm::vec3 position;
     glm::vec3 color;
     glm::vec2 uv;
+    glm::vec3 normal;
 };
 
 // Builds a greedy-meshed vertex list for a single chunk, in chunk-local

@@ -4,7 +4,7 @@
 // physics/mechanics
 
 scoop // basic unarmed left mouse button move. removes voxel material from whatever is in range and aimed at. can break stuff like trees. picks up items
-good
+chup // basic unarmed right mouse button move. karate chop stuff. cuts ropes, tree trunks (takes many hits without a tool)4
 items can be thrown when held  // e.g. a shovel is thrown like a spear and sticks into a wooden board, but bounces off stone etc. 
 shirt represents player health // turns to rags lower hp you get
 
@@ -15,6 +15,7 @@ trees // trees are procgen and comprised of 2 sections, trunks and branches. bra
 // items
 slingshot // shoots single voxel of material
 shovel // for flattening areas/heaping up material
+rope // made from either leaves or hair. can be tied to objects to manually pull, or tying objects together. can be cut manually or snap under too much force
 meteor hammer // crafted using rope and idk something heavy. mid range voxel destroyer, rope can get tangled on stuff
 grappler // rope plus hook. used to pull items, reach high up areas, swing off of things like indiana jones
 
@@ -23,9 +24,27 @@ grappler // rope plus hook. used to pull items, reach high up areas, swing off o
 toilet // entry for liquid physics, connects to pipes to push liquid
 trampoline
 catapult
+watermelon slingshot
+parachute
 all manner of ramps/tubes/halfpipes
 riding mower "barn engine"
 ghetto backhoe
 roller coasters but for fat guy orbs
 launchpad // shoots objects straight upwards, requires fuel
+basketball
+
+
+// biomes
+halloween //
+    // lightning. dark like its night but can still see
+    // random chests are candy buckets
+    // pumpkins, dead trees, cobwebs, 
+    // build a frankenstein out of creep parts + bolts 
+    // procgen buildings are haunted houses, shacks and crypts. underground are tombs, crypts and laboratories
+
+
+
+christmas // 
+    // xmas trees (can harvest ornaments), snowmen of various sizesal
+    // chests are presents (chests with shit in them) 
 

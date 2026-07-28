@@ -1,49 +1,61 @@
 #include "Camera.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "Player.hpp"
+#include "voxel/Voxel.hpp"
+#include "voxel/World.hpp"
+
 namespace fgp {
 
-Camera::Camera(glm::vec3 position) : position_(position) {
-    updateVectors();
-}
+namespace {
 
-void Camera::move(CameraMove direction, float deltaTime) {
-    const float velocity = moveSpeed * deltaTime;
-    switch (direction) {
-        case CameraMove::Forward:  position_ += front_ * velocity; break;
-        case CameraMove::Backward: position_ -= front_ * velocity; break;
-        case CameraMove::Left:     position_ -= right_ * velocity; break;
-        case CameraMove::Right:    position_ += right_ * velocity; break;
-        case CameraMove::Up:       position_ += worldUp_ * velocity; break;
-        case CameraMove::Down:     position_ -= worldUp_ * velocity; break;
+constexpr float kThirdPersonCollisionMargin = 0.25f;
+constexpr float kThirdPersonSampleStep = 0.05f;
+constexpr float kThirdPersonMinDistance = 0.3f;
+
+// Walks a ray in small steps (cheaper than a real raycast to write given how
+// short third-person distances are) and returns how far it gets before
+// hitting solid terrain, or maxDistance if it doesn't.
+float clearDistance(const World& world, glm::vec3 origin, glm::vec3 direction, float maxDistance) {
+    for (float t = kThirdPersonSampleStep; t <= maxDistance; t += kThirdPersonSampleStep) {
+        const glm::vec3 sample = origin + direction * t;
+        const glm::ivec3 voxel(static_cast<int>(std::floor(sample.x / kVoxelSize)),
+                                static_cast<int>(std::floor(sample.y / kVoxelSize)),
+                                static_cast<int>(std::floor(sample.z / kVoxelSize)));
+        if (isSolid(world.materialAt(voxel))) {
+            return std::max(0.0f, t - kThirdPersonSampleStep);
+        }
     }
+    return maxDistance;
 }
 
-void Camera::look(float xOffset, float yOffset) {
-    yaw_ += xOffset * mouseSensitivity;
-    pitch_ += yOffset * mouseSensitivity;
-    pitch_ = std::clamp(pitch_, -89.0f, 89.0f);
-    updateVectors();
+} // namespace
+
+void Camera::sync(const Player& player, const World& world) {
+    const glm::vec3 eye = player.eyePosition();
+    // A point in front of the eye, not the eye itself — lookAt needs a
+    // non-degenerate eye/target pair, and third-person needs somewhere
+    // ahead of the player to actually look at.
+    target_ = eye + player.front();
+    up_ = player.up();
+
+    if (perspective_ == CameraPerspective::FirstPerson) {
+        position_ = eye;
+        return;
+    }
+
+    const glm::vec3 backward = -player.front();
+    const float clear = clearDistance(world, eye, backward, thirdPersonDistance);
+    const float distance = std::max(kThirdPersonMinDistance, clear - kThirdPersonCollisionMargin);
+    position_ = eye + backward * distance;
 }
 
 glm::mat4 Camera::viewMatrix() const {
-    return glm::lookAt(position_, position_ + front_, up_);
-}
-
-void Camera::updateVectors() {
-    const float yawRad = glm::radians(yaw_);
-    const float pitchRad = glm::radians(pitch_);
-
-    glm::vec3 direction;
-    direction.x = std::cos(yawRad) * std::cos(pitchRad);
-    direction.y = std::sin(pitchRad);
-    direction.z = std::sin(yawRad) * std::cos(pitchRad);
-    front_ = glm::normalize(direction);
-    right_ = glm::normalize(glm::cross(front_, worldUp_));
-    up_ = glm::normalize(glm::cross(right_, front_));
+    return glm::lookAt(position_, target_, up_);
 }
 
 } // namespace fgp

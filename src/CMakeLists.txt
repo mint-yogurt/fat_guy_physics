@@ -1,9 +1,12 @@
 add_executable(fatguyphysics
     main.cpp
     Camera.cpp
+    Player.cpp
+    PlayerMesh.cpp
     Shader.cpp
     Paths.cpp
     Crosshair.cpp
+    HudText.cpp
     Texture.cpp
     voxel/Voxel.cpp
     voxel/ChunkMesher.cpp
@@ -11,6 +14,7 @@ add_executable(fatguyphysics
     voxel/TerrainGenerator.cpp
     voxel/World.cpp
     voxel/VoxelRaycast.cpp
+    voxel/Collision.cpp
 )
 
 target_link_libraries(fatguyphysics PRIVATE glfw glad glm::glm fastnoiselite stb_image)

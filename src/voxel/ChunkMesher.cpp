@@ -21,8 +21,23 @@ Material materialAt(const Chunk& chunk, glm::ivec3 p) {
     return chunk.at(p.x, p.y, p.z);
 }
 
-void emitQuad(std::vector<Vertex>& out, glm::ivec3 origin, glm::ivec3 du, glm::ivec3 dv, bool backFace, Material material) {
-    const glm::vec3 color = materialColor(material);
+// Cheap static ambient occlusion: real shadow mapping is overkill for
+// blocky voxel terrain, so instead every face gets a fixed brightness
+// multiplier baked in at mesh-build time based only on which way it faces
+// (top brightest as if lit from the sky, bottom darkest, the two side pairs
+// split slightly apart for variety) — same trick Minecraft-style renderers
+// use to keep terrain readable at a distance without any runtime lighting
+// cost.
+float faceTint(int axis, bool backFace) {
+    if (axis == 1) {
+        return backFace ? 0.5f : 1.0f; // -Y (bottom) vs +Y (top)
+    }
+    return axis == 0 ? 0.65f : 0.8f; // X-facing vs Z-facing sides
+}
+
+void emitQuad(std::vector<Vertex>& out, glm::ivec3 origin, glm::ivec3 du, glm::ivec3 dv, bool backFace,
+              Material material, glm::vec3 normal, float tint) {
+    const glm::vec3 color = materialColor(material) * tint;
     const glm::vec3 c0 = glm::vec3(origin) * kVoxelSize;
     const glm::vec3 c1 = glm::vec3(origin + du) * kVoxelSize;
     const glm::vec3 c2 = glm::vec3(origin + du + dv) * kVoxelSize;
@@ -43,19 +58,19 @@ void emitQuad(std::vector<Vertex>& out, glm::ivec3 origin, glm::ivec3 du, glm::i
     // points in +d; frontFace quads keep that winding, backFace quads
     // reverse it so the visible normal points toward -d instead.
     if (!backFace) {
-        out.push_back({c0, color, uv0});
-        out.push_back({c1, color, uv1});
-        out.push_back({c2, color, uv2});
-        out.push_back({c0, color, uv0});
-        out.push_back({c2, color, uv2});
-        out.push_back({c3, color, uv3});
+        out.push_back({c0, color, uv0, normal});
+        out.push_back({c1, color, uv1, normal});
+        out.push_back({c2, color, uv2, normal});
+        out.push_back({c0, color, uv0, normal});
+        out.push_back({c2, color, uv2, normal});
+        out.push_back({c3, color, uv3, normal});
     } else {
-        out.push_back({c0, color, uv0});
-        out.push_back({c2, color, uv2});
-        out.push_back({c1, color, uv1});
-        out.push_back({c0, color, uv0});
-        out.push_back({c3, color, uv3});
-        out.push_back({c2, color, uv2});
+        out.push_back({c0, color, uv0, normal});
+        out.push_back({c2, color, uv2, normal});
+        out.push_back({c1, color, uv1, normal});
+        out.push_back({c0, color, uv0, normal});
+        out.push_back({c3, color, uv3, normal});
+        out.push_back({c2, color, uv2, normal});
     }
 }
 
@@ -130,7 +145,8 @@ void meshAxis(const Chunk& chunk, int d, std::vector<Vertex>& out) {
                 glm::ivec3 dv(0);
                 dv[v] = h;
 
-                emitQuad(out, origin, du, dv, cell.backFace, cell.material);
+                const glm::vec3 normal = glm::vec3(cell.backFace ? -q : q);
+                emitQuad(out, origin, du, dv, cell.backFace, cell.material, normal, faceTint(d, cell.backFace));
 
                 for (int l = 0; l < h; ++l) {
                     for (int k = 0; k < w; ++k) {

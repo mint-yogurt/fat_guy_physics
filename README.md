@@ -61,3 +61,15 @@ See the [Development Roadmap](DESIGN.md#development-roadmap-readme-added-to-as-e
 - [x] Material hardness (bare-handed digging only removes soft materials; Rock/Granite/Ice need a future tool)
 - [x] Mesh regeneration (touched chunks re-meshed and re-uploaded in place after each dig)
 - [x] Collision updates (dig raycast reads live voxel data directly, no separate/stale collision structure)
+
+### Phase 3 — Player controller
+
+- [x] Walking (WASD, AABB collision, step-up assist for small ledges)
+- [x] Jumping (Space, ground-only)
+- [x] Rolling (rolling-without-slipping orientation, only while in Ragball mode)
+- [x] Ragball mode (R to toggle, sphere collision, momentum/gravity-driven — WASD only lightly steers, not a direct speed control)
+
+Also added: first/third-person camera toggle (V), live FOV adjustment (-/=), per-face baked lighting (fixes flat/blended terrain shading), FPS/FOV/crosshair-distance HUD readout, click-to-capture mouse with fullscreen-by-default window (sidesteps window-manager resize/cursor-capture conflicts).
+
+Known issues (to revisit):
+- Player occasionally still gets stuck against a ledge or fails to jump over one — the step-up assist and jump/ground-probe timing have had two rounds of fixes but aren't fully reliable yet.

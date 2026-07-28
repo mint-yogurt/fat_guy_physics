@@ -4,36 +4,40 @@
 
 namespace fgp {
 
-enum class CameraMove { Forward, Backward, Left, Right, Up, Down };
+class Player;
+class World;
 
-// Free-flying debug camera (yaw/pitch, no roll). Movement is decoupled from
-// input handling so it can be driven from tests or a future replay system.
+enum class CameraPerspective { FirstPerson, ThirdPerson };
+
+// Turns the player's eye position + look direction into a view matrix. Pure
+// rendering concern — Player owns look direction and physics, Camera just
+// decides where to put the eye. First-person sits exactly at the player's
+// eye; third-person orbits behind at a fixed distance, pulled in by a
+// terrain probe so it never clips through solid ground.
 class Camera {
 public:
-    explicit Camera(glm::vec3 position = glm::vec3(0.0f, 2.0f, 6.0f));
+    void togglePerspective() {
+        perspective_ =
+            perspective_ == CameraPerspective::FirstPerson ? CameraPerspective::ThirdPerson : CameraPerspective::FirstPerson;
+    }
+    void setPerspective(CameraPerspective perspective) { perspective_ = perspective; }
+    CameraPerspective perspective() const { return perspective_; }
 
-    void move(CameraMove direction, float deltaTime);
-    void look(float xOffset, float yOffset);
+    // Recomputes position_/target_/up_ from the player's current eye
+    // position and look direction. Call once per frame before viewMatrix().
+    void sync(const Player& player, const World& world);
 
     glm::mat4 viewMatrix() const;
     glm::vec3 position() const { return position_; }
-    glm::vec3 front() const { return front_; }
 
-    float fovDegrees = 70.0f;
-    float moveSpeed = 5.0f;
-    float mouseSensitivity = 0.1f;
+    float fovDegrees = 90.0f;
+    float thirdPersonDistance = 2.2f;
 
 private:
-    void updateVectors();
-
-    glm::vec3 position_;
-    glm::vec3 front_ = glm::vec3(0.0f, 0.0f, -1.0f);
-    glm::vec3 up_ = glm::vec3(0.0f, 1.0f, 0.0f);
-    glm::vec3 right_ = glm::vec3(1.0f, 0.0f, 0.0f);
-    glm::vec3 worldUp_ = glm::vec3(0.0f, 1.0f, 0.0f);
-
-    float yaw_ = -90.0f;
-    float pitch_ = 0.0f;
+    CameraPerspective perspective_ = CameraPerspective::FirstPerson;
+    glm::vec3 position_{0.0f};
+    glm::vec3 target_{0.0f};
+    glm::vec3 up_{0.0f, 1.0f, 0.0f};
 };
 
 } // namespace fgp
