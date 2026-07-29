@@ -36,6 +36,8 @@ grappler // rope plus hook. used to pull items, reach high up areas, swing off o
 
 
 // constructions
+ladder // made of sticks. can be manually placed or attached to stuff
+stairs // made of 2x4s -- 
 toilet // entry for liquid physics, connects to pipes to push liquid
 trampoline
 catapult
