@@ -9,6 +9,10 @@ add_executable(fatguyphysics
     Crosshair.cpp
     HudText.cpp
     Texture.cpp
+    Inventory.cpp
+    Hotbar.cpp
+    ItemPickup.cpp
+    physics/PhysicsWorld.cpp
     voxel/Voxel.cpp
     voxel/ChunkMesher.cpp
     voxel/ChunkMesh.cpp
@@ -16,11 +20,13 @@ add_executable(fatguyphysics
     voxel/Vegetation.cpp
     voxel/World.cpp
     voxel/VoxelRaycast.cpp
+    voxel/SceneRaycast.cpp
+    voxel/TreeVoxels.cpp
     voxel/Collision.cpp
 )
 
 find_package(Threads REQUIRED)
-target_link_libraries(fatguyphysics PRIVATE glfw glad glm::glm fastnoiselite stb_image cgltf Threads::Threads)
+target_link_libraries(fatguyphysics PRIVATE glfw glad glm::glm fastnoiselite stb_image cgltf Threads::Threads Jolt)
 fgp_set_warnings(fatguyphysics)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

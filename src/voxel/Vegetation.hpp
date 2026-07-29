@@ -1,22 +1,26 @@
 #pragma once
 
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <glm/glm.hpp>
 
 #include "Chunk.hpp"
 #include "ChunkMesh.hpp"
+#include "TreeVoxels.hpp"
 
 namespace fgp {
 
 class TerrainGenerator;
 
-// One piece of scattered scenery (a tree or a bush): a self-contained mesh
-// in tree/bush-local space (root at the origin, sitting on the ground),
-// drawn by translating to `origin`. Since each instance carries its own
-// translation rather than being folded into its owning chunk's mesh,
-// foliage is free to overhang past the chunk's column footprint.
+// One bush: a self-contained mesh in bush-local space (root at the origin,
+// sitting on the ground), drawn by translating to `origin`. Trees used to
+// share this (decorative-only, no collision/identity — see TreeVoxels.hpp
+// for what replaced that), bushes still work this way since nothing needs
+// to interact with them yet.
 struct VegetationInstance {
     glm::vec3 origin;
     std::unique_ptr<ChunkMesh> mesh;
@@ -33,9 +37,15 @@ struct VegetationPlacement {
 };
 
 struct VegetationPlacementBatch {
-    std::vector<VegetationPlacement> trees;
+    std::vector<TreePlacement> trees;
     std::vector<VegetationPlacement> bushes;
 };
+
+// Looks up whether a tree (identified by generateVegetation's placement
+// hash) was previously chup-severed, and at what local Y, so a chunk that
+// streams back in regenerates a stump instead of an intact tree. See
+// World::treeSeveredBand.
+using TreeSeveredLookup = std::function<std::optional<int>(std::uint32_t treeHash)>;
 
 // Deterministically scatters trees/bushes across one chunk's column
 // footprint, keyed off (world column, seed) so a chunk that streams out and
@@ -47,8 +57,11 @@ struct VegetationPlacementBatch {
 // therefore only spawned by the one chunk layer whose Y range contains that
 // column's surface voxel; every other layer skips it.
 //
-// Pure CPU work (noise + vertex generation, no GL calls), so this is safe
-// to call from a worker thread.
-VegetationPlacementBatch generateVegetation(const TerrainGenerator& generator, ChunkCoord coord, int seed);
+// Pure CPU work (noise + voxel/vertex generation, no GL calls), so this is
+// safe to call from a worker thread — including severedLookup, which must
+// itself be safe to call concurrently from multiple worker threads (see
+// World::treeSeveredBand's locking).
+VegetationPlacementBatch generateVegetation(const TerrainGenerator& generator, ChunkCoord coord, int seed,
+                                             const TreeSeveredLookup& severedLookup);
 
 } // namespace fgp

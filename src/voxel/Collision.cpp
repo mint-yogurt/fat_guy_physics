@@ -54,7 +54,7 @@ float sweepBoxAxis(const World& world, glm::vec3 minCorner, glm::vec3 maxCorner,
         for (int y = voxMin.y; y <= voxMax.y; ++y) {
             for (int z = voxMin.z; z <= voxMax.z; ++z) {
                 const glm::ivec3 voxel(x, y, z);
-                if (!isSolid(world.materialAt(voxel))) {
+                if (!world.isSolidIncludingSnappedLogs(voxel)) { // see its stopgap comment
                     continue;
                 }
 
@@ -220,19 +220,24 @@ SphereCollision sweepSphere(const World& world, glm::vec3 position, float radius
     // only ever resolving the single deepest one per frame.
     constexpr int kIterations = 4;
     for (int iter = 0; iter < kIterations; ++iter) {
-        const glm::ivec3 voxMin(static_cast<int>(std::floor((pos.x - radius) / kVoxelSize)),
-                                 static_cast<int>(std::floor((pos.y - radius) / kVoxelSize)),
-                                 static_cast<int>(std::floor((pos.z - radius) / kVoxelSize)));
-        const glm::ivec3 voxMax(static_cast<int>(std::floor((pos.x + radius) / kVoxelSize)),
-                                 static_cast<int>(std::floor((pos.y + radius) / kVoxelSize)),
-                                 static_cast<int>(std::floor((pos.z + radius) / kVoxelSize)));
+        // Biased inward by kEpsilon before floor(), same reasoning as
+        // sweepBoxAxis's comment above: a resting position sitting exactly
+        // on a voxel boundary can drift a hair below it from float
+        // accumulation, and an unbiased floor() then pulls in one extra
+        // voxel layer that's actually behind the sphere's own edge.
+        const glm::ivec3 voxMin(static_cast<int>(std::floor((pos.x - radius + kEpsilon) / kVoxelSize)),
+                                 static_cast<int>(std::floor((pos.y - radius + kEpsilon) / kVoxelSize)),
+                                 static_cast<int>(std::floor((pos.z - radius + kEpsilon) / kVoxelSize)));
+        const glm::ivec3 voxMax(static_cast<int>(std::floor((pos.x + radius - kEpsilon) / kVoxelSize)),
+                                 static_cast<int>(std::floor((pos.y + radius - kEpsilon) / kVoxelSize)),
+                                 static_cast<int>(std::floor((pos.z + radius - kEpsilon) / kVoxelSize)));
 
         bool anyPenetration = false;
         for (int x = voxMin.x; x <= voxMax.x; ++x) {
             for (int y = voxMin.y; y <= voxMax.y; ++y) {
                 for (int z = voxMin.z; z <= voxMax.z; ++z) {
                     const glm::ivec3 voxel(x, y, z);
-                    if (!isSolid(world.materialAt(voxel))) {
+                    if (!world.isSolidIncludingSnappedLogs(voxel)) { // see its stopgap comment
                         continue;
                     }
 
@@ -273,17 +278,19 @@ SphereCollision sweepSphere(const World& world, glm::vec3 position, float radius
 }
 
 bool aabbOverlapsSolid(const World& world, glm::vec3 minCorner, glm::vec3 maxCorner) {
-    const glm::ivec3 voxMin(static_cast<int>(std::floor(minCorner.x / kVoxelSize)),
-                             static_cast<int>(std::floor(minCorner.y / kVoxelSize)),
-                             static_cast<int>(std::floor(minCorner.z / kVoxelSize)));
-    const glm::ivec3 voxMax(static_cast<int>(std::ceil(maxCorner.x / kVoxelSize)) - 1,
-                             static_cast<int>(std::ceil(maxCorner.y / kVoxelSize)) - 1,
-                             static_cast<int>(std::ceil(maxCorner.z / kVoxelSize)) - 1);
+    // Biased inward by kEpsilon before floor/ceil, same reasoning as
+    // sweepBoxAxis's comment above.
+    const glm::ivec3 voxMin(static_cast<int>(std::floor((minCorner.x + kEpsilon) / kVoxelSize)),
+                             static_cast<int>(std::floor((minCorner.y + kEpsilon) / kVoxelSize)),
+                             static_cast<int>(std::floor((minCorner.z + kEpsilon) / kVoxelSize)));
+    const glm::ivec3 voxMax(static_cast<int>(std::ceil((maxCorner.x - kEpsilon) / kVoxelSize)) - 1,
+                             static_cast<int>(std::ceil((maxCorner.y - kEpsilon) / kVoxelSize)) - 1,
+                             static_cast<int>(std::ceil((maxCorner.z - kEpsilon) / kVoxelSize)) - 1);
 
     for (int x = voxMin.x; x <= voxMax.x; ++x) {
         for (int y = voxMin.y; y <= voxMax.y; ++y) {
             for (int z = voxMin.z; z <= voxMax.z; ++z) {
-                if (isSolid(world.materialAt(glm::ivec3(x, y, z)))) {
+                if (world.isSolidIncludingSnappedLogs(glm::ivec3(x, y, z))) { // see its stopgap comment
                     return true;
                 }
             }

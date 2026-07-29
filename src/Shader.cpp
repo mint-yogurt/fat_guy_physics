@@ -88,4 +88,12 @@ void Shader::setFloat(const char* name, float value) const {
     glUniform1f(glGetUniformLocation(id_, name), value);
 }
 
+void Shader::setVec2(const char* name, const glm::vec2& value) const {
+    glUniform2fv(glGetUniformLocation(id_, name), 1, glm::value_ptr(value));
+}
+
+void Shader::setVec4(const char* name, const glm::vec4& value) const {
+    glUniform4fv(glGetUniformLocation(id_, name), 1, glm::value_ptr(value));
+}
+
 } // namespace fgp

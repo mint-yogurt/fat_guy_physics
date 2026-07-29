@@ -10,6 +10,8 @@ shirt represents player health // turns to rags lower hp you get
 
 objects have health and can be repaired/healed // e.g. a pumpkin is thrown, but doesnt break the first time just takes x damage (based on mass, velocity, and what it hit). a wood 2x4 same thing, but if you swing a hammer at it you can repair it
 
+building system // (probably snapping to angles, 45/90/180 etc). need to determine how "welding" (to use the gmod term) objects. maybe nails and then later an actual welder to make a strong bond with metal objects
+
 trees // trees are procgen and comprised of 2 sections, trunks and branches. branches are just bunches of green voxels, spawns sticks when destroyed or scooped. sticks can be lit on fire or built with. trunks, when broken, have the rest of the trunk fall over using the physics engine (which means it can break other stuff) further processing of trunks becomes logs, which can be turned into boards/planks/beams etc
 
 
@@ -36,9 +38,11 @@ grappler // rope plus hook. used to pull items, reach high up areas, swing off o
 
 
 // constructions
+wheels // allows objects to roll
 ladder // made of sticks. can be manually placed or attached to stuff
 stairs // made of 2x4s -- 
 toilet // entry for liquid physics, connects to pipes to push liquid
+balloon // made of rubber and rope. used to float things (neutral bouyancy - counteracts its MASS and gravity, balloon pull = mass then it floats, more balloons = it flies up and away) can be popped by attacking, or getting hit with something like a thrown stick etc
 trampoline
 catapult
 watermelon slingshot
@@ -62,6 +66,6 @@ halloween //
 
 
 christmas // 
-    // xmas trees (can harvest ornaments), snowmen of various sizesal
+    // xmas trees (can harvest ornaments), snowmen of various sizes
     // chests are presents (chests with shit in them) 
 

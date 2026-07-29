@@ -2,12 +2,34 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "ChunkMesher.hpp"
 
 namespace fgp {
+
+namespace {
+
+// TODO(voxel-physics, not yet implemented): named seam, not a stub
+// implementation — this is deliberately a no-op. This is where support/
+// connectivity analysis for "floating voxels shouldn't float" plugs in:
+// flood-fill each dirty chunk from a fixed anchor (e.g. the chunk's own
+// floor, or connectivity to a still-loaded neighboring solid) through
+// remaining solid voxels; any solid component NOT reachable from an anchor
+// is newly floating after this dig and should be carved out of the chunk
+// and handed to PhysicsWorld as a new dynamic body — the same
+// TreeVoxelGrid-riding-a-capsule pattern DynamicLog already uses for felled
+// trees (see DynamicLog's generalization-seam comment in main.cpp, and
+// World::isSolidIncludingSnappedLogs's stopgap comment for the walkability
+// half of that same eventual system).
+void checkForFloatingVoxelsStub(const std::unordered_set<ChunkCoord, ChunkCoordHash>& /*dirty*/) {
+    // Intentionally empty — see the TODO at this function's call site in
+    // digSphere.
+}
+
+} // namespace
 
 World::World(int seed, int loadRadiusChunks) : generator_(seed), seed_(seed), loadRadiusChunks_(loadRadiusChunks) {
     const unsigned int hw = std::thread::hardware_concurrency();
@@ -33,7 +55,8 @@ World::ChunkLoadResult World::buildChunkLoadResult(ChunkCoord coord) const {
     auto chunk = std::make_unique<Chunk>(coord);
     generator_.generate(*chunk);
     std::vector<Vertex> meshVertices = buildChunkMesh(*chunk);
-    VegetationPlacementBatch vegetation = generateVegetation(generator_, coord, seed_);
+    VegetationPlacementBatch vegetation =
+        generateVegetation(generator_, coord, seed_, [this](std::uint32_t treeHash) { return treeSeveredBand(treeHash); });
     return ChunkLoadResult{coord, std::move(chunk), std::move(meshVertices), std::move(vegetation)};
 }
 
@@ -41,12 +64,22 @@ void World::finalizeResult(ChunkLoadResult&& result) {
     auto mesh = std::make_unique<ChunkMesh>();
     mesh->upload(result.meshVertices);
 
-    std::vector<VegetationInstance> trees;
+    std::vector<Vertex> meshVertices = std::move(result.meshVertices);
+
+    std::vector<TreeInstance> trees;
     trees.reserve(result.vegetation.trees.size());
-    for (VegetationPlacement& placement : result.vegetation.trees) {
+    for (TreePlacement& placement : result.vegetation.trees) {
         auto instanceMesh = std::make_unique<ChunkMesh>();
-        instanceMesh->upload(placement.vertices);
-        trees.push_back(VegetationInstance{placement.origin, std::move(instanceMesh)});
+        instanceMesh->upload(placement.meshVertices);
+        TreeInstance tree;
+        tree.rootWorld = placement.rootWorld;
+        tree.voxels = std::move(placement.voxels);
+        tree.mesh = std::move(instanceMesh);
+        tree.treeHash = placement.treeHash;
+        tree.trunkHeightVoxels = placement.trunkHeightVoxels;
+        tree.trunkRadiusVoxels = placement.trunkRadiusVoxels;
+        tree.severed = placement.severed;
+        trees.push_back(std::move(tree));
     }
 
     std::vector<VegetationInstance> bushes;
@@ -57,7 +90,8 @@ void World::finalizeResult(ChunkLoadResult&& result) {
         bushes.push_back(VegetationInstance{placement.origin, std::move(instanceMesh)});
     }
 
-    loaded_[result.coord] = LoadedChunk{std::move(result.chunk), std::move(mesh), std::move(trees), std::move(bushes)};
+    loaded_[result.coord] =
+        LoadedChunk{std::move(result.chunk), std::move(mesh), std::move(meshVertices), std::move(trees), std::move(bushes)};
 }
 
 void World::submitJob(ChunkCoord coord) {
@@ -194,6 +228,26 @@ Material World::materialAt(glm::ivec3 worldVoxel) const {
     return it->second.chunk->at(local.x, local.y, local.z);
 }
 
+bool World::isSolidIncludingSnappedLogs(glm::ivec3 worldVoxel) const {
+    if (isSolid(materialAt(worldVoxel))) {
+        return true;
+    }
+    for (const SnappedSolidGrid& g : snappedLogGrids_) {
+        // See negMask's comment on SnappedSolidGrid: worldVoxel = origin +
+        // R*local + negMask, so local = R^T * (worldVoxel - origin -
+        // negMask). axisX/Y/Z are R's columns, so R^T applied to rel is
+        // just plain integer dot products.
+        const glm::ivec3 rel = worldVoxel - g.worldVoxelOrigin - g.negMask;
+        const glm::ivec3 local(rel.x * g.axisX.x + rel.y * g.axisX.y + rel.z * g.axisX.z,
+                                rel.x * g.axisY.x + rel.y * g.axisY.y + rel.z * g.axisY.z,
+                                rel.x * g.axisZ.x + rel.y * g.axisZ.y + rel.z * g.axisZ.z);
+        if (isSolid(g.grid->at(local))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void World::digSphere(glm::vec3 centerWorld, float radiusMeters) {
     const glm::ivec3 centerVoxel(
         static_cast<int>(std::floor(centerWorld.x / kVoxelSize)),
@@ -239,10 +293,60 @@ void World::digSphere(glm::vec3 centerWorld, float radiusMeters) {
         }
     }
 
+    checkForFloatingVoxelsStub(dirty); // no-op — see its comment above
+
     for (const ChunkCoord& coord : dirty) {
         LoadedChunk& loadedChunk = loaded_.at(coord);
-        loadedChunk.mesh->upload(buildChunkMesh(*loadedChunk.chunk));
+        loadedChunk.meshVertices = buildChunkMesh(*loadedChunk.chunk);
+        loadedChunk.mesh->upload(loadedChunk.meshVertices);
+        dirtyTerrainChunks_.push_back(coord);
     }
+}
+
+const std::vector<Vertex>* World::chunkMeshVertices(ChunkCoord coord) const {
+    const auto it = loaded_.find(coord);
+    return it == loaded_.end() ? nullptr : &it->second.meshVertices;
+}
+
+std::vector<ChunkCoord> World::takeDirtyTerrainChunks() {
+    return std::exchange(dirtyTerrainChunks_, {});
+}
+
+std::vector<TreeInstance*> World::treesNear(glm::vec3 worldPos, float radiusMeters) {
+    // Broad-phase only — false positives are fine (raycastTree/digTreeSphere
+    // correctly reject non-hits), false negatives aren't. Margin covers the
+    // largest possible canopy radius + trunk height (see TreeVoxels.cpp's
+    // generation constants) so a ray aimed up into a tall canopy isn't
+    // missed just because the trunk's root is farther from the search
+    // origin than radiusMeters alone would allow.
+    constexpr float kTreeSearchMargin = 8.0f;
+    const float searchRadius = radiusMeters + kTreeSearchMargin;
+    const float searchRadiusSq = searchRadius * searchRadius;
+
+    std::vector<TreeInstance*> result;
+    for (auto& [coord, loadedChunk] : loaded_) {
+        for (TreeInstance& tree : loadedChunk.trees) {
+            const glm::vec3 d = tree.rootWorld - worldPos;
+            if (glm::dot(d, d) <= searchRadiusSq) {
+                result.push_back(&tree);
+            }
+        }
+    }
+    return result;
+}
+
+void World::recordTreeSevered(std::uint32_t treeHash, int severLocalY) {
+    std::lock_guard<std::mutex> lock(treeEditsMutex_);
+    treeEdits_[treeHash] = severLocalY;
+}
+
+std::optional<int> World::treeSeveredBand(std::uint32_t treeHash) const {
+    std::lock_guard<std::mutex> lock(treeEditsMutex_);
+    const auto it = treeEdits_.find(treeHash);
+    if (it == treeEdits_.end()) {
+        return std::nullopt;
+    }
+    return it->second;
 }
 
 void World::draw(const Shader& shader) const {
@@ -251,8 +355,8 @@ void World::draw(const Shader& shader) const {
         shader.setMat4("uModel", model);
         loadedChunk.mesh->draw();
 
-        for (const VegetationInstance& tree : loadedChunk.trees) {
-            shader.setMat4("uModel", glm::translate(glm::mat4(1.0f), tree.origin));
+        for (const TreeInstance& tree : loadedChunk.trees) {
+            shader.setMat4("uModel", glm::translate(glm::mat4(1.0f), tree.rootWorld));
             tree.mesh->draw();
         }
     }

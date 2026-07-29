@@ -71,3 +71,17 @@ See the [Development Roadmap](DESIGN.md#development-roadmap-readme-added-to-as-e
 
 Also added: first/third-person camera toggle (V), live FOV adjustment (-/=), per-face baked lighting (fixes flat/blended terrain shading), FPS/FOV/crosshair-distance HUD readout plus a worst-frame-time-per-second readout (WORST, in ms, unclamped/unsmoothed — for spotting stalls the heavily-smoothed FPS number can't show), click-to-capture mouse with fullscreen-by-default window (sidesteps window-manager resize/cursor-capture conflicts).
 
+### Phase 4 — Trees, felled logs, item pickups
+
+- [x] Trees (voxelized trunk + canopy, chup severs the trunk into a real falling/settling Jolt body)
+- [x] Chup on foliage (clears Leaf same as Wood, not trunk-only)
+- [x] Felled logs stay interactable indefinitely (raycast/scoop/chop, recursive re-severance into smaller pieces)
+- [x] Item pickups (leaf/stick billboards, gravity-fall from the scoop/chup point, hover-bob once landed)
+- [x] Foliage-impact shatter (a settled log's canopy touching terrain or another log clears and drops pickups)
+- [x] Walkable felled logs (player can stand on a settled log/canopy like terrain)
+
+**Known temporary/stopgap pieces, not final design:**
+- Walkable logs work via "snap-on-sleep": a settled log's rotation snaps to the nearest of 24 axis-aligned orientations so it can reuse terrain's integer-voxel collision. This only works for logs that land close to square with the world grid — a log resting at a real off-axis tilt or on a slope stays walk-through. The real fix (arbitrary-orientation player collision) is unbuilt; see the comment on `World::isSolidIncludingSnappedLogs`.
+- Floating terrain voxels (dug out from underneath, left hanging with no support check) are a known, still-open gap — no connectivity/support analysis exists yet. A named no-op seam for it lives in `World::digSphere`.
+- The raycast "what did I hit" result (`SceneHit`/`ActionHit`) is a `std::variant` that enumerates only what's currently hittable rather than always resolving to something in range — flagged in code as bad long-term design, not yet replaced.
+

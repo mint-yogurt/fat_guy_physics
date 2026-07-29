@@ -1,9 +1,11 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -16,6 +18,31 @@
 #include "../Shader.hpp"
 
 namespace fgp {
+
+// One sleeping, snap-on-sleep felled log's grid, registered with World so
+// collision/raycasts can treat it as a first-class solid surface alongside
+// terrain. See isSolidIncludingSnappedLogs's doc comment for the load-
+// bearing caveat about what this does and doesn't cover.
+struct SnappedSolidGrid {
+    const TreeVoxelGrid* grid;   // owned by the DynamicLog that registered it (main.cpp);
+                                  // valid only until the next setSnappedSolidGrids call,
+                                  // which main.cpp issues fresh every frame.
+    glm::ivec3 worldVoxelOrigin; // world-voxel coord of the grid's tree-local (0,0,0)
+    glm::ivec3 axisX, axisY, axisZ; // columns of the snapped rotation matrix; each is
+                                     // exactly one of (+-1,0,0)/(0,+-1,0)/(0,0,+-1) — an
+                                     // exact integer signed permutation, never re-derived
+                                     // from float quaternion math on this path.
+    // A voxel is a unit CUBE [local, local+1), not a point — under a signed
+    // permutation with a -1 entry, that cube's min corner in world space is
+    // NOT origin + R*local, it's off by one on every axis R flips (rotate
+    // the cube [0,1) 180 degrees about an axis and its world-space min
+    // corner moves to -1, not 0). negMask is that correction, precomputed
+    // once when the rotation is snapped: one componentwise vector with -1
+    // on every world axis some local axis maps to with a negative sign, 0
+    // otherwise. Both directions need it: worldVoxel = origin + R*local +
+    // negMask, and local = R^T * (worldVoxel - origin - negMask).
+    glm::ivec3 negMask;
+};
 
 // Streams chunks in a horizontal radius around a world-space position,
 // generating + meshing + uploading new ones and dropping ones that fall
@@ -63,16 +90,74 @@ public:
     // Air for voxels in unloaded chunks, not just voxels that are actually Air.
     Material materialAt(glm::ivec3 worldVoxel) const;
 
+    // Replaces the whole registered snap-on-sleep log list. Called once per
+    // frame by main.cpp's settle pass (see DynamicLog/runLogSettlePass) —
+    // cheap, since there are only ever a handful of sleeping logs at once.
+    void setSnappedSolidGrids(std::vector<SnappedSolidGrid> grids) { snappedLogGrids_ = std::move(grids); }
+
+    // TEMPORARY AND UNACCEPTABLE STOPGAP — do not treat this as the real
+    // solution to "the player should be able to stand on physics objects."
+    // This is isSolid(materialAt(...)) plus a lookup against whatever felled
+    // logs happened to snap onto the axis-aligned world voxel lattice when
+    // they fell asleep (see main.cpp's snap-on-sleep machinery). It only
+    // ever makes a cluster walkable/solid if its rest pose rounds cleanly
+    // onto one of the 24 cube-aligned orientations AND a lattice-aligned
+    // position clear of existing solids — a genuine off-axis tilt, a log
+    // resting on a real slope, mid-tumble physics, or literally any other
+    // kind of rigid debris gets none of this and stays a ghost the player
+    // falls straight through. That is not a corner case to shrug off: this
+    // is a physics game, and the player should eventually be able to walk
+    // on all sorts of crap, not just the lucky subset that happens to land
+    // square with the world grid. The real fix is generalizing player
+    // collision (sweepAabb/sweepSphere/aabbOverlapsSolid in Collision.cpp)
+    // to test against arbitrary oriented rigid-body voxel geometry directly,
+    // instead of requiring lattice alignment as a precondition for a voxel
+    // cluster to be steppable at all. Don't extend this function with more
+    // special cases — replace the mechanism.
+    bool isSolidIncludingSnappedLogs(glm::ivec3 worldVoxel) const;
+
     // Removes hand-diggable material within radiusMeters of centerWorld,
     // skipping voxels in unloaded chunks (never force-loads), and re-meshes
     // only the chunks actually touched.
     void digSphere(glm::vec3 centerWorld, float radiusMeters);
 
+    bool isChunkLoaded(ChunkCoord coord) const { return loaded_.find(coord) != loaded_.end(); }
+
+    // Chunk-local (meters, matches Chunk::worldOrigin()'s translation
+    // convention), non-indexed triangle list — the same data already
+    // uploaded to GPU for rendering, retained on the CPU side so
+    // PhysicsWorld can build a static collision shape from it without
+    // re-running the mesher. Returns nullptr if coord isn't loaded.
+    const std::vector<Vertex>* chunkMeshVertices(ChunkCoord coord) const;
+
+    // Coords whose terrain mesh changed (via digSphere) since the last call,
+    // then cleared — lets PhysicsWorld know which chunk collision shapes
+    // need rebuilding without polling every loaded chunk every frame.
+    std::vector<ChunkCoord> takeDirtyTerrainChunks();
+
+    // Tree instances (trunks/canopies with real per-voxel hit-testing — see
+    // TreeVoxels.hpp) in currently-loaded chunks within radiusMeters of
+    // worldPos, for scene-raycast broad-phase (see voxel/SceneRaycast.hpp).
+    // Pointers are only valid until the next update() call, which can
+    // unload the chunk they belong to.
+    std::vector<TreeInstance*> treesNear(glm::vec3 worldPos, float radiusMeters);
+
+    // Records that a tree (identified by generateVegetation's placement
+    // hash) was chup-severed at local Y severLocalY, so a chunk that
+    // streams out and back in regenerates a stump instead of an intact
+    // tree. Thread-safe: the main thread calls recordTreeSevered after a
+    // chup severance, worker threads call treeSeveredBand (via
+    // generateVegetation's severedLookup) while generating other chunks
+    // concurrently.
+    void recordTreeSevered(std::uint32_t treeHash, int severLocalY);
+    std::optional<int> treeSeveredBand(std::uint32_t treeHash) const;
+
 private:
     struct LoadedChunk {
         std::unique_ptr<Chunk> chunk;
         std::unique_ptr<ChunkMesh> mesh;
-        std::vector<VegetationInstance> trees;
+        std::vector<Vertex> meshVertices;
+        std::vector<TreeInstance> trees;
         std::vector<VegetationInstance> bushes;
     };
 
@@ -125,6 +210,23 @@ private:
     bool hasCenter_ = false;
     int centerX_ = 0;
     int centerZ_ = 0;
+
+    // Populated by digSphere, drained by takeDirtyTerrainChunks().
+    std::vector<ChunkCoord> dirtyTerrainChunks_;
+
+    // treeHash -> severed local Y. Guards against concurrent access from
+    // worker threads generating other chunks (read, via treeSeveredBand)
+    // while the main thread records a fresh severance (write). Rare
+    // events on both sides (a chup severance, a chunk load), so a plain
+    // mutex is plenty — no need for anything fancier.
+    mutable std::mutex treeEditsMutex_;
+    std::unordered_map<std::uint32_t, int> treeEdits_;
+
+    // See setSnappedSolidGrids/isSolidIncludingSnappedLogs. Rebuilt from
+    // scratch every frame by main.cpp — never mutated incrementally, so
+    // there's no stale-pointer risk from a DynamicLog being erased/
+    // re-severed between frames.
+    std::vector<SnappedSolidGrid> snappedLogGrids_;
 
     // Coords the current center wants loaded; drainCompleted() checks
     // results against this so a chunk that finishes generating after the
