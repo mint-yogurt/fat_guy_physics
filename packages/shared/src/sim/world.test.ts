@@ -121,6 +121,8 @@ describe("World streaming", () => {
     onChunkRemeshed(key: number): void {
       this.remeshed.push(key);
     }
+    onTreeMeshed(): void {}
+    onTreeUnloaded(): void {}
     reset(): void {
       this.loaded.length = 0;
       this.unloaded.length = 0;

@@ -23,7 +23,7 @@ backend instead of WebGPU — useful for telling "broken everywhere" apart from
 "broken on one backend".
 
 Controls: click to capture the mouse, WASD to walk, Space to jump, hold
-left mouse to dig, R to toggle Ragball, V for first/third person, -/= for
+left mouse to dig, right mouse to chop, R to toggle Ragball, V for first/third person, -/= for
 FOV.
 
 `?radius=N` overrides the chunk load radius, which is the quickest way to tell "slow because there is a lot of terrain" apart from "slow for some
@@ -92,7 +92,7 @@ Milestones, in order. Each one is runnable and visually verifiable:
 - [x] **M3** Web Worker pool with transferable buffers
 - [x] **M4** Player controller, collision, the fixed-timestep frame loop
 - [x] **M5** Raycast + scoop
-- [ ] **M6** Trees + chup + the canopy-size fix
+- [x] **M6** Trees + chup + the canopy-size fix
 - [ ] **M7** Jolt WASM + falling bodies
 - [ ] **M8** Oriented-body collision (replaces snap-on-sleep)
 - [ ] **M9** Items — **parity with the native build**

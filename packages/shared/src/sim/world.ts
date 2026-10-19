@@ -2,10 +2,14 @@ import { chunkKey, keyX, keyY, keyZ, type ChunkKey } from "./chunkKey.ts";
 import type { ChunkResult, ChunkSource } from "./chunkSource.ts";
 import { CHUNK_SIZE, VOXEL_SIZE } from "./constants.ts";
 import { nowMs } from "./time.ts";
+import { chopGridDisc, digGridSphere, severGridAt } from "../voxel/gridEdit.ts";
 import { Mesher } from "../voxel/greedyMesher.ts";
 import { floorDiv, floorMod, isHandDiggable, isSolid, Material } from "../voxel/voxel.ts";
-import { gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
+import { gridAt, gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
+import { createVoxelHit, raycastVoxel } from "../voxel/voxelRaycast.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
+import { generateTree, type TreeSpecies } from "../worldgen/trees.ts";
+import { placeVegetation, type TreePlacement } from "../worldgen/vegetation.ts";
 
 /**
  * Chunk streaming and voxel storage. Ports the data half of
@@ -83,6 +87,82 @@ export interface ChunkSink {
     vertices: Float32Array,
     vertexCount: number,
   ): void;
+  /**
+   * A tree appeared or changed shape. Same scratch-buffer caveat as
+   * onChunkRemeshed: trees are meshed on the calling thread.
+   *
+   * One callback covers both cases because the only sensible sink
+   * implementation is create-or-replace either way.
+   */
+  onTreeMeshed(tree: Tree, vertices: Float32Array, vertexCount: number): void;
+  onTreeUnloaded(treeId: number): void;
+}
+
+/**
+ * A standing tree (and from M7, a felled log): its own voxel grid, rooted
+ * at an integer world voxel.
+ *
+ * Trees are not folded into the terrain chunk grid because a tree is an
+ * object with identity -- it gets chopped, it remembers having been
+ * chopped, and at M7 its top half becomes a rigid body. A chunk edit has
+ * none of those.
+ */
+export interface Tree {
+  /** Placement hash. Stable across streaming, so edits can persist. */
+  readonly id: number;
+  readonly species: TreeSpecies;
+  /** Grid-local (0,0,0) sits at this world voxel: the trunk's base. */
+  readonly rootVoxelX: number;
+  readonly rootVoxelY: number;
+  readonly rootVoxelZ: number;
+  readonly grid: VoxelGrid;
+  trunkHeightVoxels: number;
+  severed: boolean;
+}
+
+export const HitKind = {
+  None: 0,
+  Terrain: 1,
+  Tree: 2,
+} as const;
+export type HitKind = (typeof HitKind)[keyof typeof HitKind];
+
+/**
+ * What the crosshair is on.
+ *
+ * Flat, and always resolves to *something* in range -- the C++ returns a
+ * `std::variant` that enumerates only what happens to be hittable today,
+ * which its own comments flag as a design dead end (every new hittable
+ * thing is a new variant arm and a new `std::get_if` at every call site).
+ * A kind tag plus the world-space centre of the hit voxel is all any
+ * caller has ever actually wanted.
+ */
+export interface SceneHit {
+  kind: HitKind;
+  /** Valid when kind is Tree. */
+  treeId: number;
+  voxelX: number;
+  voxelY: number;
+  voxelZ: number;
+  /** World-space centre of the hit voxel, which is what the edits take. */
+  centerX: number;
+  centerY: number;
+  centerZ: number;
+  distance: number;
+}
+
+export function createSceneHit(): SceneHit {
+  return {
+    kind: HitKind.None,
+    treeId: 0,
+    voxelX: 0,
+    voxelY: 0,
+    voxelZ: 0,
+    centerX: 0,
+    centerY: 0,
+    centerZ: 0,
+    distance: 0,
+  };
 }
 
 /**
@@ -140,6 +220,33 @@ export class World {
   /** Reused by digSphere so a held scoop does not allocate per tick. */
   private readonly dirtyScratch = new Set<ChunkKey>();
 
+  private readonly trees = new Map<number, Tree>();
+  /** Which chunk spawned which trees, so unloading a chunk unloads them. */
+  private readonly treesByChunk = new Map<ChunkKey, number[]>();
+  /**
+   * Trees chup-severed while loaded, and the local Y they were cut at. This
+   * is the whole of tree edit persistence: a severed tree streaming back in
+   * regenerates as a stump rather than growing its top back.
+   *
+   * Never pruned. One number per tree the player has actually chopped is
+   * not a leak worth code.
+   */
+  private readonly severedTrees = new Map<number, number>();
+  private readonly treeMesher = new Mesher();
+  private readonly placementScratch: TreePlacement[] = [];
+
+  /** Trees the in-flight raycast might hit. Refilled per raycast. */
+  private readonly rayTrees: Tree[] = [];
+  private readonly rayHit = createVoxelHit();
+  /**
+   * Allocated once in the constructor rather than per raycast: this closes
+   * over `this` and is called once per voxel the ray crosses.
+   */
+  private readonly sceneQuery = {
+    isSolid: (vx: number, vy: number, vz: number): boolean =>
+      isSolid(this.materialAt(vx, vy, vz)) || this.treeIdAt(vx, vy, vz) !== undefined,
+  };
+
   private hasCenter = false;
   private centerX = 0;
   private centerZ = 0;
@@ -193,6 +300,14 @@ export class World {
       if (this.desired.has(key)) continue;
       this.chunks.delete(key);
       sink.onChunkUnloaded(key);
+      const spawned = this.treesByChunk.get(key);
+      if (spawned !== undefined) {
+        for (const id of spawned) {
+          this.trees.delete(id);
+          sink.onTreeUnloaded(id);
+        }
+        this.treesByChunk.delete(key);
+      }
     }
 
     return this.submitDesired(centerX, centerZ);
@@ -269,6 +384,7 @@ export class World {
         cells: result.cells,
       });
       sink.onChunkLoaded(result);
+      this.spawnVegetation(result.key, sink);
       uploaded++;
     }
     return uploaded === 0 ? 0 : nowMs() - started;
@@ -385,6 +501,200 @@ export class World {
    */
   isSolid(vx: number, vy: number, vz: number): boolean {
     return isSolid(this.materialAt(vx, vy, vz));
+  }
+
+  // --- vegetation --------------------------------------------------------
+
+  getTree(treeId: number): Tree | undefined {
+    return this.trees.get(treeId);
+  }
+
+  get treeCount(): number {
+    return this.trees.size;
+  }
+
+  private spawnVegetation(key: ChunkKey, sink: ChunkSink): void {
+    const placements = placeVegetation(
+      this.generator,
+      keyX(key),
+      keyY(key),
+      keyZ(key),
+      this.seed,
+      this.placementScratch,
+    );
+
+    for (const placement of placements) {
+      // A tree whose chunk is reloaded while the tree is somehow still
+      // alive must not be duplicated.
+      if (this.trees.has(placement.id)) continue;
+
+      const severedAt = this.severedTrees.get(placement.id);
+      const shape = generateTree(placement.id, placement.species, severedAt);
+      const tree: Tree = {
+        id: placement.id,
+        species: placement.species,
+        rootVoxelX: placement.rootVoxelX,
+        rootVoxelY: placement.rootVoxelY,
+        rootVoxelZ: placement.rootVoxelZ,
+        grid: shape.grid,
+        trunkHeightVoxels: shape.trunkHeightVoxels,
+        severed: severedAt !== undefined,
+      };
+
+      this.trees.set(tree.id, tree);
+      let owned = this.treesByChunk.get(key);
+      if (owned === undefined) {
+        owned = [];
+        this.treesByChunk.set(key, owned);
+      }
+      owned.push(tree.id);
+
+      this.meshTree(tree, sink);
+    }
+  }
+
+  private meshTree(tree: Tree, sink: ChunkSink): void {
+    const mesh = this.treeMesher.mesh(tree.grid);
+    sink.onTreeMeshed(tree, mesh.vertices, mesh.vertexCount);
+  }
+
+  /** The id of the tree occupying a world voxel, searching the ray set. */
+  private treeIdAt(vx: number, vy: number, vz: number): number | undefined {
+    for (const tree of this.rayTrees) {
+      if (
+        gridAt(tree.grid, vx - tree.rootVoxelX, vy - tree.rootVoxelY, vz - tree.rootVoxelZ) !==
+        Material.Air
+      ) {
+        return tree.id;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Casts against terrain and trees at once and reports what was hit.
+   *
+   * One DDA over world voxels covers both because trees share the terrain's
+   * voxel lattice (see placeVegetation). The C++ runs a separate raycast per
+   * tree and then picks the nearest result, which is both slower and where
+   * its "nearest hit" bugs came from.
+   */
+  raycastScene(
+    originX: number,
+    originY: number,
+    originZ: number,
+    dirX: number,
+    dirY: number,
+    dirZ: number,
+    maxDistanceMeters: number,
+    out: SceneHit,
+  ): SceneHit {
+    // Broad phase: a tree can only be hit if its root is within reach plus
+    // its own extent. Grids are at most ~3m across, hence the slack.
+    const reach = maxDistanceMeters + 4;
+    const reachSq = reach * reach;
+    this.rayTrees.length = 0;
+    for (const tree of this.trees.values()) {
+      const ox = tree.rootVoxelX * VOXEL_SIZE - originX;
+      const oz = tree.rootVoxelZ * VOXEL_SIZE - originZ;
+      if (ox * ox + oz * oz <= reachSq) this.rayTrees.push(tree);
+    }
+
+    const hit = raycastVoxel(
+      this.sceneQuery,
+      originX,
+      originY,
+      originZ,
+      dirX,
+      dirY,
+      dirZ,
+      maxDistanceMeters,
+      this.rayHit,
+    );
+
+    if (!hit.hit) {
+      out.kind = HitKind.None;
+      return out;
+    }
+
+    const treeId = this.treeIdAt(hit.x, hit.y, hit.z);
+    out.kind = treeId === undefined ? HitKind.Terrain : HitKind.Tree;
+    out.treeId = treeId ?? 0;
+    out.voxelX = hit.x;
+    out.voxelY = hit.y;
+    out.voxelZ = hit.z;
+    out.centerX = (hit.x + 0.5) * VOXEL_SIZE;
+    out.centerY = (hit.y + 0.5) * VOXEL_SIZE;
+    out.centerZ = (hit.z + 0.5) * VOXEL_SIZE;
+    out.distance = hit.distance;
+    return out;
+  }
+
+  /** Scoop on a tree: foliage only, since Wood is not hand-diggable. */
+  digTree(
+    treeId: number,
+    centerX: number,
+    centerY: number,
+    centerZ: number,
+    radiusMeters: number,
+    sink: ChunkSink,
+  ): boolean {
+    const tree = this.trees.get(treeId);
+    if (tree === undefined) return false;
+    const changed = digGridSphere(
+      tree.grid,
+      tree.rootVoxelX,
+      tree.rootVoxelY,
+      tree.rootVoxelZ,
+      centerX,
+      centerY,
+      centerZ,
+      radiusMeters,
+    );
+    if (changed) this.meshTree(tree, sink);
+    return changed;
+  }
+
+  /**
+   * Chup on a tree. Severing currently *removes* the piece above the cut
+   * rather than dropping it: there is no rigid-body layer until M7, and a
+   * severed top left floating in place is worse than one that vanishes.
+   * M7 turns the removed grid into a falling body.
+   */
+  chopTree(
+    treeId: number,
+    centerX: number,
+    centerY: number,
+    centerZ: number,
+    horizontalRadiusMeters: number,
+    verticalHalfThicknessMeters: number,
+    sink: ChunkSink,
+  ): boolean {
+    const tree = this.trees.get(treeId);
+    if (tree === undefined) return false;
+
+    const result = chopGridDisc(
+      tree.grid,
+      tree.rootVoxelX,
+      tree.rootVoxelY,
+      tree.rootVoxelZ,
+      centerX,
+      centerY,
+      centerZ,
+      horizontalRadiusMeters,
+      verticalHalfThicknessMeters,
+    );
+    if (!result.changed) return false;
+
+    if (result.severedAtLocalY >= 0) {
+      severGridAt(tree.grid, result.severedAtLocalY);
+      tree.severed = true;
+      tree.trunkHeightVoxels = result.severedAtLocalY;
+      this.severedTrees.set(tree.id, result.severedAtLocalY);
+    }
+
+    this.meshTree(tree, sink);
+    return true;
   }
 
   dispose(): void {

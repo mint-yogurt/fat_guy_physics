@@ -2,7 +2,8 @@ import { Mesh, type Material, type Scene } from "three/webgpu";
 
 import type { ChunkKey } from "@fgp/shared/sim/chunkKey";
 import type { ChunkResult } from "@fgp/shared/sim/chunkSource";
-import { CHUNK_METERS, type ChunkSink } from "@fgp/shared/sim/world";
+import { CHUNK_METERS, type ChunkSink, type Tree } from "@fgp/shared/sim/world";
+import { VOXEL_SIZE } from "@fgp/shared/sim/constants";
 import { FLOATS_PER_VERTEX } from "@fgp/shared/voxel/vertexLayout";
 
 import { applyMeshData, createChunkGeometry, disposeChunkGeometry } from "./chunkGeometry.ts";
@@ -20,6 +21,7 @@ import { applyMeshData, createChunkGeometry, disposeChunkGeometry } from "./chun
  */
 export class WorldRenderer implements ChunkSink {
   private readonly meshes = new Map<ChunkKey, Mesh>();
+  private readonly treeMeshes = new Map<number, Mesh>();
 
   constructor(
     private readonly scene: Scene,
@@ -98,6 +100,50 @@ export class WorldRenderer implements ChunkSink {
     );
   }
 
+  /**
+   * Create-or-replace for one tree's geometry. `vertices` is the shared
+   * tree mesher's scratch, so it is copied.
+   *
+   * Trees are separate scene objects rather than part of a chunk's mesh
+   * because a tree's canopy routinely overhangs the chunk that owns it, and
+   * because a chop remeshes one tree rather than 3-4 chunks.
+   */
+  onTreeMeshed(tree: Tree, vertices: Float32Array, vertexCount: number): void {
+    const existing = this.treeMeshes.get(tree.id);
+
+    if (vertexCount === 0) {
+      if (existing !== undefined) this.onTreeUnloaded(tree.id);
+      return;
+    }
+
+    const owned = vertices.slice(0, vertexCount * FLOATS_PER_VERTEX);
+    if (existing !== undefined) {
+      applyMeshData(existing.geometry, owned, vertexCount);
+      return;
+    }
+
+    const object = new Mesh(createChunkGeometry(owned, vertexCount), this.material);
+    // Mesh positions come out relative to the grid's local origin, which
+    // for a tree is the trunk's base.
+    object.position.set(
+      tree.rootVoxelX * VOXEL_SIZE,
+      tree.rootVoxelY * VOXEL_SIZE,
+      tree.rootVoxelZ * VOXEL_SIZE,
+    );
+    object.matrixAutoUpdate = false;
+    object.updateMatrix();
+    this.scene.add(object);
+    this.treeMeshes.set(tree.id, object);
+  }
+
+  onTreeUnloaded(treeId: number): void {
+    const object = this.treeMeshes.get(treeId);
+    if (object === undefined) return;
+    this.treeMeshes.delete(treeId);
+    this.scene.remove(object);
+    disposeChunkGeometry(object.geometry);
+  }
+
   onChunkUnloaded(key: ChunkKey): void {
     const object = this.meshes.get(key);
     if (object === undefined) return; // was an empty chunk; never added
@@ -116,5 +162,10 @@ export class WorldRenderer implements ChunkSink {
       disposeChunkGeometry(object.geometry);
     }
     this.meshes.clear();
+    for (const object of this.treeMeshes.values()) {
+      this.scene.remove(object);
+      disposeChunkGeometry(object.geometry);
+    }
+    this.treeMeshes.clear();
   }
 }

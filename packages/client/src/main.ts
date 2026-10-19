@@ -15,8 +15,12 @@ import {
   VOXEL_SIZE,
 } from "@fgp/shared/sim/constants";
 import { createPlayerInput, Player, PlayerMode } from "@fgp/shared/sim/player";
-import { DEFAULT_LOAD_RADIUS_CHUNKS, World } from "@fgp/shared/sim/world";
-import { createVoxelHit, raycastVoxel } from "@fgp/shared/voxel/voxelRaycast";
+import {
+  createSceneHit,
+  DEFAULT_LOAD_RADIUS_CHUNKS,
+  HitKind,
+  World,
+} from "@fgp/shared/sim/world";
 
 import { InputState } from "./input/inputState.ts";
 import { CameraPerspective, PlayerCamera } from "./render/playerCamera.ts";
@@ -45,6 +49,15 @@ const DIG_REACH_METERS = 5;
 const DIG_RADIUS_METERS = 0.35;
 const DIG_REANCHOR_POSITION = 0.05;
 const DIG_REANCHOR_DIRECTION = 0.995;
+
+/**
+ * Chup (chop) tuning, also from src/main.cpp. A thin shear rather than a
+ * gouge: wide enough in X/Z to cover the thickest trunk, ~1 voxel thick in
+ * Y, so clearing a trunk's whole cross-section takes several swings.
+ */
+const CHUP_TICK_SECONDS = 0.25;
+const CHUP_HORIZONTAL_RADIUS = 0.22;
+const CHUP_VERTICAL_HALF_THICKNESS = 0.06;
 
 /** Matches the C++ FOV adjust step on the -/= keys. */
 const FOV_STEP = 2;
@@ -144,9 +157,10 @@ async function start(): Promise<void> {
 
   const crosshair = requireElement<HTMLDivElement>("#crosshair");
 
-  // Scoop state. `hit` doubles as the crosshair readout's source, so it is
-  // refreshed once a frame whether or not the player is digging.
-  const hit = createVoxelHit();
+  // Scoop/chup state. `hit` doubles as the crosshair readout's source, so
+  // it is refreshed once a frame whether or not the player is acting.
+  const hit = createSceneHit();
+  let chupCooldown = 0;
   let digCooldown = 0;
   let digAnchored = false;
   let anchorOriginX = 0;
@@ -158,6 +172,8 @@ async function start(): Promise<void> {
   let anchorCenterX = 0;
   let anchorCenterY = 0;
   let anchorCenterZ = 0;
+  /** -1 when the anchored dig is on terrain. */
+  let anchorTreeId = -1;
 
   void renderer.setAnimationLoop(() => {
     const now = performance.now() / 1000;
@@ -234,8 +250,7 @@ async function start(): Promise<void> {
     const eyeY = player.y + player.eyeHeight;
     const eyeZ = player.z;
 
-    raycastVoxel(
-      world,
+    world.raycastScene(
       eyeX,
       eyeY,
       eyeZ,
@@ -245,6 +260,7 @@ async function start(): Promise<void> {
       DIG_REACH_METERS,
       hit,
     );
+    const aimed = hit.kind !== HitKind.None;
 
     // Walking only: there is no hand free to swing while tucked into a ball.
     const canDig =
@@ -261,7 +277,7 @@ async function start(): Promise<void> {
             DIG_REANCHOR_DIRECTION;
 
         if (!sameAnchor) {
-          if (hit.hit) {
+          if (aimed) {
             digAnchored = true;
             anchorOriginX = eyeX;
             anchorOriginY = eyeY;
@@ -269,22 +285,34 @@ async function start(): Promise<void> {
             anchorDirX = player.frontX;
             anchorDirY = player.frontY;
             anchorDirZ = player.frontZ;
-            anchorCenterX = (hit.x + 0.5) * VOXEL_SIZE;
-            anchorCenterY = (hit.y + 0.5) * VOXEL_SIZE;
-            anchorCenterZ = (hit.z + 0.5) * VOXEL_SIZE;
+            anchorCenterX = hit.centerX;
+            anchorCenterY = hit.centerY;
+            anchorCenterZ = hit.centerZ;
+            anchorTreeId = hit.kind === HitKind.Tree ? hit.treeId : -1;
           } else {
             digAnchored = false;
           }
         }
 
         if (digAnchored) {
-          world.digSphere(
-            anchorCenterX,
-            anchorCenterY,
-            anchorCenterZ,
-            DIG_RADIUS_METERS,
-            worldRenderer,
-          );
+          if (anchorTreeId >= 0) {
+            world.digTree(
+              anchorTreeId,
+              anchorCenterX,
+              anchorCenterY,
+              anchorCenterZ,
+              DIG_RADIUS_METERS,
+              worldRenderer,
+            );
+          } else {
+            world.digSphere(
+              anchorCenterX,
+              anchorCenterY,
+              anchorCenterZ,
+              DIG_RADIUS_METERS,
+              worldRenderer,
+            );
+          }
         }
         digCooldown = DIG_TICK_SECONDS;
       }
@@ -296,6 +324,31 @@ async function start(): Promise<void> {
       digAnchored = false;
     }
 
+    // Chup is right mouse, and unlike the scoop it re-raycasts every tick:
+    // the cut is a thin shear that has to follow the trunk as it is eaten
+    // away, so anchoring it would make repeat swings miss.
+    const canChup =
+      input.locked && player.mode === PlayerMode.Walking && input.isMouseDown(2);
+    if (canChup) {
+      chupCooldown -= rawDt;
+      if (chupCooldown <= 0) {
+        if (hit.kind === HitKind.Tree) {
+          world.chopTree(
+            hit.treeId,
+            hit.centerX,
+            hit.centerY,
+            hit.centerZ,
+            CHUP_HORIZONTAL_RADIUS,
+            CHUP_VERTICAL_HALF_THICKNESS,
+            worldRenderer,
+          );
+        }
+        chupCooldown = CHUP_TICK_SECONDS;
+      }
+    } else {
+      chupCooldown = 0;
+    }
+
     playerCamera.sync(camera, player, world, renderX, renderY, renderZ);
 
     hud.set("POS", `${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}`);
@@ -304,9 +357,15 @@ async function start(): Promise<void> {
     hud.set("VIEW", playerCamera.perspective === CameraPerspective.FirstPerson ? "1st" : "3rd");
     hud.set("FOV", playerCamera.fovDegrees.toFixed(0));
     hud.set("CHUNKS", `${world.loadedCount} (r${radius}, ${worldRenderer.meshCount} drawn)`);
+    hud.set("TREES", String(world.treeCount));
     hud.set("QUEUE", String(world.pendingCount));
     hud.set("UPLOAD", `${worstDrainMs.toFixed(1)}ms worst`);
-    hud.set("AIM", hit.hit ? `${hit.distance.toFixed(2)}m` : "--");
+    hud.set(
+      "AIM",
+      aimed
+        ? `${hit.distance.toFixed(2)}m ${hit.kind === HitKind.Tree ? "tree" : "terrain"}`
+        : "--",
+    );
     hud.set("FPS", stats.fps.toFixed(0));
     hud.set("WORST", `${stats.worstMs.toFixed(1)}ms`);
     hud.set(
