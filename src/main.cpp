@@ -38,6 +38,7 @@
 #include "PlayerMesh.hpp"
 #include "PostProcess.hpp"
 #include "Shader.hpp"
+#include "Stick.hpp"
 #include "Texture.hpp"
 #include "physics/PhysicsWorld.hpp"
 #include "voxel/ChunkMesh.hpp"
@@ -70,6 +71,27 @@ constexpr float kChupTickSeconds = 0.25f;
 constexpr float kChupReachMeters = 5.0f;
 constexpr float kChupHorizontalRadiusMeters = 0.22f; // comfortably covers max trunk radius (~0.2m)
 constexpr float kChupVerticalHalfThicknessMeters = 0.06f; // thin "shear" cut, not a gouge
+
+// Stick item: LMB swing reuses chup verbatim (see performChup); RMB
+// press-and-hold charges a spear throw over kStickChargeSeconds, releasing
+// into spawnThrownStick — see processNonMovementInput's stick section and
+// the throw-kinematics constants further below.
+constexpr float kStickChargeSeconds = 3.0f; // tune empirically
+
+// Fabricated hand anchor (no hand/arm model exists — see Player.hpp),
+// expressed in player-local axes (right, up, front). Tune empirically.
+// Idle: held low-right, tip angled forward-down only slightly — at 1.3m
+// long, a steep pitch (an earlier version used 55 degrees) swings the tip
+// well below the view frustum, leaving only the butt near the hand
+// visible; kStickIdlePitchDegrees is kept shallow so the shaft actually
+// reads on screen. Charging: raised to shoulder/head height and well off
+// to the right (a spear held ready-to-throw sits over the shoulder, not
+// centered in view like a rifle sight) — axis still points along front()
+// so the tip telegraphs the throw direction, it's only the socket that
+// moves to the side.
+constexpr glm::vec3 kStickIdleSocketOffset(0.28f, -0.22f, 0.40f);
+constexpr glm::vec3 kStickChargeSocketOffset(0.32f, 0.12f, 0.30f);
+constexpr float kStickIdlePitchDegrees = 20.0f; // idle axis tilts down-forward from horizontal
 
 // Debris: a stubbed visual only (no physics yet — see PhysicsWorld/
 // milestone 3) for voxels cleared by chup/scoop-on-foliage. Small colored
@@ -201,6 +223,10 @@ bool g_digAnchored = false;
 glm::vec3 g_digAnchorOrigin(0.0f);
 glm::vec3 g_digAnchorDirection(0.0f, 0.0f, -1.0f);
 float g_chupCooldown = 0.0f;
+float g_stickSwingCooldown = 0.0f;
+bool g_stickCharging = false;
+float g_stickChargeStartTime = 0.0f;
+int g_stickChargeHotbarSlot = -1; // captured at charge start — see the cancellation check in processNonMovementInput
 
 // See kDebrisLifetimeSeconds's comment — a stubbed "flies off" visual, not
 // real physics.
@@ -700,6 +726,124 @@ std::optional<ActionHit> raycastSceneAndLogs(fgp::World& world, const std::vecto
     return best;
 }
 
+// Thrown-stick kinematics. Gravity matches kDebrisGravity/kFallGravity
+// elsewhere (-9.0f, not -9.81f) for consistency. Full charge (c=1), flat
+// launch: t_fall = sqrt(2*1.4/9.0) ~= 0.558s (launch height ~= eye height
+// minus the charge socket's down-offset, ~1.4m); for a 7m range that needs
+// v ~= 12.5 m/s — drop over that flight (1.4m over 7m, ~11 degree chord)
+// reads as "pretty straight." Zero charge, v=5 m/s, theta=28 degrees:
+// vx~=4.42, vy~=2.35, solving the fall equation gives t~=0.877s and
+// range~=3.87m (~55% of full-charge distance, visibly arcing ~0.31m above
+// launch) — more of that flight time is spent near the apex than covering
+// ground, which reads as "falling quicker" (steep/droopy) despite a longer
+// total time-of-flight than the flat full-charge shot. All five constants
+// below are starting points to tune empirically once thrown in-game — the
+// real values depend on the actual socket offset chosen for the held pose.
+constexpr float kThrownStickGravity = -9.0f;
+constexpr float kStickMinThrowSpeed = 5.0f;
+constexpr float kStickMaxThrowSpeed = 12.5f;
+constexpr float kStickMinLaunchAngleDegrees = 28.0f;
+constexpr float kStickMaxLaunchAngleDegrees = 0.0f;
+
+constexpr float kThrownStickLifetimeSeconds = 10.0f; // safety net — converts to a StuckStick, never despawns
+constexpr float kThrownStickBounceRestitution = 0.25f;
+constexpr int kThrownStickMaxBounces = 2; // force-embed after this many grazing hits
+constexpr float kThrownStickPostBounceNudgeMeters = fgp::kVoxelSize; // off the surface so next frame's sweep doesn't re-hit it
+
+struct ThrownStick {
+    glm::vec3 position;
+    glm::vec3 velocity;
+    float spawnTime;
+    int bounceCount = 0;
+};
+std::vector<ThrownStick> g_thrownSticks;
+
+void spawnThrownStick(glm::vec3 origin, glm::vec3 front, glm::vec3 up, float chargeFraction, float currentTime) {
+    const float speed = glm::mix(kStickMinThrowSpeed, kStickMaxThrowSpeed, chargeFraction);
+    const float angleRad =
+        glm::radians(glm::mix(kStickMinLaunchAngleDegrees, kStickMaxLaunchAngleDegrees, chargeFraction));
+    const glm::vec3 dir = glm::normalize(front * std::cos(angleRad) + up * std::sin(angleRad));
+    g_thrownSticks.push_back(ThrownStick{origin, dir * speed, currentTime, 0});
+}
+
+// Manual kinematic projectile simulation, no Jolt: standing trees have no
+// Jolt collider at all (chup/scoop raycast them manually — see
+// raycastSceneAndLogs), so a Jolt-simulated body would fly straight
+// through the one surface (trunks) this feature must specifically detect
+// and bounce off. Each step integrates gravity by hand (same style as
+// Debris/PickupField's fall) and sweeps the previous-to-new position
+// segment through raycastSceneAndLogs — the same merged terrain+tree+log
+// query chup/scoop already use — to find the first frame it crosses into
+// solid geometry.
+void updateThrownSticks(float dt, fgp::World& world, std::vector<DynamicLog>& dynamicLogs,
+                         fgp::PhysicsWorld& physicsWorld, fgp::StuckStickField& stuckSticks) {
+    for (auto it = g_thrownSticks.begin(); it != g_thrownSticks.end();) {
+        const glm::vec3 prevPos = it->position;
+        it->velocity.y += kThrownStickGravity * dt;
+        const glm::vec3 newPos = prevPos + it->velocity * dt;
+        const glm::vec3 delta = newPos - prevPos;
+        const float segLen = glm::length(delta);
+
+        bool consumed = false;
+        if (segLen > 1e-6f) {
+            const glm::vec3 segDir = delta / segLen;
+            if (const auto hit = raycastSceneAndLogs(world, dynamicLogs, physicsWorld, prevPos, segDir, segLen)) {
+                fgp::Material material = fgp::Material::Air;
+                glm::vec3 anchorWorld = newPos; // fallback; overwritten per-arm below
+                if (const auto* terrainHit = std::get_if<fgp::TerrainHit>(&*hit)) {
+                    material = world.materialAt(terrainHit->voxel);
+                    anchorWorld = (glm::vec3(terrainHit->voxel) + 0.5f) * fgp::kVoxelSize;
+                } else if (const auto* treeHit = std::get_if<fgp::TreeHit>(&*hit)) {
+                    material = treeHit->tree->voxels.at(treeHit->localVoxel);
+                    anchorWorld = treeHit->tree->rootWorld + (glm::vec3(treeHit->localVoxel) + 0.5f) * fgp::kVoxelSize;
+                } else if (const auto* logHit = std::get_if<LogHit>(&*hit)) {
+                    material = dynamicLogs[logHit->logIndex].voxels.at(logHit->localVoxel);
+                    anchorWorld =
+                        logHit->position + logHit->rotation * ((glm::vec3(logHit->localVoxel) + 0.5f) * fgp::kVoxelSize);
+                }
+
+                // No surface normal is available from raycastSceneAndLogs
+                // (it returns a voxel, not an intersection) — approximate
+                // the embedded pose as tip-at-anchor, body trailing back
+                // along -segDir, rather than a true surface-aligned stick.
+                if (fgp::isHandDiggable(material)) {
+                    // Sticks — ground/foliage (and anything else soft
+                    // enough to hand-dig).
+                    stuckSticks.spawn(anchorWorld - segDir * (fgp::kStickLengthVoxels * fgp::kVoxelSize), segDir);
+                    consumed = true;
+                } else {
+                    // Too hard — bounces (Wood trunks, and incidentally
+                    // Rock/Granite/Ice; the user only named tree trunks
+                    // explicitly, generalizing to the existing hardness
+                    // tier rather than special-casing Wood).
+                    ++it->bounceCount;
+                    if (it->bounceCount > kThrownStickMaxBounces) {
+                        stuckSticks.spawn(anchorWorld - segDir * (fgp::kStickLengthVoxels * fgp::kVoxelSize), segDir);
+                        consumed = true;
+                    } else {
+                        it->position = anchorWorld - segDir * kThrownStickPostBounceNudgeMeters;
+                        it->velocity = -segDir * (glm::length(it->velocity) * kThrownStickBounceRestitution) +
+                                       glm::vec3(0.0f, -0.5f, 0.0f); // small downward bias so it clatters down
+                    }
+                }
+            }
+        }
+        if (!consumed) {
+            it->position = newPos;
+        }
+
+        const bool timedOut = (g_currentTime - it->spawnTime) > kThrownStickLifetimeSeconds;
+        const bool fellOutOfWorld = it->position.y < fgp::Player::kKillPlaneY;
+        if (!consumed && (timedOut || fellOutOfWorld)) {
+            // Never silently despawn a real inventory item — convert
+            // wherever it currently is rather than vanish.
+            stuckSticks.spawn(it->position, glm::normalize(it->velocity));
+            consumed = true;
+        }
+        it = consumed ? g_thrownSticks.erase(it) : std::next(it);
+    }
+}
+
 // Per-frame snap-on-sleep + foliage-shatter pass. Must run exactly once per
 // frame, right after processNonMovementInput(...) and before
 // world.update(...) in run()'s main loop — this ordering is load-bearing:
@@ -826,6 +970,228 @@ fgp::PlayerInput gatherPlayerInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) input.moveAxis.x -= 1.0f;
     input.jumpPressed = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
     return input;
+}
+
+// One chup gesture along (origin, direction): raycasts terrain+trees+logs
+// and, on a TreeHit or LogHit, shears/severs geometry (spawns debris/
+// pickups, may sever a tree into a new DynamicLog or re-sever an existing
+// one — see kChupTickSeconds's comment). TerrainHit is a no-op (nothing
+// choppable there yet). Shared by unarmed RMB and the stick's LMB swing so
+// both stay byte-for-byte identical instead of drifting.
+void performChup(glm::vec3 origin, glm::vec3 direction, fgp::World& world, std::vector<DynamicLog>& dynamicLogs,
+                  fgp::PhysicsWorld& physicsWorld, fgp::PickupField& pickupField) {
+    const auto hit = raycastSceneAndLogs(world, dynamicLogs, physicsWorld, origin, direction, kChupReachMeters);
+    if (const auto* treeHit = hit ? std::get_if<fgp::TreeHit>(&*hit) : nullptr) {
+        fgp::TreeInstance& tree = *treeHit->tree;
+        const glm::vec3 hitCenter =
+            tree.rootWorld + (glm::vec3(treeHit->localVoxel) + 0.5f) * fgp::kVoxelSize;
+        // chopTree clears anything isChoppable within its disc
+        // (Wood or Leaf) — harmless no-op if it landed somewhere
+        // with neither (e.g. just past the canopy's edge).
+        fgp::ChopResult chop =
+            fgp::chopTree(tree, hitCenter, kChupHorizontalRadiusMeters, kChupVerticalHalfThicknessMeters);
+        if (!chop.clearedWoodVoxels.empty() || !chop.clearedLeafVoxels.empty()) {
+            tree.mesh->upload(fgp::buildTreeVoxelMesh(tree.voxels));
+            if (!chop.clearedWoodVoxels.empty()) {
+                spawnDebrisForCleared(chop.clearedWoodVoxels, tree.rootWorld, kIdentityRotation, fgp::Material::Wood);
+                spawnWoodPickups(pickupField, world, hitCenter);
+            }
+            if (!chop.clearedLeafVoxels.empty()) {
+                spawnDebrisForCleared(chop.clearedLeafVoxels, tree.rootWorld, kIdentityRotation, fgp::Material::Leaf);
+                spawnFoliagePickups(pickupField, world, hitCenter);
+            }
+            if (chop.severedAtLocalY && chop.severedAbove) {
+                world.recordTreeSevered(tree.treeHash, *chop.severedAtLocalY);
+
+                // Capsule proxy for physics (radius = trunk radius,
+                // half-height/pivot = the severed piece's own
+                // occupied-bounds center); the render mesh stays the
+                // real chipped voxel geometry. Re-basing the grid to
+                // its own pivot (rather than just shifting a copy of
+                // the render vertices) is what keeps this piece
+                // scoop/chup-interactable afterward as a DynamicLog
+                // — see the "Felled-log interactivity" comment above.
+                fgp::TreeVoxelGrid pieceVoxels = std::move(*chop.severedAbove);
+                const GridPivot pivot = computeGridPivot(pieceVoxels);
+                rebaseGridToPivot(pieceVoxels, pivot);
+                const glm::vec3 pivotLocal(0.0f, pivot.localY, 0.0f);
+                const float radiusMeters = tree.trunkRadiusVoxels * fgp::kVoxelSize;
+
+                std::fprintf(stderr,
+                             "[sever] severedAtLocalY=%d pieceDims=(%d,%d,%d) pieceOriginLocal=(%d,%d,%d) "
+                             "pivotShiftVoxels=%d pivotLocal=(%.3f,%.3f,%.3f) halfHeight=%.3f radius=%.3f "
+                             "spawnWorldPos=(%.3f,%.3f,%.3f)\n",
+                             *chop.severedAtLocalY, pieceVoxels.dims.x, pieceVoxels.dims.y, pieceVoxels.dims.z,
+                             pieceVoxels.originLocal.x, pieceVoxels.originLocal.y, pieceVoxels.originLocal.z,
+                             pivot.shiftVoxels, static_cast<double>(pivotLocal.x), static_cast<double>(pivotLocal.y),
+                             static_cast<double>(pivotLocal.z), static_cast<double>(pivot.halfHeightMeters),
+                             static_cast<double>(radiusMeters), static_cast<double>(tree.rootWorld.x + pivotLocal.x),
+                             static_cast<double>(tree.rootWorld.y + pivotLocal.y),
+                             static_cast<double>(tree.rootWorld.z + pivotLocal.z));
+
+                const JPH::BodyID logBody = physicsWorld.spawnCapsuleBody(
+                    tree.rootWorld + pivotLocal, kIdentityRotation, radiusMeters, pivot.halfHeightMeters,
+                    /*applyToppleImpulse=*/true);
+                std::fprintf(stderr, "[sever] spawnCapsuleBody returned invalid=%d\n", logBody.IsInvalid());
+                if (!logBody.IsInvalid()) {
+                    auto logMesh = std::make_unique<fgp::ChunkMesh>();
+                    logMesh->upload(fgp::buildTreeVoxelMesh(pieceVoxels)); // already pivot-centered
+                    dynamicLogs.push_back(
+                        DynamicLog{logBody, std::move(logMesh), std::move(pieceVoxels), radiusMeters, /*wasActive=*/true});
+                    std::fprintf(stderr, "[sever] DynamicLog created, dynamicLogs.size()=%zu\n", dynamicLogs.size());
+                }
+            }
+        }
+    } else if (const auto* logHit = hit ? std::get_if<LogHit>(&*hit) : nullptr) {
+        // Felled log — see "Felled-log interactivity" above.
+        const std::size_t logIndex = logHit->logIndex;
+        std::fprintf(stderr,
+                     "[log-chop] logIndex=%zu dynamicLogs.size()=%zu localVoxel=(%d,%d,%d) "
+                     "logPos=(%.3f,%.3f,%.3f) logRot=(%.3f,%.3f,%.3f,%.3f)\n",
+                     logIndex, dynamicLogs.size(), logHit->localVoxel.x, logHit->localVoxel.y, logHit->localVoxel.z,
+                     static_cast<double>(logHit->position.x), static_cast<double>(logHit->position.y),
+                     static_cast<double>(logHit->position.z), static_cast<double>(logHit->rotation.x),
+                     static_cast<double>(logHit->rotation.y), static_cast<double>(logHit->rotation.z),
+                     static_cast<double>(logHit->rotation.w));
+        DynamicLog& log = dynamicLogs[logIndex];
+        std::fprintf(stderr, "[log-chop] log.voxels dims=(%d,%d,%d) originLocal=(%d,%d,%d) radiusMeters=%.3f\n",
+                     log.voxels.dims.x, log.voxels.dims.y, log.voxels.dims.z, log.voxels.originLocal.x,
+                     log.voxels.originLocal.y, log.voxels.originLocal.z, static_cast<double>(log.radiusMeters));
+        const glm::vec3 hitCenter =
+            logHit->position + logHit->rotation * ((glm::vec3(logHit->localVoxel) + 0.5f) * fgp::kVoxelSize);
+        fgp::ChopResult chop =
+            fgp::chopVoxelGrid(log.voxels, logHit->position, logHit->rotation, hitCenter,
+                                kChupHorizontalRadiusMeters, kChupVerticalHalfThicknessMeters);
+        std::fprintf(stderr, "[log-chop] clearedWood=%zu clearedLeaf=%zu severed=%d\n",
+                     chop.clearedWoodVoxels.size(), chop.clearedLeafVoxels.size(),
+                     chop.severedAtLocalY.has_value());
+        if (!chop.clearedWoodVoxels.empty() || !chop.clearedLeafVoxels.empty()) {
+            if (!chop.clearedWoodVoxels.empty()) {
+                spawnDebrisForCleared(chop.clearedWoodVoxels, logHit->position, logHit->rotation, fgp::Material::Wood);
+                spawnWoodPickups(pickupField, world, hitCenter);
+            }
+            if (!chop.clearedLeafVoxels.empty()) {
+                spawnDebrisForCleared(chop.clearedLeafVoxels, logHit->position, logHit->rotation, fgp::Material::Leaf);
+                spawnFoliagePickups(pickupField, world, hitCenter);
+            }
+
+            if (chop.severedAtLocalY && chop.severedAbove) {
+                // Re-severance: both halves' extents changed, so
+                // neither's old capsule fits anymore — remove it and
+                // spawn two fresh ones, reusing the exact same
+                // pivot/re-basing approach the tree->log severance
+                // above uses (this log's grid is already in a
+                // pivot-based local frame from ITS creation, so the
+                // math is identical, just sourced from the log's
+                // current transform instead of a tree's rootWorld).
+                std::fprintf(stderr, "[log-resever] entering, severedAtLocalY=%d aboveDims=(%d,%d,%d)\n",
+                             *chop.severedAtLocalY, chop.severedAbove->dims.x, chop.severedAbove->dims.y,
+                             chop.severedAbove->dims.z);
+                const float radiusMeters = log.radiusMeters;
+                physicsWorld.removeBody(log.body);
+
+                // A capsule's total collision length is 2*halfHeight
+                // + 2*radius (hemispherical caps beyond the
+                // cylinder) — spawning both halves flush at their
+                // true occupied-bounds centers would overlap their
+                // caps by up to 2*radiusMeters right at the cut, and
+                // Jolt would kick them apart on the first physics
+                // step. Push each pivot outward by radiusMeters
+                // (below down, above up) before rebasing so the
+                // grid/mesh/capsule all agree on a small real gap at
+                // the cut instead.
+                const int gapVoxels = static_cast<int>(std::lround(radiusMeters / fgp::kVoxelSize));
+
+                // "below" (remaining) piece: log.voxels was already
+                // shrunk in place by chopVoxelGrid/severVoxelGridAt.
+                GridPivot belowPivot = computeGridPivot(log.voxels);
+                belowPivot.shiftVoxels -= gapVoxels;
+                belowPivot.localY = static_cast<float>(belowPivot.shiftVoxels) * fgp::kVoxelSize;
+                const bool belowEmpty = gridIsEmpty(log.voxels);
+                JPH::BodyID belowBody;
+                if (!belowEmpty) {
+                    rebaseGridToPivot(log.voxels, belowPivot);
+                    belowBody = physicsWorld.spawnCapsuleBody(
+                        logHit->position + logHit->rotation * glm::vec3(0.0f, belowPivot.localY, 0.0f),
+                        logHit->rotation, radiusMeters, belowPivot.halfHeightMeters,
+                        /*applyToppleImpulse=*/false);
+                }
+
+                // "above" (severed-off) piece: a brand new log.
+                fgp::TreeVoxelGrid aboveVoxels = std::move(*chop.severedAbove);
+                GridPivot abovePivot = computeGridPivot(aboveVoxels);
+                abovePivot.shiftVoxels += gapVoxels;
+                abovePivot.localY = static_cast<float>(abovePivot.shiftVoxels) * fgp::kVoxelSize;
+                const bool aboveEmpty = gridIsEmpty(aboveVoxels);
+                JPH::BodyID aboveBody;
+                if (!aboveEmpty) {
+                    rebaseGridToPivot(aboveVoxels, abovePivot);
+                    aboveBody = physicsWorld.spawnCapsuleBody(
+                        logHit->position + logHit->rotation * glm::vec3(0.0f, abovePivot.localY, 0.0f),
+                        logHit->rotation, radiusMeters, abovePivot.halfHeightMeters,
+                        /*applyToppleImpulse=*/false);
+                }
+
+                std::fprintf(stderr,
+                             "[log-resever] belowEmpty=%d belowInvalid=%d aboveEmpty=%d aboveInvalid=%d "
+                             "gapVoxels=%d\n",
+                             belowEmpty, belowBody.IsInvalid(), aboveEmpty, aboveBody.IsInvalid(), gapVoxels);
+                if (!belowEmpty && !belowBody.IsInvalid()) {
+                    log.body = belowBody;
+                    log.mesh->upload(fgp::buildTreeVoxelMesh(log.voxels));
+                    log.wasActive = true;
+                    // Grid/pivot/body just changed — re-earn the snap
+                    // rather than keeping a stale one from before the
+                    // re-cut (see DynamicLog::snapped).
+                    log.snapped = false;
+                }
+                if (!aboveEmpty && !aboveBody.IsInvalid()) {
+                    auto aboveMesh = std::make_unique<fgp::ChunkMesh>();
+                    aboveMesh->upload(fgp::buildTreeVoxelMesh(aboveVoxels));
+                    dynamicLogs.push_back(DynamicLog{aboveBody, std::move(aboveMesh), std::move(aboveVoxels),
+                                                      radiusMeters, /*wasActive=*/true});
+                } else if (!aboveBody.IsInvalid()) {
+                    physicsWorld.removeBody(aboveBody);
+                }
+                std::fprintf(stderr, "[log-resever] done, dynamicLogs.size()=%zu\n", dynamicLogs.size());
+                // dynamicLogs may have reallocated via push_back above, but that only
+                // ever appends — logIndex still names the same "below" slot afterward.
+                if (belowEmpty || belowBody.IsInvalid()) {
+                    if (!belowBody.IsInvalid()) {
+                        physicsWorld.removeBody(belowBody);
+                    }
+                    dynamicLogs.erase(dynamicLogs.begin() + static_cast<std::ptrdiff_t>(logIndex));
+                }
+            } else if (gridIsEmpty(log.voxels)) {
+                // Chopped away the last of it without a "no wood in
+                // this band" trigger (e.g. its last few Leaf voxels).
+                physicsWorld.removeBody(log.body);
+                dynamicLogs.erase(dynamicLogs.begin() + static_cast<std::ptrdiff_t>(logIndex));
+            } else {
+                std::fprintf(stderr, "[log-chop] building mesh, dims=(%d,%d,%d)\n", log.voxels.dims.x,
+                             log.voxels.dims.y, log.voxels.dims.z);
+                const auto verts = fgp::buildTreeVoxelMesh(log.voxels);
+                std::fprintf(stderr, "[log-chop] mesh built, vertCount=%zu, uploading\n", verts.size());
+                log.mesh->upload(verts);
+                std::fprintf(stderr, "[log-chop] uploaded\n");
+            }
+        }
+    }
+}
+
+// Held-stick view-model transform: socket position is eyePosition offset
+// along the player's own (right, up, front) basis, snapped instantly
+// between the idle/charging offsets (no animation system — see
+// kStickIdleSocketOffset's comment). Valid in both perspectives since it's
+// player-relative, not camera-relative (see Camera::sync).
+glm::mat4 heldStickModelMatrix(const fgp::Player& player, bool charging) {
+    const glm::vec3 offset = charging ? kStickChargeSocketOffset : kStickIdleSocketOffset;
+    const glm::vec3 socketPos =
+        player.eyePosition() + player.right() * offset.x + player.up() * offset.y + player.front() * offset.z;
+    const glm::vec3 axis = charging ? player.front()
+                                     : glm::normalize(player.front() * std::cos(glm::radians(kStickIdlePitchDegrees)) -
+                                                       player.up() * std::sin(glm::radians(kStickIdlePitchDegrees)));
+    return glm::translate(glm::mat4(1.0f), socketPos) * glm::mat4(fgp::basisFromAxis(axis, player.up()));
 }
 
 void processNonMovementInput(GLFWwindow* window, float deltaTime, fgp::World& world, fgp::PhysicsWorld& physicsWorld,
@@ -1017,210 +1383,55 @@ void processNonMovementInput(GLFWwindow* window, float deltaTime, fgp::World& wo
                           inventory.isUnarmedSelected() && glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
     if (canChup) {
         if (g_chupCooldown <= 0.0f) {
-            const glm::vec3 origin = g_player.eyePosition();
-            const glm::vec3 direction = g_player.front();
-
-            const auto hit = raycastSceneAndLogs(world, dynamicLogs, physicsWorld, origin, direction, kChupReachMeters);
-            if (const auto* treeHit = hit ? std::get_if<fgp::TreeHit>(&*hit) : nullptr) {
-                fgp::TreeInstance& tree = *treeHit->tree;
-                const glm::vec3 hitCenter =
-                    tree.rootWorld + (glm::vec3(treeHit->localVoxel) + 0.5f) * fgp::kVoxelSize;
-                // chopTree clears anything isChoppable within its disc
-                // (Wood or Leaf) — harmless no-op if it landed somewhere
-                // with neither (e.g. just past the canopy's edge).
-                fgp::ChopResult chop =
-                    fgp::chopTree(tree, hitCenter, kChupHorizontalRadiusMeters, kChupVerticalHalfThicknessMeters);
-                if (!chop.clearedWoodVoxels.empty() || !chop.clearedLeafVoxels.empty()) {
-                    tree.mesh->upload(fgp::buildTreeVoxelMesh(tree.voxels));
-                    if (!chop.clearedWoodVoxels.empty()) {
-                        spawnDebrisForCleared(chop.clearedWoodVoxels, tree.rootWorld, kIdentityRotation, fgp::Material::Wood);
-                        spawnWoodPickups(pickupField, world, hitCenter);
-                    }
-                    if (!chop.clearedLeafVoxels.empty()) {
-                        spawnDebrisForCleared(chop.clearedLeafVoxels, tree.rootWorld, kIdentityRotation, fgp::Material::Leaf);
-                        spawnFoliagePickups(pickupField, world, hitCenter);
-                    }
-                    if (chop.severedAtLocalY && chop.severedAbove) {
-                        world.recordTreeSevered(tree.treeHash, *chop.severedAtLocalY);
-
-                        // Capsule proxy for physics (radius = trunk radius,
-                        // half-height/pivot = the severed piece's own
-                        // occupied-bounds center); the render mesh stays the
-                        // real chipped voxel geometry. Re-basing the grid to
-                        // its own pivot (rather than just shifting a copy of
-                        // the render vertices) is what keeps this piece
-                        // scoop/chup-interactable afterward as a DynamicLog
-                        // — see the "Felled-log interactivity" comment above.
-                        fgp::TreeVoxelGrid pieceVoxels = std::move(*chop.severedAbove);
-                        const GridPivot pivot = computeGridPivot(pieceVoxels);
-                        rebaseGridToPivot(pieceVoxels, pivot);
-                        const glm::vec3 pivotLocal(0.0f, pivot.localY, 0.0f);
-                        const float radiusMeters = tree.trunkRadiusVoxels * fgp::kVoxelSize;
-
-                        std::fprintf(stderr,
-                                     "[sever] severedAtLocalY=%d pieceDims=(%d,%d,%d) pieceOriginLocal=(%d,%d,%d) "
-                                     "pivotShiftVoxels=%d pivotLocal=(%.3f,%.3f,%.3f) halfHeight=%.3f radius=%.3f "
-                                     "spawnWorldPos=(%.3f,%.3f,%.3f)\n",
-                                     *chop.severedAtLocalY, pieceVoxels.dims.x, pieceVoxels.dims.y, pieceVoxels.dims.z,
-                                     pieceVoxels.originLocal.x, pieceVoxels.originLocal.y, pieceVoxels.originLocal.z,
-                                     pivot.shiftVoxels, static_cast<double>(pivotLocal.x), static_cast<double>(pivotLocal.y),
-                                     static_cast<double>(pivotLocal.z), static_cast<double>(pivot.halfHeightMeters),
-                                     static_cast<double>(radiusMeters), static_cast<double>(tree.rootWorld.x + pivotLocal.x),
-                                     static_cast<double>(tree.rootWorld.y + pivotLocal.y),
-                                     static_cast<double>(tree.rootWorld.z + pivotLocal.z));
-
-                        const JPH::BodyID logBody = physicsWorld.spawnCapsuleBody(
-                            tree.rootWorld + pivotLocal, kIdentityRotation, radiusMeters, pivot.halfHeightMeters,
-                            /*applyToppleImpulse=*/true);
-                        std::fprintf(stderr, "[sever] spawnCapsuleBody returned invalid=%d\n", logBody.IsInvalid());
-                        if (!logBody.IsInvalid()) {
-                            auto logMesh = std::make_unique<fgp::ChunkMesh>();
-                            logMesh->upload(fgp::buildTreeVoxelMesh(pieceVoxels)); // already pivot-centered
-                            dynamicLogs.push_back(
-                                DynamicLog{logBody, std::move(logMesh), std::move(pieceVoxels), radiusMeters, /*wasActive=*/true});
-                            std::fprintf(stderr, "[sever] DynamicLog created, dynamicLogs.size()=%zu\n", dynamicLogs.size());
-                        }
-                    }
-                }
-            } else if (const auto* logHit = hit ? std::get_if<LogHit>(&*hit) : nullptr) {
-                // Felled log — see "Felled-log interactivity" above.
-                const std::size_t logIndex = logHit->logIndex;
-                std::fprintf(stderr,
-                             "[log-chop] logIndex=%zu dynamicLogs.size()=%zu localVoxel=(%d,%d,%d) "
-                             "logPos=(%.3f,%.3f,%.3f) logRot=(%.3f,%.3f,%.3f,%.3f)\n",
-                             logIndex, dynamicLogs.size(), logHit->localVoxel.x, logHit->localVoxel.y, logHit->localVoxel.z,
-                             static_cast<double>(logHit->position.x), static_cast<double>(logHit->position.y),
-                             static_cast<double>(logHit->position.z), static_cast<double>(logHit->rotation.x),
-                             static_cast<double>(logHit->rotation.y), static_cast<double>(logHit->rotation.z),
-                             static_cast<double>(logHit->rotation.w));
-                DynamicLog& log = dynamicLogs[logIndex];
-                std::fprintf(stderr, "[log-chop] log.voxels dims=(%d,%d,%d) originLocal=(%d,%d,%d) radiusMeters=%.3f\n",
-                             log.voxels.dims.x, log.voxels.dims.y, log.voxels.dims.z, log.voxels.originLocal.x,
-                             log.voxels.originLocal.y, log.voxels.originLocal.z, static_cast<double>(log.radiusMeters));
-                const glm::vec3 hitCenter =
-                    logHit->position + logHit->rotation * ((glm::vec3(logHit->localVoxel) + 0.5f) * fgp::kVoxelSize);
-                fgp::ChopResult chop =
-                    fgp::chopVoxelGrid(log.voxels, logHit->position, logHit->rotation, hitCenter,
-                                        kChupHorizontalRadiusMeters, kChupVerticalHalfThicknessMeters);
-                std::fprintf(stderr, "[log-chop] clearedWood=%zu clearedLeaf=%zu severed=%d\n",
-                             chop.clearedWoodVoxels.size(), chop.clearedLeafVoxels.size(),
-                             chop.severedAtLocalY.has_value());
-                if (!chop.clearedWoodVoxels.empty() || !chop.clearedLeafVoxels.empty()) {
-                    if (!chop.clearedWoodVoxels.empty()) {
-                        spawnDebrisForCleared(chop.clearedWoodVoxels, logHit->position, logHit->rotation, fgp::Material::Wood);
-                        spawnWoodPickups(pickupField, world, hitCenter);
-                    }
-                    if (!chop.clearedLeafVoxels.empty()) {
-                        spawnDebrisForCleared(chop.clearedLeafVoxels, logHit->position, logHit->rotation, fgp::Material::Leaf);
-                        spawnFoliagePickups(pickupField, world, hitCenter);
-                    }
-
-                    if (chop.severedAtLocalY && chop.severedAbove) {
-                        // Re-severance: both halves' extents changed, so
-                        // neither's old capsule fits anymore — remove it and
-                        // spawn two fresh ones, reusing the exact same
-                        // pivot/re-basing approach the tree->log severance
-                        // above uses (this log's grid is already in a
-                        // pivot-based local frame from ITS creation, so the
-                        // math is identical, just sourced from the log's
-                        // current transform instead of a tree's rootWorld).
-                        std::fprintf(stderr, "[log-resever] entering, severedAtLocalY=%d aboveDims=(%d,%d,%d)\n",
-                                     *chop.severedAtLocalY, chop.severedAbove->dims.x, chop.severedAbove->dims.y,
-                                     chop.severedAbove->dims.z);
-                        const float radiusMeters = log.radiusMeters;
-                        physicsWorld.removeBody(log.body);
-
-                        // A capsule's total collision length is 2*halfHeight
-                        // + 2*radius (hemispherical caps beyond the
-                        // cylinder) — spawning both halves flush at their
-                        // true occupied-bounds centers would overlap their
-                        // caps by up to 2*radiusMeters right at the cut, and
-                        // Jolt would kick them apart on the first physics
-                        // step. Push each pivot outward by radiusMeters
-                        // (below down, above up) before rebasing so the
-                        // grid/mesh/capsule all agree on a small real gap at
-                        // the cut instead.
-                        const int gapVoxels = static_cast<int>(std::lround(radiusMeters / fgp::kVoxelSize));
-
-                        // "below" (remaining) piece: log.voxels was already
-                        // shrunk in place by chopVoxelGrid/severVoxelGridAt.
-                        GridPivot belowPivot = computeGridPivot(log.voxels);
-                        belowPivot.shiftVoxels -= gapVoxels;
-                        belowPivot.localY = static_cast<float>(belowPivot.shiftVoxels) * fgp::kVoxelSize;
-                        const bool belowEmpty = gridIsEmpty(log.voxels);
-                        JPH::BodyID belowBody;
-                        if (!belowEmpty) {
-                            rebaseGridToPivot(log.voxels, belowPivot);
-                            belowBody = physicsWorld.spawnCapsuleBody(
-                                logHit->position + logHit->rotation * glm::vec3(0.0f, belowPivot.localY, 0.0f),
-                                logHit->rotation, radiusMeters, belowPivot.halfHeightMeters,
-                                /*applyToppleImpulse=*/false);
-                        }
-
-                        // "above" (severed-off) piece: a brand new log.
-                        fgp::TreeVoxelGrid aboveVoxels = std::move(*chop.severedAbove);
-                        GridPivot abovePivot = computeGridPivot(aboveVoxels);
-                        abovePivot.shiftVoxels += gapVoxels;
-                        abovePivot.localY = static_cast<float>(abovePivot.shiftVoxels) * fgp::kVoxelSize;
-                        const bool aboveEmpty = gridIsEmpty(aboveVoxels);
-                        JPH::BodyID aboveBody;
-                        if (!aboveEmpty) {
-                            rebaseGridToPivot(aboveVoxels, abovePivot);
-                            aboveBody = physicsWorld.spawnCapsuleBody(
-                                logHit->position + logHit->rotation * glm::vec3(0.0f, abovePivot.localY, 0.0f),
-                                logHit->rotation, radiusMeters, abovePivot.halfHeightMeters,
-                                /*applyToppleImpulse=*/false);
-                        }
-
-                        std::fprintf(stderr,
-                                     "[log-resever] belowEmpty=%d belowInvalid=%d aboveEmpty=%d aboveInvalid=%d "
-                                     "gapVoxels=%d\n",
-                                     belowEmpty, belowBody.IsInvalid(), aboveEmpty, aboveBody.IsInvalid(), gapVoxels);
-                        if (!belowEmpty && !belowBody.IsInvalid()) {
-                            log.body = belowBody;
-                            log.mesh->upload(fgp::buildTreeVoxelMesh(log.voxels));
-                            log.wasActive = true;
-                            // Grid/pivot/body just changed — re-earn the snap
-                            // rather than keeping a stale one from before the
-                            // re-cut (see DynamicLog::snapped).
-                            log.snapped = false;
-                        }
-                        if (!aboveEmpty && !aboveBody.IsInvalid()) {
-                            auto aboveMesh = std::make_unique<fgp::ChunkMesh>();
-                            aboveMesh->upload(fgp::buildTreeVoxelMesh(aboveVoxels));
-                            dynamicLogs.push_back(DynamicLog{aboveBody, std::move(aboveMesh), std::move(aboveVoxels),
-                                                              radiusMeters, /*wasActive=*/true});
-                        } else if (!aboveBody.IsInvalid()) {
-                            physicsWorld.removeBody(aboveBody);
-                        }
-                        std::fprintf(stderr, "[log-resever] done, dynamicLogs.size()=%zu\n", dynamicLogs.size());
-                        // dynamicLogs may have reallocated via push_back above, but that only
-                        // ever appends — logIndex still names the same "below" slot afterward.
-                        if (belowEmpty || belowBody.IsInvalid()) {
-                            if (!belowBody.IsInvalid()) {
-                                physicsWorld.removeBody(belowBody);
-                            }
-                            dynamicLogs.erase(dynamicLogs.begin() + static_cast<std::ptrdiff_t>(logIndex));
-                        }
-                    } else if (gridIsEmpty(log.voxels)) {
-                        // Chopped away the last of it without a "no wood in
-                        // this band" trigger (e.g. its last few Leaf voxels).
-                        physicsWorld.removeBody(log.body);
-                        dynamicLogs.erase(dynamicLogs.begin() + static_cast<std::ptrdiff_t>(logIndex));
-                    } else {
-                        std::fprintf(stderr, "[log-chop] building mesh, dims=(%d,%d,%d)\n", log.voxels.dims.x,
-                                     log.voxels.dims.y, log.voxels.dims.z);
-                        const auto verts = fgp::buildTreeVoxelMesh(log.voxels);
-                        std::fprintf(stderr, "[log-chop] mesh built, vertCount=%zu, uploading\n", verts.size());
-                        log.mesh->upload(verts);
-                        std::fprintf(stderr, "[log-chop] uploaded\n");
-                    }
-                }
-            }
+            performChup(g_player.eyePosition(), g_player.front(), world, dynamicLogs, physicsWorld, pickupField);
             g_chupCooldown = kChupTickSeconds;
         }
     } else {
         g_chupCooldown = 0.0f;
+    }
+
+    g_stickSwingCooldown -= deltaTime;
+    const bool stickToolActive = !g_cursorFree && !capturedThisFrame && g_player.mode() == fgp::PlayerMode::Walking &&
+                                  inventory.selectedItemType() == fgp::ItemType::Stick;
+    const bool canStickSwing = stickToolActive && !g_stickCharging &&
+                                glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    if (canStickSwing) {
+        if (g_stickSwingCooldown <= 0.0f) {
+            performChup(g_player.eyePosition(), g_player.front(), world, dynamicLogs, physicsWorld, pickupField);
+            g_stickSwingCooldown = kChupTickSeconds;
+        }
+    } else {
+        g_stickSwingCooldown = 0.0f;
+    }
+
+    // Spear charge: press-and-hold RMB while the stick is selected slowly
+    // charges a throw (see kStickChargeSeconds), released into
+    // spawnThrownStick on release. Mutually exclusive with the LMB swing
+    // above (stickToolActive && !g_stickCharging gates that) — holding a
+    // spear two-handed means LMB does nothing mid-charge.
+    const bool stickRmbDown = stickToolActive && glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+    if (stickRmbDown && !g_stickCharging) {
+        g_stickCharging = true;
+        g_stickChargeStartTime = g_currentTime;
+        g_stickChargeHotbarSlot = inventory.selectedHotbarSlot();
+    }
+    if (g_stickCharging) {
+        // Cancellation: cursor freed, mode left Walking, or the selection
+        // changed away from where charging started (slot keys are level-
+        // triggered, so compare against the captured index rather than
+        // re-reading selectedItemType()) — stop with no throw.
+        const bool chargeStillValid = stickToolActive && inventory.selectedHotbarSlot() == g_stickChargeHotbarSlot;
+        if (!chargeStillValid) {
+            g_stickCharging = false;
+        } else if (!stickRmbDown) {
+            // Genuine release — throw.
+            const float chargeFraction =
+                std::clamp((g_currentTime - g_stickChargeStartTime) / kStickChargeSeconds, 0.0f, 1.0f);
+            if (inventory.tryConsumeSelected(1)) {
+                spawnThrownStick(g_player.eyePosition(), g_player.front(), g_player.up(), chargeFraction, g_currentTime);
+            }
+            g_stickCharging = false;
+        }
     }
 }
 
@@ -1333,6 +1544,13 @@ int run() {
         fgp::Inventory inventory;
         fgp::Hotbar hotbar;
         fgp::PickupField pickupField;
+        fgp::StuckStickField stuckSticks;
+
+        // Rigid, never-edited geometry — uploaded once and reused (via
+        // uModel) for the held view-model, every in-flight ThrownStick, and
+        // every StuckStick.
+        fgp::ChunkMesh stickMesh;
+        stickMesh.upload(fgp::buildTreeVoxelMesh(fgp::buildStickVoxelGrid()));
 
         fgp::World world(/*seed=*/1337);
         fgp::PhysicsWorld physicsWorld(world);
@@ -1406,8 +1624,19 @@ int run() {
             g_currentTime = currentFrameTime;
             updateDebris(frameTime);
             pickupField.update(frameTime, g_currentTime, g_player.feetPosition(), inventory);
+            stuckSticks.update(g_player.feetPosition(), inventory);
 
             processNonMovementInput(window, frameTime, world, physicsWorld, dynamicLogs, inventory, hotbar, pickupField);
+
+            // Must run after processNonMovementInput (so a throw started
+            // this frame begins moving immediately) and before
+            // world.update() below — world.update can unload chunks, and a
+            // TreeHit::tree pointer (which raycastSceneAndLogs inside this
+            // call can produce) is only valid "until World::update() next
+            // runs" (see SceneRaycast.hpp). Doesn't mutate dynamicLogs'
+            // size/order, so it doesn't disturb runLogSettlePass's own
+            // ordering invariant below either.
+            updateThrownSticks(frameTime, world, dynamicLogs, physicsWorld, stuckSticks);
 
             // See runLogSettlePass's own comment: must run here — after
             // processNonMovementInput (the only place dynamicLogs' size/
@@ -1511,6 +1740,36 @@ int run() {
             // Item drops — see PickupField. Reuses the hotbar's icon
             // textures as world-space sprites, one asset for both.
             pickupField.draw(shader, itemIcons, g_camera.position(), g_currentTime);
+
+            // Held-stick view-model + embedded StuckStick props — see
+            // heldStickModelMatrix/StuckStickField. Unconditional on
+            // perspective (the socket is player-relative, not
+            // camera-relative — valid in both first- and third-person),
+            // unlike the playerMesh block below which is third-person only.
+            // whiteTexture (not cobbleTexture) so the flat per-voxel vertex
+            // color shows through undistorted, same treatment Debris gets.
+            {
+                whiteTexture.bind(0);
+                glDisable(GL_CULL_FACE);
+                if (inventory.selectedItemType() == fgp::ItemType::Stick) {
+                    shader.setMat4("uModel", heldStickModelMatrix(g_player, g_stickCharging));
+                    stickMesh.draw();
+                }
+                // In-flight thrown sticks — oriented along current velocity
+                // (tip leading), position treated as the tip to match
+                // StuckStick's own butt-anchored placement convention (see
+                // updateThrownSticks' anchorWorld - segDir*length embed math).
+                for (const ThrownStick& ts : g_thrownSticks) {
+                    const glm::vec3 dir =
+                        glm::length(ts.velocity) > 1e-4f ? glm::normalize(ts.velocity) : glm::vec3(0.0f, 0.0f, 1.0f);
+                    const glm::vec3 butt = ts.position - dir * (fgp::kStickLengthVoxels * fgp::kVoxelSize);
+                    shader.setMat4("uModel", glm::translate(glm::mat4(1.0f), butt) *
+                                                  glm::mat4(fgp::basisFromAxis(dir, glm::vec3(0.0f, 1.0f, 0.0f))));
+                    stickMesh.draw();
+                }
+                stuckSticks.draw(shader, stickMesh);
+                glEnable(GL_CULL_FACE);
+            }
 
             if (g_camera.perspective() == fgp::CameraPerspective::ThirdPerson) {
                 const glm::mat4 model = glm::translate(glm::mat4(1.0f), g_player.bodyCenter()) *

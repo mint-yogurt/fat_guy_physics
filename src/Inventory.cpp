@@ -26,4 +26,21 @@ void Inventory::selectHotbarSlot(int index) {
     selectedHotbarSlot_ = std::clamp(index, 0, kHotbarSlots - 1);
 }
 
+std::optional<ItemType> Inventory::selectedItemType() const {
+    const auto& s = slots_[static_cast<std::size_t>(selectedHotbarSlot_)];
+    return s ? std::optional<ItemType>(s->type) : std::nullopt;
+}
+
+bool Inventory::tryConsumeSelected(int count) {
+    auto& s = slots_[static_cast<std::size_t>(selectedHotbarSlot_)];
+    if (!s || s->count < count) {
+        return false;
+    }
+    s->count -= count;
+    if (s->count <= 0) {
+        s = std::nullopt;
+    }
+    return true;
+}
+
 } // namespace fgp

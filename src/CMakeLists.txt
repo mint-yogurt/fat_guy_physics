@@ -12,6 +12,7 @@ add_executable(fatguyphysics
     Inventory.cpp
     Hotbar.cpp
     ItemPickup.cpp
+    Stick.cpp
     physics/PhysicsWorld.cpp
     voxel/Voxel.cpp
     voxel/ChunkMesher.cpp

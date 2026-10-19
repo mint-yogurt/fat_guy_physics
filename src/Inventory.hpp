@@ -38,6 +38,17 @@ public:
     // [0, kTotalSlots).
     const std::optional<ItemStack>& slot(int index) const { return slots_[static_cast<std::size_t>(index)]; }
 
+    // Type of the item in the currently selected hotbar slot, or nullopt if
+    // Unarmed (slot 0, always empty by invariant) or the slot is empty.
+    std::optional<ItemType> selectedItemType() const;
+
+    // Removes count from the currently selected hotbar slot's stack,
+    // clearing the slot if it hits zero. Returns false (no-op) if the
+    // selection is Unarmed/empty/holds fewer than count — callers must
+    // check the return value before doing anything the consumption was
+    // supposed to gate (e.g. spawning a thrown stick).
+    bool tryConsumeSelected(int count = 1);
+
 private:
     std::array<std::optional<ItemStack>, kTotalSlots> slots_{};
     int selectedHotbarSlot_ = 0;
