@@ -88,7 +88,7 @@ Milestones, in order. Each one is runnable and visually verifiable:
 - [x] **M0** Toolchain — monorepo, Vite, pinned three.js, backend readout
 - [x] **M1** One chunk from the real generator, main thread + golden-data check
 - [x] **M2** Fly camera + synchronous chunk streaming
-- [ ] **M3** Web Worker pool with transferable buffers
+- [x] **M3** Web Worker pool with transferable buffers
 - [ ] **M4** Player controller, collision, the fixed-timestep frame loop
 - [ ] **M5** Raycast (redesigned) + scoop
 - [ ] **M6** Trees + chup + the canopy-size fix

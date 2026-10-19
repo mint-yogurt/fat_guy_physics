@@ -47,13 +47,25 @@ export class FlyCamera {
     private readonly canvas: HTMLCanvasElement,
   ) {}
 
+  /** Set when pointer lock was refused, so the HUD can say why. */
+  lockError: string | undefined;
+
   get locked(): boolean {
     return document.pointerLockElement === this.canvas;
   }
 
   attach(): void {
     const onClick = (): void => {
-      if (!this.locked) void this.canvas.requestPointerLock();
+      if (this.locked) return;
+      // requestPointerLock returns a promise that genuinely rejects: in a
+      // cross-origin iframe without allow="pointer-lock", and also when the
+      // user clicks again during the browser's cooldown after an Esc. An
+      // uncaught rejection here spams the console on every click, so it is
+      // recorded for the HUD instead -- "the game will not capture my
+      // mouse" needs to show up somewhere the player can see it.
+      void this.canvas.requestPointerLock()?.catch((err: unknown) => {
+        this.lockError = err instanceof Error ? err.message : String(err);
+      });
     };
     const onMouseMove = (event: MouseEvent): void => {
       if (!this.locked) return;
@@ -77,13 +89,19 @@ export class FlyCamera {
     const onBlur = (): void => {
       this.keys.clear();
     };
+    const onLockChange = (): void => {
+      onBlur();
+      // A lock that succeeded clears any earlier refusal, so the HUD does
+      // not keep showing a stale error after the problem went away.
+      if (this.locked) this.lockError = undefined;
+    };
 
     this.canvas.addEventListener("click", onClick);
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
-    document.addEventListener("pointerlockchange", onBlur);
+    document.addEventListener("pointerlockchange", onLockChange);
 
     this.disposers = [
       () => this.canvas.removeEventListener("click", onClick),
@@ -91,7 +109,7 @@ export class FlyCamera {
       () => window.removeEventListener("keydown", onKeyDown),
       () => window.removeEventListener("keyup", onKeyUp),
       () => window.removeEventListener("blur", onBlur),
-      () => document.removeEventListener("pointerlockchange", onBlur),
+      () => document.removeEventListener("pointerlockchange", onLockChange),
     ];
   }
 

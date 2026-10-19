@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { chunkKey, keyX, keyY, keyZ } from "./chunkKey.ts";
-import type { MeshData } from "../voxel/greedyMesher.ts";
+import { FLOATS_PER_VERTEX } from "../voxel/vertexLayout.ts";
 import { Material } from "../voxel/voxel.ts";
+import { type ChunkResult, SyncChunkSource } from "./chunkSource.ts";
+import { CHUNK_VOLUME } from "./constants.ts";
 import {
   CHUNK_METERS,
   type ChunkSink,
@@ -101,63 +103,119 @@ describe("World streaming", () => {
   class RecordingSink implements ChunkSink {
     readonly loaded: number[] = [];
     readonly unloaded: number[] = [];
-    /** Sum of vertexCount, to prove the mesh handed over is real data. */
+    /** Summed to prove the buffers handed over are real mesh data. */
     totalVertices = 0;
 
-    onChunkLoaded(key: number, _cx: number, _cy: number, _cz: number, mesh: MeshData): void {
-      this.loaded.push(key);
-      this.totalVertices += mesh.vertexCount;
+    onChunkLoaded(result: ChunkResult): void {
+      this.loaded.push(result.key);
+      this.totalVertices += result.vertexCount;
+      // The contract is "exactly vertexCount long, no slack" -- geometry
+      // uploads the whole buffer, so slack would render as garbage.
+      expect(result.vertices.length).toBe(result.vertexCount * FLOATS_PER_VERTEX);
+      expect(result.cells.length).toBe(CHUNK_VOLUME);
     }
     onChunkUnloaded(key: number): void {
       this.unloaded.push(key);
+    }
+    reset(): void {
+      this.loaded.length = 0;
+      this.unloaded.length = 0;
     }
   }
 
   const RADIUS = 2;
 
-  it("loads the full cylinder on the first update and nothing on the second", () => {
-    const world = new World(1337, RADIUS);
-    const sink = new RecordingSink();
+  /** Drains until the source runs dry, ignoring the per-frame budget. */
+  function drainAll(world: World, sink: RecordingSink): void {
+    while (world.pendingCount > 0) world.drain(sink, Number.POSITIVE_INFINITY);
+  }
 
-    const first = world.update(0, 0, sink);
-    expect(first.loaded).toBe(desiredChunkSet(0, 0, RADIUS, new Set()).size);
-    expect(first.unloaded).toBe(0);
-    expect(world.loadedCount).toBe(first.loaded);
+  function makeWorld(radius = RADIUS): World {
+    return new World(1337, new SyncChunkSource(1337), radius);
+  }
+
+  it("loads the full cylinder on the first update and nothing on the second", () => {
+    const world = makeWorld();
+    const sink = new RecordingSink();
+    const expected = desiredChunkSet(0, 0, RADIUS, new Set()).size;
+
+    expect(world.update(0, 0, sink)).toBe(expected);
+    expect(world.pendingCount).toBe(expected);
+    drainAll(world, sink);
+
+    expect(sink.loaded.length).toBe(expected);
+    expect(sink.unloaded.length).toBe(0);
+    expect(world.loadedCount).toBe(expected);
     expect(sink.totalVertices).toBeGreaterThan(0);
 
     // Moving within the same chunk column must not touch the loaded set at
     // all -- this early-out is why update() can be called every frame.
-    const second = world.update(1.0, 1.0, sink);
-    expect(second.loaded).toBe(0);
-    expect(second.unloaded).toBe(0);
+    expect(world.update(1.0, 1.0, sink)).toBe(0);
+  });
+
+  it("stops uploading once the time budget is spent, but always makes progress", () => {
+    // The budget is the whole reason workers do not merely relocate the
+    // stall: results arrive far faster than the main thread can upload
+    // them, so something has to decide when to stop for this frame.
+    const world = makeWorld();
+    const sink = new RecordingSink();
+    const submitted = world.update(0, 0, sink);
+
+    // A zero budget must still upload exactly one chunk -- otherwise a
+    // slow frame would stop the stream permanently instead of slowing it.
+    world.drain(sink, 0);
+    expect(sink.loaded.length).toBe(1);
+    expect(world.pendingCount).toBe(submitted - 1);
+
+    world.drain(sink, 0);
+    expect(sink.loaded.length).toBe(2);
+
+    // And an unlimited budget must clear the rest in one go.
+    world.drain(sink, Number.POSITIVE_INFINITY);
+    expect(sink.loaded.length).toBe(submitted);
   });
 
   it("loads and unloads only the crescent when crossing one boundary", () => {
-    const world = new World(1337, RADIUS);
+    const world = makeWorld();
     const sink = new RecordingSink();
     world.update(0, 0, sink);
+    drainAll(world, sink);
     const afterInitial = world.loadedCount;
 
-    sink.loaded.length = 0;
-    sink.unloaded.length = 0;
-    const crossed = world.update(CHUNK_METERS * 1.5, 0, sink);
+    sink.reset();
+    const submitted = world.update(CHUNK_METERS * 1.5, 0, sink);
+    drainAll(world, sink);
 
-    expect(crossed.loaded).toBeGreaterThan(0);
+    expect(submitted).toBeGreaterThan(0);
     // The set is the same shape translated by one chunk, so what comes in
     // and what goes out must balance exactly.
-    expect(crossed.loaded).toBe(crossed.unloaded);
-    expect(crossed.loaded).toBeLessThan(afterInitial / 2);
+    expect(sink.loaded.length).toBe(sink.unloaded.length);
+    expect(sink.loaded.length).toBeLessThan(afterInitial / 2);
     expect(world.loadedCount).toBe(afterInitial);
-    expect(sink.loaded.length).toBe(crossed.loaded);
-    expect(sink.unloaded.length).toBe(crossed.unloaded);
-    // An unloaded chunk must never also be reported as loaded in the same
-    // pass -- that would mean a chunk was needlessly regenerated.
+    // A chunk must never be unloaded and reloaded in the same pass -- that
+    // would mean regenerating terrain that was already in memory.
     for (const key of sink.unloaded) expect(sink.loaded).not.toContain(key);
   });
 
+  it("discards results for chunks the player moved away from", () => {
+    // Submit a long way from where we end up, then drain. Every result is
+    // stale and must be dropped rather than uploaded.
+    const world = makeWorld(1);
+    const sink = new RecordingSink();
+    world.update(0, 0, sink);
+    world.update(CHUNK_METERS * 500, 0, sink);
+    drainAll(world, sink);
+
+    const desired = desiredChunkSet(500, 0, 1, new Set());
+    for (const key of sink.loaded) expect(desired.has(key)).toBe(true);
+    expect(world.loadedCount).toBe(desired.size);
+  });
+
   it("reads voxels back through materialAt and returns Air outside the loaded set", () => {
-    const world = new World(1337, RADIUS);
-    world.update(0, 0, new RecordingSink());
+    const world = makeWorld();
+    const sink = new RecordingSink();
+    world.update(0, 0, sink);
+    drainAll(world, sink);
 
     // Deep underground inside the loaded band is solid; far outside the
     // radius is Air because the chunk simply is not there.

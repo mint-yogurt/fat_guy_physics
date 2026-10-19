@@ -1,8 +1,8 @@
 import { Mesh, type Material, type Scene } from "three/webgpu";
 
 import type { ChunkKey } from "@fgp/shared/sim/chunkKey";
+import type { ChunkResult } from "@fgp/shared/sim/chunkSource";
 import { CHUNK_METERS, type ChunkSink } from "@fgp/shared/sim/world";
-import type { MeshData } from "@fgp/shared/voxel/greedyMesher";
 
 import { createChunkGeometry, disposeChunkGeometry } from "./chunkGeometry.ts";
 
@@ -29,17 +29,24 @@ export class WorldRenderer implements ChunkSink {
     return this.meshes.size;
   }
 
-  onChunkLoaded(key: ChunkKey, cx: number, cy: number, cz: number, mesh: MeshData): void {
+  onChunkLoaded(result: ChunkResult): void {
     // An empty chunk (solid rock, or pure air above the terrain) meshes to
     // zero vertices. Roughly half of a 4-layer vertical band is one or the
     // other, so skipping them here rather than adding empty Meshes keeps the
     // scene graph at about half the size for free.
-    if (mesh.vertexCount === 0) return;
+    if (result.vertexCount === 0) return;
 
-    // createChunkGeometry copies -- required, because `mesh` is a view onto
-    // the mesher's scratch buffer and the very next chunk load overwrites it.
-    const object = new Mesh(createChunkGeometry(mesh), this.material);
-    object.position.set(cx * CHUNK_METERS, cy * CHUNK_METERS, cz * CHUNK_METERS);
+    // No copy: the buffer came from a worker as a transferable and is
+    // already owned by this thread.
+    const object = new Mesh(
+      createChunkGeometry(result.vertices, result.vertexCount),
+      this.material,
+    );
+    object.position.set(
+      result.cx * CHUNK_METERS,
+      result.cy * CHUNK_METERS,
+      result.cz * CHUNK_METERS,
+    );
     // Chunk geometry is already in chunk-local metres and the only transform
     // is this translation, so there is nothing for three.js to recompute
     // after the first frame.
@@ -47,7 +54,7 @@ export class WorldRenderer implements ChunkSink {
     object.updateMatrix();
 
     this.scene.add(object);
-    this.meshes.set(key, object);
+    this.meshes.set(result.key, object);
   }
 
   onChunkUnloaded(key: ChunkKey): void {

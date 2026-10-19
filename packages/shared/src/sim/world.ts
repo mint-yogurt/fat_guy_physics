@@ -1,9 +1,9 @@
 import { chunkKey, keyX, keyY, keyZ, type ChunkKey } from "./chunkKey.ts";
+import type { ChunkResult, ChunkSource } from "./chunkSource.ts";
 import { CHUNK_SIZE, VOXEL_SIZE } from "./constants.ts";
 import { nowMs } from "./time.ts";
-import { Mesher, type MeshData } from "../voxel/greedyMesher.ts";
 import { floorDiv, floorMod, Material } from "../voxel/voxel.ts";
-import { createChunkGrid, gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
+import { gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
 
 /**
@@ -16,11 +16,9 @@ import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
  *    draw() method. Here, meshes are handed to a {@link ChunkSink} and the
  *    client owns them, because this module also has to run on the
  *    authoritative server, which has no GPU and does not mesh anything.
- *  - **All threading.** The C++ World is a worker pool. At M2 every load is
- *    synchronous on the calling thread, which means crossing a chunk
- *    boundary visibly hitches. That is the motivation for M3, not an
- *    oversight; the split that makes M3 easy is already here, since
- *    {@link loadChunk} is pure CPU work with no sink interaction.
+ *  - **The thread pool itself.** Concurrency lives behind {@link ChunkSource}
+ *    instead, so the same World drives real Web Workers in the browser and
+ *    plain synchronous generation on the server and in tests.
  *
  * Vertical range is a fixed band rather than streamed, same reasoning as the
  * C++: the heightmap generator only produces terrain in a known bounded Y
@@ -38,17 +36,35 @@ export const DEFAULT_LOAD_RADIUS_CHUNKS = 6;
 export const CHUNK_METERS = CHUNK_SIZE * VOXEL_SIZE;
 
 /**
+ * Main-thread milliseconds a single drain may spend turning finished chunks
+ * into GPU geometry.
+ *
+ * Workers finish far faster than the main thread can upload, so without a
+ * cap a burst of completions -- the initial load, or sprinting across
+ * several boundaries at once -- would dump every upload into one frame and
+ * reproduce exactly the stall the workers were added to remove. Leftovers
+ * wait for the next frame.
+ *
+ * The C++ budgets a fixed *count* (kMaxMeshUploadsPerFrame = 4) instead.
+ * A time budget is used here because the quantity actually being protected
+ * is frame time, and per-chunk upload cost varies by an order of magnitude
+ * with vertex count -- four dense chunks and four nearly-empty ones are not
+ * remotely the same amount of work. Four milliseconds leaves most of a
+ * 60Hz frame for rendering while clearing a full-radius initial load in
+ * about a second.
+ */
+export const MAX_DRAIN_MS = 4;
+
+/**
  * Receives chunk lifecycle events. The client implements this to create and
  * destroy GPU geometry; the server will not implement it at all.
  */
 export interface ChunkSink {
   /**
-   * `mesh` is a **view onto the mesher's reusable scratch buffer** and is
-   * invalidated by the next chunk load. Copy anything you need to keep. (At
-   * M3 the buffer arrives from a worker as a transferable and this caveat
-   * goes away.)
+   * The result's buffers are handed over -- the sink owns them, and World
+   * keeps no reference to `vertices`.
    */
-  onChunkLoaded(key: ChunkKey, cx: number, cy: number, cz: number, mesh: MeshData): void;
+  onChunkLoaded(result: ChunkResult): void;
   onChunkUnloaded(key: ChunkKey): void;
 }
 
@@ -86,20 +102,14 @@ export function desiredChunkSet(
   return out;
 }
 
-/** What one {@link World.update} call did, for the HUD and for tests. */
-export interface StreamStats {
-  loaded: number;
-  unloaded: number;
-  /** Wall-clock milliseconds spent generating and meshing. */
-  ms: number;
-}
-
 export class World {
   private readonly generator: TerrainGenerator;
-  private readonly mesher = new Mesher();
   private readonly chunks = new Map<ChunkKey, VoxelGrid>();
   private readonly desired = new Set<ChunkKey>();
-  private readonly stats: StreamStats = { loaded: 0, unloaded: 0, ms: 0 };
+  private readonly inFlight = new Set<ChunkKey>();
+
+  /** Scratch for the distance sort in submitDesired. Reused, never freed. */
+  private readonly submitQueue: ChunkKey[] = [];
 
   private hasCenter = false;
   private centerX = 0;
@@ -107,6 +117,7 @@ export class World {
 
   constructor(
     readonly seed: number,
+    private readonly source: ChunkSource,
     private readonly loadRadiusChunks = DEFAULT_LOAD_RADIUS_CHUNKS,
   ) {
     this.generator = new TerrainGenerator(seed);
@@ -114,6 +125,11 @@ export class World {
 
   get loadedCount(): number {
     return this.chunks.size;
+  }
+
+  /** Chunks submitted but not yet drained. Zero means streaming has settled. */
+  get pendingCount(): number {
+    return this.inFlight.size;
   }
 
   get radius(): number {
@@ -125,20 +141,18 @@ export class World {
   }
 
   /**
-   * Streams around a world-space position. Cheap and allocation-free on the
-   * overwhelming majority of frames: it early-returns unless the camera
-   * actually changed chunk column.
+   * Recomputes the desired set around a world-space position, unloading what
+   * fell out of range and submitting what came into it. Returns the number
+   * of chunks submitted.
+   *
+   * Allocation-free and near-instant on the overwhelming majority of frames:
+   * it early-returns unless the camera actually changed chunk column.
    */
-  update(worldX: number, worldZ: number, sink: ChunkSink): StreamStats {
-    const stats = this.stats;
-    stats.loaded = 0;
-    stats.unloaded = 0;
-    stats.ms = 0;
-
+  update(worldX: number, worldZ: number, sink: ChunkSink): number {
     const centerX = Math.floor(worldX / CHUNK_METERS);
     const centerZ = Math.floor(worldZ / CHUNK_METERS);
     if (this.hasCenter && centerX === this.centerX && centerZ === this.centerZ) {
-      return stats;
+      return 0;
     }
     this.hasCenter = true;
     this.centerX = centerX;
@@ -146,39 +160,89 @@ export class World {
 
     desiredChunkSet(centerX, centerZ, this.loadRadiusChunks, this.desired);
 
-    const started = nowMs();
-
     for (const key of this.chunks.keys()) {
       if (this.desired.has(key)) continue;
       this.chunks.delete(key);
       sink.onChunkUnloaded(key);
-      stats.unloaded++;
     }
 
+    return this.submitDesired(centerX, centerZ);
+  }
+
+  private submitDesired(centerX: number, centerZ: number): number {
+    const queue = this.submitQueue;
+    queue.length = 0;
     for (const key of this.desired) {
-      if (this.chunks.has(key)) continue;
-      const cx = keyX(key);
-      const cy = keyY(key);
-      const cz = keyZ(key);
-      const mesh = this.loadChunk(key, cx, cy, cz);
-      sink.onChunkLoaded(key, cx, cy, cz, mesh);
-      stats.loaded++;
+      if (this.chunks.has(key) || this.inFlight.has(key)) continue;
+      queue.push(key);
     }
 
-    stats.ms = nowMs() - started;
-    return stats;
+    // Nearest-first, so the ground the player is standing on appears before
+    // the horizon does. Without this the pop-in order is whatever the Set
+    // happens to iterate in, which on the initial load means staring at
+    // distant chunks while the terrain underfoot is still missing.
+    queue.sort((a, b) => {
+      const ax = keyX(a) - centerX;
+      const az = keyZ(a) - centerZ;
+      const bx = keyX(b) - centerX;
+      const bz = keyZ(b) - centerZ;
+      return ax * ax + az * az - (bx * bx + bz * bz);
+    });
+
+    for (const key of queue) {
+      this.inFlight.add(key);
+      this.source.submit(key, keyX(key), keyY(key), keyZ(key));
+    }
+    return queue.length;
   }
 
   /**
-   * Generates and meshes one chunk, inserting the grid into the loaded set.
-   * Pure CPU work -- no sink, no GPU -- which is exactly the boundary a
-   * worker runs behind at M3.
+   * Hands finished chunks to the sink for up to `budgetMs` of main-thread
+   * time.
+   *
+   * Must run every frame, not just on boundary crossings -- otherwise
+   * finished chunks sit in the queue until the next crossing happens to
+   * occur and the world looks like it stopped streaming. The C++ makes the
+   * same point at the top of World::update.
+   *
+   * Always uploads at least one chunk when one is ready, so that a budget
+   * smaller than a single upload still makes forward progress rather than
+   * deadlocking the stream.
+   *
+   * Returns milliseconds spent, which is the number worth watching: it is
+   * main-thread time, and it is the only part of streaming the workers did
+   * not take away.
    */
-  private loadChunk(key: ChunkKey, cx: number, cy: number, cz: number): MeshData {
-    const grid = createChunkGrid();
-    this.generator.generate(grid, cx, cy, cz);
-    this.chunks.set(key, grid);
-    return this.mesher.mesh(grid);
+  drain(sink: ChunkSink, budgetMs = MAX_DRAIN_MS): number {
+    const started = nowMs();
+    let uploaded = 0;
+    for (;;) {
+      if (uploaded > 0 && nowMs() - started >= budgetMs) break;
+
+      const result = this.source.poll();
+      if (result === undefined) break;
+      this.inFlight.delete(result.key);
+
+      if (!this.desired.has(result.key)) {
+        // The player moved away before this finished. Dropping it is
+        // cheaper than uploading terrain nobody can see, and it costs
+        // nothing against the budget because no GPU work happened.
+        continue;
+      }
+
+      this.chunks.set(result.key, {
+        dimX: CHUNK_SIZE,
+        dimY: CHUNK_SIZE,
+        dimZ: CHUNK_SIZE,
+        originX: 0,
+        originY: 0,
+        originZ: 0,
+        cells: result.cells,
+      });
+      sink.onChunkLoaded(result);
+      uploaded++;
+    }
+    return uploaded === 0 ? 0 : nowMs() - started;
   }
 
   /** Air for voxels in unloaded chunks, not just voxels that are actually Air. */
@@ -199,5 +263,9 @@ export class World {
         floorMod(worldVoxelZ, CHUNK_SIZE),
       )
     ] as Material;
+  }
+
+  dispose(): void {
+    this.source.dispose();
   }
 }

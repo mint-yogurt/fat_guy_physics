@@ -6,13 +6,7 @@ import "./ui/ui.css";
 // bundle while making `instanceof` checks across the boundary fail.
 // three/webgpu re-exports all of Three.Core, so there is never a reason to
 // reach for the bare "three" specifier in this package.
-import {
-  Color,
-  PerspectiveCamera,
-  Scene,
-  TextureLoader,
-  type Texture,
-} from "three/webgpu";
+import { Color, PerspectiveCamera, Scene, TextureLoader, type Texture } from "three/webgpu";
 
 import { MAX_FRAME_TIME, VOXEL_SIZE } from "@fgp/shared/sim/constants";
 import { DEFAULT_LOAD_RADIUS_CHUNKS, World } from "@fgp/shared/sim/world";
@@ -22,6 +16,7 @@ import { createRenderer, installResizeHandler, isRenderable } from "./render/ren
 import { createVoxelMaterial } from "./render/voxelMaterial.ts";
 import { WorldRenderer } from "./render/worldRenderer.ts";
 import { FrameStats, Hud } from "./ui/hud.ts";
+import { WorkerChunkSource } from "./workers/workerChunkSource.ts";
 
 /** Matches the seed the golden fixture was generated with. */
 const SEED = 1337;
@@ -40,37 +35,11 @@ function loadTexture(url: string): Promise<Texture> {
 }
 
 /**
- * Yields long enough for the browser to actually paint.
+ * Load radius in chunks, overridable via `?radius=N`.
  *
- * One rAF only schedules work for the *next* frame; the paint happens after
- * the callback returns. Waiting two frames is what guarantees the first one
- * reached the screen -- which matters here because the thing being painted is
- * the "generating" message that covers a multi-second synchronous stall.
- *
- * Raced against a timer because a hidden tab does not run rAF *at all* --
- * not throttled, suspended. Opening the game in a background tab would
- * otherwise deadlock startup here until the tab was focused, which looks
- * exactly like a crash. There is nothing to paint in a hidden tab anyway, so
- * the timeout just gets on with it.
- */
-function nextPaint(timeoutMs = 250): Promise<void> {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (): void => {
-      if (done) return;
-      done = true;
-      resolve();
-    };
-    requestAnimationFrame(() => requestAnimationFrame(finish));
-    setTimeout(finish, timeoutMs);
-  });
-}
-
-/**
- * Load radius in chunks. Overridable via `?radius=N` purely for iteration
- * speed: the M2 initial load is synchronous, and at the default radius that
- * is a multi-second freeze on every page reload. `?radius=2` makes it
- * instant while developing anything that is not streaming itself.
+ * Kept after M3 even though the initial load no longer blocks: it is the
+ * fastest way to tell "slow because there is a lot of terrain" apart from
+ * "slow for some other reason".
  */
 function loadRadiusFromUrl(): number {
   const raw = new URLSearchParams(window.location.search).get("radius");
@@ -99,14 +68,12 @@ async function start(): Promise<void> {
   const material = createVoxelMaterial(cobble);
 
   const radius = loadRadiusFromUrl();
-  const world = new World(SEED, radius);
+  const source = new WorkerChunkSource(SEED);
+  const world = new World(SEED, source, radius);
   const worldRenderer = new WorldRenderer(scene, material);
+  hud.set("WORKERS", String(source.workerCount));
 
-  camera.position.set(
-    0,
-    world.surfaceHeightVoxels(0, 0) * VOXEL_SIZE + SPAWN_CLEARANCE,
-    0,
-  );
+  camera.position.set(0, world.surfaceHeightVoxels(0, 0) * VOXEL_SIZE + SPAWN_CLEARANCE, 0);
 
   const flyCamera = new FlyCamera(camera, canvas);
   flyCamera.attach();
@@ -116,21 +83,14 @@ async function start(): Promise<void> {
     camera.updateProjectionMatrix();
   });
 
-  // M2: every chunk load is synchronous on the main thread, so the initial
-  // full-radius load freezes the tab outright. Paint the sky and a message
-  // first so the freeze is explained rather than looking like a hang. The
-  // fix is M3 (workers), not a longer loading screen.
-  hud.set("STATUS", `generating ${radius}-chunk radius...`);
-  renderer.render(scene, camera);
-  await nextPaint();
-
-  // Seeded from the initial load rather than starting at zero, so the
-  // readout accounts for the stall the player actually sat through instead
-  // of only the boundary crossings that happen after spawn.
-  let worstStreamMs = world.update(camera.position.x, camera.position.z, worldRenderer).ms;
-  hud.remove("STATUS");
+  // Nothing is awaited before the loop starts. The initial load is just the
+  // first streaming update: chunks are submitted to the workers here and
+  // arrive over the next second or so, nearest-first, while the frame loop
+  // keeps running. That replaces M2's multi-second synchronous freeze.
+  world.update(camera.position.x, camera.position.z, worldRenderer);
 
   let lastTime = performance.now() / 1000;
+  let worstDrainMs = 0;
 
   void renderer.setAnimationLoop(() => {
     const now = performance.now() / 1000;
@@ -146,17 +106,40 @@ async function start(): Promise<void> {
 
     flyCamera.update(dt);
 
-    const streamed = world.update(camera.position.x, camera.position.z, worldRenderer);
-    if (streamed.ms > worstStreamMs) worstStreamMs = streamed.ms;
+    world.update(camera.position.x, camera.position.z, worldRenderer);
+    // Every frame, not only on boundary crossings -- otherwise finished
+    // chunks sit in the queue until the player happens to move again.
+    const drainMs = world.drain(worldRenderer);
+    if (drainMs > worstDrainMs) worstDrainMs = drainMs;
 
-    hud.set("POS", `${camera.position.x.toFixed(1)} ${camera.position.y.toFixed(1)} ${camera.position.z.toFixed(1)}`);
+    hud.set(
+      "POS",
+      `${camera.position.x.toFixed(1)} ${camera.position.y.toFixed(1)} ${camera.position.z.toFixed(1)}`,
+    );
     hud.set("CHUNKS", `${world.loadedCount} (r${radius}, ${worldRenderer.meshCount} drawn)`);
-    hud.set("STREAM", `${worstStreamMs.toFixed(1)}ms worst`);
+    hud.set("QUEUE", String(world.pendingCount));
+    hud.set("UPLOAD", `${worstDrainMs.toFixed(1)}ms worst`);
     hud.set("FPS", stats.fps.toFixed(0));
     hud.set("WORST", `${stats.worstMs.toFixed(1)}ms`);
-    hud.set("LOOK", flyCamera.locked ? "captured (Esc to release)" : "click to capture mouse");
+    hud.set(
+      "LOOK",
+      flyCamera.locked
+        ? "captured (Esc to release)"
+        : (flyCamera.lockError ?? "click to capture mouse"),
+    );
 
     renderer.render(scene, camera);
+  });
+
+  // Vite replaces this module on edit without reloading the page, which
+  // would otherwise leave the old module's workers running and its GPU
+  // buffers allocated -- a few edits in and the tab is holding several
+  // worlds at once.
+  import.meta.hot?.dispose(() => {
+    void renderer.setAnimationLoop(null);
+    flyCamera.dispose();
+    worldRenderer.clear();
+    world.dispose();
   });
 }
 
