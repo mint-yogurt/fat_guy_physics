@@ -16,6 +16,7 @@
  */
 export class InputState {
   private readonly keys = new Set<string>();
+  private readonly buttons = new Set<number>();
   private readonly pressedThisFrame = new Set<string>();
 
   /** Accumulated pointer-lock motion since the last consumeMouse(). */
@@ -37,6 +38,11 @@ export class InputState {
     return this.keys.has(code);
   }
 
+  /** Level-triggered: digging is a hold-to-repeat action on its own timer. */
+  isMouseDown(button: number): boolean {
+    return this.buttons.has(button);
+  }
+
   /** True once per physical keypress, cleared by {@link endFrame}. */
   wasPressed(code: string): boolean {
     return this.pressedThisFrame.has(code);
@@ -54,6 +60,18 @@ export class InputState {
       void this.canvas.requestPointerLock()?.catch((err: unknown) => {
         this.lockError = err instanceof Error ? err.message : String(err);
       });
+    };
+    const onMouseDown = (event: MouseEvent): void => {
+      // Only while captured. The click that *takes* the lock must not also
+      // count as a dig -- it was aimed at the window, not at terrain.
+      if (this.locked) this.buttons.add(event.button);
+    };
+    const onMouseUp = (event: MouseEvent): void => {
+      this.buttons.delete(event.button);
+    };
+    const onContextMenu = (event: MouseEvent): void => {
+      // Right-click is chup (M6); the browser menu would swallow it.
+      if (this.locked) event.preventDefault();
     };
     const onMouseMove = (event: MouseEvent): void => {
       if (!this.locked) return;
@@ -79,6 +97,7 @@ export class InputState {
     // the player walks off on their own forever.
     const onBlur = (): void => {
       this.keys.clear();
+      this.buttons.clear();
       this.pendingDx = 0;
       this.pendingDy = 0;
     };
@@ -90,6 +109,9 @@ export class InputState {
     };
 
     this.canvas.addEventListener("click", onClick);
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("contextmenu", onContextMenu);
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -98,6 +120,9 @@ export class InputState {
 
     this.disposers = [
       () => this.canvas.removeEventListener("click", onClick),
+      () => window.removeEventListener("mousedown", onMouseDown),
+      () => window.removeEventListener("mouseup", onMouseUp),
+      () => window.removeEventListener("contextmenu", onContextMenu),
       () => window.removeEventListener("mousemove", onMouseMove),
       () => window.removeEventListener("keydown", onKeyDown),
       () => window.removeEventListener("keyup", onKeyUp),

@@ -103,6 +103,7 @@ describe("World streaming", () => {
   class RecordingSink implements ChunkSink {
     readonly loaded: number[] = [];
     readonly unloaded: number[] = [];
+    readonly remeshed: number[] = [];
     /** Summed to prove the buffers handed over are real mesh data. */
     totalVertices = 0;
 
@@ -117,9 +118,13 @@ describe("World streaming", () => {
     onChunkUnloaded(key: number): void {
       this.unloaded.push(key);
     }
+    onChunkRemeshed(key: number): void {
+      this.remeshed.push(key);
+    }
     reset(): void {
       this.loaded.length = 0;
       this.unloaded.length = 0;
+      this.remeshed.length = 0;
     }
   }
 

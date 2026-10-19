@@ -2,7 +2,8 @@ import { chunkKey, keyX, keyY, keyZ, type ChunkKey } from "./chunkKey.ts";
 import type { ChunkResult, ChunkSource } from "./chunkSource.ts";
 import { CHUNK_SIZE, VOXEL_SIZE } from "./constants.ts";
 import { nowMs } from "./time.ts";
-import { floorDiv, floorMod, isSolid, Material } from "../voxel/voxel.ts";
+import { Mesher } from "../voxel/greedyMesher.ts";
+import { floorDiv, floorMod, isHandDiggable, isSolid, Material } from "../voxel/voxel.ts";
 import { gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
 
@@ -66,6 +67,22 @@ export interface ChunkSink {
    */
   onChunkLoaded(result: ChunkResult): void;
   onChunkUnloaded(key: ChunkKey): void;
+  /**
+   * An already-loaded chunk's geometry changed (digging).
+   *
+   * Unlike onChunkLoaded, `vertices` is a **view onto reusable scratch** and
+   * is invalidated by the next remesh -- edits happen on the main thread
+   * against a shared mesher, so there is no transferable to hand over. Copy
+   * what you keep.
+   */
+  onChunkRemeshed(
+    key: ChunkKey,
+    cx: number,
+    cy: number,
+    cz: number,
+    vertices: Float32Array,
+    vertexCount: number,
+  ): void;
 }
 
 /**
@@ -110,6 +127,18 @@ export class World {
 
   /** Scratch for the distance sort in submitDesired. Reused, never freed. */
   private readonly submitQueue: ChunkKey[] = [];
+
+  /**
+   * Mesher used only for re-meshing edited chunks on the calling thread.
+   * Streaming meshes on workers, but an edit has to be reflected this frame
+   * -- a round trip to a worker would show the player a hole appearing one
+   * or two frames after they dug it. A dig touches at most a handful of
+   * chunks, so the cost is bounded.
+   */
+  private readonly editMesher = new Mesher();
+
+  /** Reused by digSphere so a held scoop does not allocate per tick. */
+  private readonly dirtyScratch = new Set<ChunkKey>();
 
   private hasCenter = false;
   private centerX = 0;
@@ -263,6 +292,78 @@ export class World {
         floorMod(worldVoxelZ, CHUNK_SIZE),
       )
     ] as Material;
+  }
+
+  /**
+   * Removes hand-diggable material within `radiusMeters` of a world-space
+   * point, skipping voxels in unloaded chunks (it never force-loads), then
+   * re-meshes only the chunks actually touched. Ports World::digSphere.
+   *
+   * Returns the number of chunks re-meshed, which is 0 when the dig hit
+   * nothing removable -- Rock and Granite need a tool the game does not
+   * have yet, so clicking at a rock face is a legitimate no-op.
+   */
+  digSphere(centerX: number, centerY: number, centerZ: number, radiusMeters: number, sink: ChunkSink): number {
+    const centerVoxelX = Math.floor(centerX / VOXEL_SIZE);
+    const centerVoxelY = Math.floor(centerY / VOXEL_SIZE);
+    const centerVoxelZ = Math.floor(centerZ / VOXEL_SIZE);
+    const r = Math.ceil(radiusMeters / VOXEL_SIZE);
+    const radiusSq = radiusMeters * radiusMeters;
+
+    const dirty = this.dirtyScratch;
+    dirty.clear();
+
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const wx = centerVoxelX + dx;
+          const wy = centerVoxelY + dy;
+          const wz = centerVoxelZ + dz;
+
+          // Distance from the sphere centre to the voxel's centre, matching
+          // the C++ exactly -- a corner-based test would carve a visibly
+          // different shape.
+          const ox = (wx + 0.5) * VOXEL_SIZE - centerX;
+          const oy = (wy + 0.5) * VOXEL_SIZE - centerY;
+          const oz = (wz + 0.5) * VOXEL_SIZE - centerZ;
+          if (ox * ox + oy * oy + oz * oz > radiusSq) continue;
+
+          const cx = floorDiv(wx, CHUNK_SIZE);
+          const cy = floorDiv(wy, CHUNK_SIZE);
+          const cz = floorDiv(wz, CHUNK_SIZE);
+          const key = chunkKey(cx, cy, cz);
+          const grid = this.chunks.get(key);
+          if (grid === undefined) continue;
+
+          const index = gridIndex(
+            grid,
+            floorMod(wx, CHUNK_SIZE),
+            floorMod(wy, CHUNK_SIZE),
+            floorMod(wz, CHUNK_SIZE),
+          );
+          const material = grid.cells[index] as Material;
+          if (material === Material.Air || !isHandDiggable(material)) continue;
+
+          grid.cells[index] = Material.Air;
+          dirty.add(key);
+        }
+      }
+    }
+
+    // TODO(voxel-physics, not yet implemented): voxels dug out from
+    // underneath are left hanging with no support check. The named seam for
+    // connectivity analysis is World::digSphere's checkForFloatingVoxelsStub
+    // in the C++; it is a deliberate no-op there too, and belongs here once
+    // the dynamic-body work at M7/M8 gives newly-floating clusters somewhere
+    // to go.
+
+    for (const key of dirty) {
+      const grid = this.chunks.get(key);
+      if (grid === undefined) continue;
+      const mesh = this.editMesher.mesh(grid);
+      sink.onChunkRemeshed(key, keyX(key), keyY(key), keyZ(key), mesh.vertices, mesh.vertexCount);
+    }
+    return dirty.size;
   }
 
   /** Whether the chunk containing a world-space point is loaded. */

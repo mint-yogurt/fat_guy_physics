@@ -16,6 +16,7 @@ import {
 } from "@fgp/shared/sim/constants";
 import { createPlayerInput, Player, PlayerMode } from "@fgp/shared/sim/player";
 import { DEFAULT_LOAD_RADIUS_CHUNKS, World } from "@fgp/shared/sim/world";
+import { createVoxelHit, raycastVoxel } from "@fgp/shared/voxel/voxelRaycast";
 
 import { InputState } from "./input/inputState.ts";
 import { CameraPerspective, PlayerCamera } from "./render/playerCamera.ts";
@@ -30,6 +31,20 @@ const SEED = 1337;
 
 /** Metres above the ground to spawn, so the player falls onto terrain. */
 const SPAWN_CLEARANCE = 2;
+
+/**
+ * Scoop tuning, from src/main.cpp. The anchor epsilons are the interesting
+ * ones: re-raycasting every tick while the player holds still would walk the
+ * dig point deeper along the view ray, drilling a tunnel instead of
+ * hollowing out one spot. So the first tick of a gesture raycasts, and
+ * subsequent ticks reuse that hit point until the eye moves 5cm or the aim
+ * turns ~5.7 degrees.
+ */
+const DIG_TICK_SECONDS = 0.35;
+const DIG_REACH_METERS = 5;
+const DIG_RADIUS_METERS = 0.35;
+const DIG_REANCHOR_POSITION = 0.05;
+const DIG_REANCHOR_DIRECTION = 0.995;
 
 /** Matches the C++ FOV adjust step on the -/= keys. */
 const FOV_STEP = 2;
@@ -127,6 +142,23 @@ async function start(): Promise<void> {
   let prevY = player.y;
   let prevZ = player.z;
 
+  const crosshair = requireElement<HTMLDivElement>("#crosshair");
+
+  // Scoop state. `hit` doubles as the crosshair readout's source, so it is
+  // refreshed once a frame whether or not the player is digging.
+  const hit = createVoxelHit();
+  let digCooldown = 0;
+  let digAnchored = false;
+  let anchorOriginX = 0;
+  let anchorOriginY = 0;
+  let anchorOriginZ = 0;
+  let anchorDirX = 0;
+  let anchorDirY = 0;
+  let anchorDirZ = 0;
+  let anchorCenterX = 0;
+  let anchorCenterY = 0;
+  let anchorCenterZ = 0;
+
   void renderer.setAnimationLoop(() => {
     const now = performance.now() / 1000;
     const rawDt = now - lastTime;
@@ -197,6 +229,73 @@ async function start(): Promise<void> {
     const drainMs = world.drain(worldRenderer);
     if (drainMs > worstDrainMs) worstDrainMs = drainMs;
 
+    // --- scoop ---------------------------------------------------------
+    const eyeX = player.x;
+    const eyeY = player.y + player.eyeHeight;
+    const eyeZ = player.z;
+
+    raycastVoxel(
+      world,
+      eyeX,
+      eyeY,
+      eyeZ,
+      player.frontX,
+      player.frontY,
+      player.frontZ,
+      DIG_REACH_METERS,
+      hit,
+    );
+
+    // Walking only: there is no hand free to swing while tucked into a ball.
+    const canDig =
+      input.locked && player.mode === PlayerMode.Walking && input.isMouseDown(0);
+
+    if (canDig) {
+      digCooldown -= rawDt;
+      if (digCooldown <= 0) {
+        const sameAnchor =
+          digAnchored &&
+          Math.hypot(eyeX - anchorOriginX, eyeY - anchorOriginY, eyeZ - anchorOriginZ) <=
+            DIG_REANCHOR_POSITION &&
+          player.frontX * anchorDirX + player.frontY * anchorDirY + player.frontZ * anchorDirZ >=
+            DIG_REANCHOR_DIRECTION;
+
+        if (!sameAnchor) {
+          if (hit.hit) {
+            digAnchored = true;
+            anchorOriginX = eyeX;
+            anchorOriginY = eyeY;
+            anchorOriginZ = eyeZ;
+            anchorDirX = player.frontX;
+            anchorDirY = player.frontY;
+            anchorDirZ = player.frontZ;
+            anchorCenterX = (hit.x + 0.5) * VOXEL_SIZE;
+            anchorCenterY = (hit.y + 0.5) * VOXEL_SIZE;
+            anchorCenterZ = (hit.z + 0.5) * VOXEL_SIZE;
+          } else {
+            digAnchored = false;
+          }
+        }
+
+        if (digAnchored) {
+          world.digSphere(
+            anchorCenterX,
+            anchorCenterY,
+            anchorCenterZ,
+            DIG_RADIUS_METERS,
+            worldRenderer,
+          );
+        }
+        digCooldown = DIG_TICK_SECONDS;
+      }
+    } else {
+      // Clamped at zero rather than left to run negative, so a
+      // release-then-repress cannot fire a queued burst. Releasing also
+      // drops the anchor: the next press always starts a fresh gesture.
+      digCooldown = 0;
+      digAnchored = false;
+    }
+
     playerCamera.sync(camera, player, world, renderX, renderY, renderZ);
 
     hud.set("POS", `${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}`);
@@ -207,12 +306,14 @@ async function start(): Promise<void> {
     hud.set("CHUNKS", `${world.loadedCount} (r${radius}, ${worldRenderer.meshCount} drawn)`);
     hud.set("QUEUE", String(world.pendingCount));
     hud.set("UPLOAD", `${worstDrainMs.toFixed(1)}ms worst`);
+    hud.set("AIM", hit.hit ? `${hit.distance.toFixed(2)}m` : "--");
     hud.set("FPS", stats.fps.toFixed(0));
     hud.set("WORST", `${stats.worstMs.toFixed(1)}ms`);
     hud.set(
       "LOOK",
       input.locked ? "captured (Esc to release)" : (input.lockError ?? "click to capture mouse"),
     );
+    crosshair.hidden = !input.locked;
 
     renderer.render(scene, camera);
     input.endFrame();

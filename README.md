@@ -22,8 +22,9 @@ Then open http://localhost:5173. Append `?gl` to the URL to force the WebGL2
 backend instead of WebGPU — useful for telling "broken everywhere" apart from
 "broken on one backend".
 
-Controls: click to capture the mouse, WASD to walk, Space to jump, R to
-toggle Ragball, V for first/third person, -/= for FOV.
+Controls: click to capture the mouse, WASD to walk, Space to jump, hold
+left mouse to dig, R to toggle Ragball, V for first/third person, -/= for
+FOV.
 
 `?radius=N` overrides the chunk load radius, which is the quickest way to tell "slow because there is a lot of terrain" apart from "slow for some
 other reason".
@@ -90,7 +91,7 @@ Milestones, in order. Each one is runnable and visually verifiable:
 - [x] **M2** Fly camera + synchronous chunk streaming
 - [x] **M3** Web Worker pool with transferable buffers
 - [x] **M4** Player controller, collision, the fixed-timestep frame loop
-- [ ] **M5** Raycast (redesigned) + scoop
+- [x] **M5** Raycast + scoop
 - [ ] **M6** Trees + chup + the canopy-size fix
 - [ ] **M7** Jolt WASM + falling bodies
 - [ ] **M8** Oriented-body collision (replaces snap-on-sleep)

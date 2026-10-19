@@ -46,3 +46,40 @@ body {
 .stat-label {
   opacity: 0.55;
 }
+
+/* Two bars rather than a dot: a single pixel disappears against the
+   cobble texture, and a ring is too heavy at this FOV. Hidden until the
+   mouse is captured, since it means nothing while the cursor is free. */
+#crosshair {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+}
+
+#crosshair::before,
+#crosshair::after {
+  content: "";
+  position: absolute;
+  background: var(--hud-fg);
+  box-shadow: var(--hud-shadow);
+  opacity: 0.8;
+}
+
+#crosshair::before {
+  left: 50%;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  margin-left: -1px;
+}
+
+#crosshair::after {
+  top: 50%;
+  left: 0;
+  height: 2px;
+  width: 100%;
+  margin-top: -1px;
+}
