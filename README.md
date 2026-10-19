@@ -30,8 +30,9 @@ right mouse to chop, R toggles Ragball, V first/third person, `-`/`=` FOV,
 
 - `?gl` — force the WebGL2 backend instead of WebGPU, to tell "broken
   everywhere" apart from "broken on one backend".
-- `?radius=N` — override the chunk load radius, to tell "slow because there
-  is a lot of terrain" apart from "slow for some other reason".
+- `?radius=N` — override the chunk load radius. Defaults to 12 chunks
+  (38m); it was 6 before biomes landed. Also tells "slow because there is a
+  lot of terrain" apart from "slow for some other reason".
 
 ## Layout
 
@@ -77,6 +78,10 @@ Each one is runnable and visually verifiable.
   (`assets/textures/faces/`) exist but are unused — character create's face
   option currently changes nothing.
 - The walking collider is an AABB, not a swept capsule.
+- The r6 -> r12 load radius is unmeasured: the dev browser pane pins at
+  exactly 30 FPS at both radii, so it caps the measurement rather than
+  reporting it. Check FPS/WORST on real hardware before trusting the
+  default.
 - Christmas and Halloween reuse the generic voxel trees; their authored
   meshes (xmas trees, snowmen, dead trees, pumpkins, buildings) are not in
   yet. `speciesForBiome` in `worldgen/vegetation.ts` is the one seam to
