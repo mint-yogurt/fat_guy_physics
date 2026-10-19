@@ -3,6 +3,7 @@ import { Mesh, type Material, type Scene } from "three/webgpu";
 import type { ChunkKey } from "@fgp/shared/sim/chunkKey";
 import type { ChunkResult } from "@fgp/shared/sim/chunkSource";
 import { CHUNK_METERS, type ChunkSink, type Tree } from "@fgp/shared/sim/world";
+import type { VoxelGrid } from "@fgp/shared/voxel/voxelGrid";
 import { VOXEL_SIZE } from "@fgp/shared/sim/constants";
 import { FLOATS_PER_VERTEX } from "@fgp/shared/voxel/vertexLayout";
 
@@ -22,6 +23,15 @@ import { applyMeshData, createChunkGeometry, disposeChunkGeometry } from "./chun
 export class WorldRenderer implements ChunkSink {
   private readonly meshes = new Map<ChunkKey, Mesh>();
   private readonly treeMeshes = new Map<number, Mesh>();
+
+  /**
+   * Where severed tree pieces go. Set by main once the physics layer has
+   * finished loading its WASM; until then a chop that cuts through simply
+   * removes the piece, which is the M6 behaviour.
+   */
+  onSevered:
+    | ((piece: VoxelGrid, x: number, y: number, z: number, radiusMeters: number) => void)
+    | undefined;
 
   constructor(
     private readonly scene: Scene,
@@ -134,6 +144,16 @@ export class WorldRenderer implements ChunkSink {
     object.updateMatrix();
     this.scene.add(object);
     this.treeMeshes.set(tree.id, object);
+  }
+
+  onTreeSevered(
+    piece: VoxelGrid,
+    centerX: number,
+    centerY: number,
+    centerZ: number,
+    radiusMeters: number,
+  ): void {
+    this.onSevered?.(piece, centerX, centerY, centerZ, radiusMeters);
   }
 
   onTreeUnloaded(treeId: number): void {

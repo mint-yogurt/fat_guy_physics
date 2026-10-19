@@ -3,7 +3,7 @@ import type { ChunkResult, ChunkSource } from "./chunkSource.ts";
 import { CHUNK_SIZE, VOXEL_SIZE } from "./constants.ts";
 import { nowMs } from "./time.ts";
 import { chopGridDisc, digGridSphere, severGridAt } from "../voxel/gridEdit.ts";
-import { Mesher } from "../voxel/greedyMesher.ts";
+import { Mesher, type MeshData } from "../voxel/greedyMesher.ts";
 import { floorDiv, floorMod, isHandDiggable, isSolid, Material } from "../voxel/voxel.ts";
 import { gridAt, gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
 import { createVoxelHit, raycastVoxel } from "../voxel/voxelRaycast.ts";
@@ -96,6 +96,21 @@ export interface ChunkSink {
    */
   onTreeMeshed(tree: Tree, vertices: Float32Array, vertexCount: number): void;
   onTreeUnloaded(treeId: number): void;
+  /**
+   * A chop cut all the way through: `piece` is the part that came off, and
+   * World has already removed it from the tree.
+   *
+   * The sink owns the grid outright. Its local (0,0,0) is the piece's own
+   * centre, given here in world metres, so the sink can hand it straight to
+   * a rigid body without an offset of its own.
+   */
+  onTreeSevered(
+    piece: VoxelGrid,
+    centerX: number,
+    centerY: number,
+    centerZ: number,
+    radiusMeters: number,
+  ): void;
 }
 
 /**
@@ -117,6 +132,7 @@ export interface Tree {
   readonly rootVoxelZ: number;
   readonly grid: VoxelGrid;
   trunkHeightVoxels: number;
+  readonly trunkRadiusVoxels: number;
   severed: boolean;
 }
 
@@ -503,6 +519,20 @@ export class World {
     return isSolid(this.materialAt(vx, vy, vz));
   }
 
+  /**
+   * Meshes a loaded chunk on the calling thread, for a caller that needs
+   * its triangles rather than its voxels -- today, building a static
+   * collision shape for it.
+   *
+   * The returned view is the shared edit mesher's scratch and is
+   * invalidated by the next edit or call. Consume it before yielding.
+   */
+  meshChunk(cx: number, cy: number, cz: number): MeshData | undefined {
+    const grid = this.chunks.get(chunkKey(cx, cy, cz));
+    if (grid === undefined) return undefined;
+    return this.editMesher.mesh(grid);
+  }
+
   // --- vegetation --------------------------------------------------------
 
   getTree(treeId: number): Tree | undefined {
@@ -538,6 +568,7 @@ export class World {
         rootVoxelZ: placement.rootVoxelZ,
         grid: shape.grid,
         trunkHeightVoxels: shape.trunkHeightVoxels,
+        trunkRadiusVoxels: shape.trunkRadiusVoxels,
         severed: severedAt !== undefined,
       };
 
@@ -687,10 +718,21 @@ export class World {
     if (!result.changed) return false;
 
     if (result.severedAtLocalY >= 0) {
-      severGridAt(tree.grid, result.severedAtLocalY);
+      const piece = severGridAt(tree.grid, result.severedAtLocalY);
       tree.severed = true;
       tree.trunkHeightVoxels = result.severedAtLocalY;
       this.severedTrees.set(tree.id, result.severedAtLocalY);
+      if (piece !== undefined) {
+        // The piece's own origin is its centre, so its world position is
+        // just where that cell sits.
+        sink.onTreeSevered(
+          piece,
+          (tree.rootVoxelX + 0.5) * VOXEL_SIZE,
+          (tree.rootVoxelY + result.severedAtLocalY + piece.originY + 0.5) * VOXEL_SIZE,
+          (tree.rootVoxelZ + 0.5) * VOXEL_SIZE,
+          Math.max(tree.trunkRadiusVoxels, 1) * VOXEL_SIZE,
+        );
+      }
     }
 
     this.meshTree(tree, sink);

@@ -23,6 +23,8 @@ import {
 } from "@fgp/shared/sim/world";
 
 import { InputState } from "./input/inputState.ts";
+import { LogSystem } from "./physics/logSystem.ts";
+import { PhysicsWorld } from "./physics/physicsWorld.ts";
 import { CameraPerspective, PlayerCamera } from "./render/playerCamera.ts";
 import { createRenderer, installResizeHandler, isRenderable } from "./render/renderer.ts";
 import { createVoxelMaterial } from "./render/voxelMaterial.ts";
@@ -115,6 +117,26 @@ async function start(): Promise<void> {
   const player = new Player(0, spawnY, 0);
   const playerCamera = new PlayerCamera();
 
+  // Jolt's WASM is fetched and compiled asynchronously. The game does not
+  // wait for it: terrain, movement and digging have nothing to do with
+  // rigid bodies, and a second of blank screen to load a module that is
+  // only needed once the player chops something is a bad trade. Chopping
+  // before it lands just removes the piece.
+  let logs: LogSystem | undefined;
+  let physics: PhysicsWorld | undefined;
+  void PhysicsWorld.create()
+    .then((created) => {
+      physics = created;
+      logs = new LogSystem(created, world, scene, material);
+      worldRenderer.onSevered = (piece, x, y, z, r) => {
+        logs?.spawn(piece, x, y, z, r);
+      };
+      hud.set("PHYSICS", "jolt");
+    })
+    .catch((err: unknown) => {
+      hud.set("PHYSICS", `unavailable: ${String(err)}`);
+    });
+
   const input = new InputState(canvas);
   input.attach();
   const playerInput = createPlayerInput();
@@ -175,6 +197,19 @@ async function start(): Promise<void> {
   /** -1 when the anchored dig is on terrain. */
   let anchorTreeId = -1;
 
+  if (import.meta.env.DEV) {
+    // Dev-only handle for driving the game from the console: aiming at a
+    // specific tree by hand to test a chop is slow and unrepeatable.
+    (window as unknown as Record<string, unknown>).fgp = {
+      world,
+      player,
+      worldRenderer,
+      get logs(): LogSystem | undefined {
+        return logs;
+      },
+    };
+  }
+
   void renderer.setAnimationLoop(() => {
     const now = performance.now() / 1000;
     const rawDt = now - lastTime;
@@ -222,6 +257,9 @@ async function start(): Promise<void> {
       prevY = player.y;
       prevZ = player.z;
       player.update(playerInput, FIXED_TIMESTEP, world, spawnSurface);
+      // Bodies step on the same fixed clock as the player, so a falling log
+      // behaves identically whatever the display rate is.
+      physics?.step(FIXED_TIMESTEP);
       // Consumed: a single keypress is one impulse, not one per substep.
       playerInput.jumpPressed = false;
       accumulator -= FIXED_TIMESTEP;
@@ -349,6 +387,8 @@ async function start(): Promise<void> {
       chupCooldown = 0;
     }
 
+    logs?.update(player.x, player.y, player.z);
+
     playerCamera.sync(camera, player, world, renderX, renderY, renderZ);
 
     hud.set("POS", `${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}`);
@@ -357,7 +397,7 @@ async function start(): Promise<void> {
     hud.set("VIEW", playerCamera.perspective === CameraPerspective.FirstPerson ? "1st" : "3rd");
     hud.set("FOV", playerCamera.fovDegrees.toFixed(0));
     hud.set("CHUNKS", `${world.loadedCount} (r${radius}, ${worldRenderer.meshCount} drawn)`);
-    hud.set("TREES", String(world.treeCount));
+    hud.set("TREES", `${world.treeCount} (${String(logs?.count ?? 0)} logs)`);
     hud.set("QUEUE", String(world.pendingCount));
     hud.set("UPLOAD", `${worstDrainMs.toFixed(1)}ms worst`);
     hud.set(
@@ -385,6 +425,8 @@ async function start(): Promise<void> {
   import.meta.hot?.dispose(() => {
     void renderer.setAnimationLoop(null);
     input.dispose();
+    logs?.clear();
+    physics?.dispose();
     worldRenderer.clear();
     world.dispose();
   });

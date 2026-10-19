@@ -93,7 +93,7 @@ Milestones, in order. Each one is runnable and visually verifiable:
 - [x] **M4** Player controller, collision, the fixed-timestep frame loop
 - [x] **M5** Raycast + scoop
 - [x] **M6** Trees + chup + the canopy-size fix
-- [ ] **M7** Jolt WASM + falling bodies
+- [x] **M7** Jolt WASM + falling bodies
 - [ ] **M8** Oriented-body collision (replaces snap-on-sleep)
 - [ ] **M9** Items — **parity with the native build**
 - [ ] **M10** DOM UI — hotbar, controls legend, character create

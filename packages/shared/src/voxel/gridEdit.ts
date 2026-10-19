@@ -1,6 +1,6 @@
 import { VOXEL_SIZE } from "../sim/constants.ts";
 import { isChoppable, isSolid, Material } from "./voxel.ts";
-import { gridIndex, type VoxelGrid } from "./voxelGrid.ts";
+import { createGrid, gridIndex, gridSet, type VoxelGrid } from "./voxelGrid.ts";
 
 /**
  * Edits on a standalone voxel grid (a tree, and from M7 a felled log),
@@ -181,14 +181,69 @@ export function chopGridDisc(
   return chopResult;
 }
 
-/** Clears everything at local Y >= `severLocalY`. */
-export function severGridAt(grid: VoxelGrid, severLocalY: number): void {
-  for (let ly = severLocalY; ly < grid.dimY - grid.originY; ly++) {
+/**
+ * Splits the grid at local Y == `severLocalY`: everything at or above it is
+ * cleared from `grid` and returned as a new grid.
+ *
+ * The returned piece's local (0,0,0) is the centre of its own bounding box
+ * in Y and the original trunk axis in X/Z, so it lines up with the capsule
+ * body that is about to carry it -- a mesh whose origin is the body's
+ * centre of mass needs no offset when the body transform is applied to it.
+ *
+ * Returns undefined if there was nothing above the cut.
+ */
+export function severGridAt(grid: VoxelGrid, severLocalY: number): VoxelGrid | undefined {
+  const topLocalY = grid.dimY - grid.originY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  let maxZ = Number.NEGATIVE_INFINITY;
+
+  for (let ly = severLocalY; ly < topLocalY; ly++) {
     const gy = ly + grid.originY;
     if (gy < 0 || gy >= grid.dimY) continue;
     for (let gz = 0; gz < grid.dimZ; gz++) {
       const rowBase = grid.dimX * (gy + grid.dimY * gz);
-      grid.cells.fill(Material.Air, rowBase, rowBase + grid.dimX);
+      for (let gx = 0; gx < grid.dimX; gx++) {
+        if (grid.cells[rowBase + gx] === Material.Air) continue;
+        const lx = gx - grid.originX;
+        const lz = gz - grid.originZ;
+        if (ly < minY) minY = ly;
+        if (ly > maxY) maxY = ly;
+        if (lx < minX) minX = lx;
+        if (lx > maxX) maxX = lx;
+        if (lz < minZ) minZ = lz;
+        if (lz > maxZ) maxZ = lz;
+      }
     }
   }
+
+  if (minY > maxY) return undefined;
+
+  const centerY = Math.round((minY + maxY) / 2);
+  const piece = createGrid(
+    maxX - minX + 1,
+    maxY - minY + 1,
+    maxZ - minZ + 1,
+    -minX,
+    centerY - minY,
+    -minZ,
+  );
+
+  for (let ly = minY; ly <= maxY; ly++) {
+    const gy = ly + grid.originY;
+    for (let gz = 0; gz < grid.dimZ; gz++) {
+      const rowBase = grid.dimX * (gy + grid.dimY * gz);
+      for (let gx = 0; gx < grid.dimX; gx++) {
+        const material = grid.cells[rowBase + gx] as Material;
+        if (material === Material.Air) continue;
+        gridSet(piece, gx - grid.originX, ly - centerY, gz - grid.originZ, material);
+        grid.cells[rowBase + gx] = Material.Air;
+      }
+    }
+  }
+
+  return piece;
 }

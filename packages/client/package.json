@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@fgp/shared": "*",
+    "jolt-physics": "^1.1.0",
     "three": "0.186.1"
   },
   "devDependencies": {

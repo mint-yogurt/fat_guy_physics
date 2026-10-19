@@ -122,6 +122,7 @@ describe("World streaming", () => {
       this.remeshed.push(key);
     }
     onTreeMeshed(): void {}
+    onTreeSevered(): void {}
     onTreeUnloaded(): void {}
     reset(): void {
       this.loaded.length = 0;
