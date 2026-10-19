@@ -2,6 +2,7 @@ import { Mesh, Quaternion, type Material, type Scene } from "three/webgpu";
 
 import { chunkKey, keyX, keyY, keyZ } from "@fgp/shared/sim/chunkKey";
 import { VOXEL_SIZE } from "@fgp/shared/sim/constants";
+import type { OrientedBody, SceneSolidQuery } from "@fgp/shared/sim/sceneQuery";
 import { CHUNK_METERS, type World } from "@fgp/shared/sim/world";
 import { Mesher } from "@fgp/shared/voxel/greedyMesher";
 import type { VoxelGrid } from "@fgp/shared/voxel/voxelGrid";
@@ -29,8 +30,11 @@ const LOG_CULL_METERS = 48;
 interface Log {
   readonly handle: BodyHandle;
   readonly mesh: Mesh;
-  /** Kept for M8: walking on a settled log needs its voxels back. */
-  readonly grid: VoxelGrid;
+  /**
+   * The piece's voxels, and the pose they are in. Handed to the scene
+   * query once the log settles, which is what makes it walkable.
+   */
+  readonly body: OrientedBody;
   settled: boolean;
 }
 
@@ -44,6 +48,7 @@ export class LogSystem {
   constructor(
     private readonly physics: PhysicsWorld,
     private readonly world: World,
+    private readonly query: SceneSolidQuery,
     private readonly scene: Scene,
     private readonly material: Material,
   ) {}
@@ -92,12 +97,21 @@ export class LogSystem {
     );
     object.position.set(centerX, centerY, centerZ);
     this.scene.add(object);
-    this.logs.push({ handle, mesh: object, grid: piece, settled: false });
+    this.logs.push({
+      handle,
+      mesh: object,
+      body: { grid: piece, x: centerX, y: centerY, z: centerZ, qx: 0, qy: 0, qz: 0, qw: 1 },
+      settled: false,
+    });
   }
 
   /** Drives mesh transforms off the bodies and keeps terrain bodies around them. */
   update(playerX: number, playerY: number, playerZ: number): void {
     this.wantedChunks.clear();
+    // Rebuilt from scratch each frame rather than patched: the list is a
+    // handful of entries, and a log that woke up has to leave it the same
+    // frame or the player stands on a log that is no longer there.
+    this.query.bodies.length = 0;
 
     for (let i = this.logs.length - 1; i >= 0; i--) {
       const log = this.logs[i];
@@ -117,6 +131,13 @@ export class LogSystem {
       }
 
       log.mesh.position.set(x, y, z);
+      log.body.x = x;
+      log.body.y = y;
+      log.body.z = z;
+      log.body.qx = this.transform[3] ?? 0;
+      log.body.qy = this.transform[4] ?? 0;
+      log.body.qz = this.transform[5] ?? 0;
+      log.body.qw = this.transform[6] ?? 1;
       this.rotation.set(
         this.transform[3] ?? 0,
         this.transform[4] ?? 0,
@@ -128,7 +149,14 @@ export class LogSystem {
       // A sleeping log needs no terrain under it, so its chunk bodies are
       // allowed to go away until something wakes it.
       log.settled = !this.physics.isActive(log.handle);
-      if (!log.settled) this.markWanted(x, y, z);
+      if (log.settled) {
+        // Only settled logs are walkable. A tumbling one would mean the
+        // player's feet chasing a moving surface the physics system does
+        // not know about, which reads as being thrown around.
+        this.query.bodies.push(log.body);
+      } else {
+        this.markWanted(x, y, z);
+      }
     }
 
     this.syncTerrainBodies();

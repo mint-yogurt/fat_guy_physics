@@ -15,6 +15,7 @@ import {
   VOXEL_SIZE,
 } from "@fgp/shared/sim/constants";
 import { createPlayerInput, Player, PlayerMode } from "@fgp/shared/sim/player";
+import { SceneSolidQuery } from "@fgp/shared/sim/sceneQuery";
 import {
   createSceneHit,
   DEFAULT_LOAD_RADIUS_CHUNKS,
@@ -113,6 +114,11 @@ async function start(): Promise<void> {
   const worldRenderer = new WorldRenderer(scene, material);
   hud.set("WORKERS", String(source.workerCount));
 
+  // Everything that collides goes through this rather than the World
+  // directly: terrain plus whatever settled rigid bodies the player is
+  // allowed to stand on.
+  const sceneQuery = new SceneSolidQuery(world);
+
   const spawnY = world.surfaceHeightVoxels(0, 0) * VOXEL_SIZE + SPAWN_CLEARANCE;
   const player = new Player(0, spawnY, 0);
   const playerCamera = new PlayerCamera();
@@ -127,7 +133,7 @@ async function start(): Promise<void> {
   void PhysicsWorld.create()
     .then((created) => {
       physics = created;
-      logs = new LogSystem(created, world, scene, material);
+      logs = new LogSystem(created, world, sceneQuery, scene, material);
       worldRenderer.onSevered = (piece, x, y, z, r) => {
         logs?.spawn(piece, x, y, z, r);
       };
@@ -204,6 +210,7 @@ async function start(): Promise<void> {
       world,
       player,
       worldRenderer,
+      sceneQuery,
       get logs(): LogSystem | undefined {
         return logs;
       },
@@ -228,7 +235,7 @@ async function start(): Promise<void> {
       player.look(input.consumeMouseX(), input.consumeMouseY());
     }
 
-    if (input.wasPressed("KeyR")) player.toggleMode(world);
+    if (input.wasPressed("KeyR")) player.toggleMode(sceneQuery);
     if (input.wasPressed("KeyV")) playerCamera.togglePerspective();
     if (input.wasPressed("Minus")) {
       playerCamera.fovDegrees = Math.max(FOV_MIN, playerCamera.fovDegrees - FOV_STEP);
@@ -256,7 +263,7 @@ async function start(): Promise<void> {
       prevX = player.x;
       prevY = player.y;
       prevZ = player.z;
-      player.update(playerInput, FIXED_TIMESTEP, world, spawnSurface);
+      player.update(playerInput, FIXED_TIMESTEP, sceneQuery, spawnSurface);
       // Bodies step on the same fixed clock as the player, so a falling log
       // behaves identically whatever the display rate is.
       physics?.step(FIXED_TIMESTEP);
@@ -389,7 +396,7 @@ async function start(): Promise<void> {
 
     logs?.update(player.x, player.y, player.z);
 
-    playerCamera.sync(camera, player, world, renderX, renderY, renderZ);
+    playerCamera.sync(camera, player, sceneQuery, renderX, renderY, renderZ);
 
     hud.set("POS", `${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}`);
     hud.set("MODE", player.mode === PlayerMode.Walking ? "walking" : "ragball");

@@ -94,7 +94,7 @@ Milestones, in order. Each one is runnable and visually verifiable:
 - [x] **M5** Raycast + scoop
 - [x] **M6** Trees + chup + the canopy-size fix
 - [x] **M7** Jolt WASM + falling bodies
-- [ ] **M8** Oriented-body collision (replaces snap-on-sleep)
+- [x] **M8** Oriented-body collision (replaces snap-on-sleep)
 - [ ] **M9** Items — **parity with the native build**
 - [ ] **M10** DOM UI — hotbar, controls legend, character create
 - [ ] **M11** Player rig + animation
@@ -176,7 +176,7 @@ Also added: first/third-person camera toggle (V), live FOV adjustment (-/=), per
 - [x] Walkable felled logs (player can stand on a settled log/canopy like terrain)
 
 **Known temporary/stopgap pieces, not final design:**
-- Walkable logs work via "snap-on-sleep": a settled log's rotation snaps to the nearest of 24 axis-aligned orientations so it can reuse terrain's integer-voxel collision. This only works for logs that land close to square with the world grid — a log resting at a real off-axis tilt or on a slope stays walk-through. The real fix (arbitrary-orientation player collision) is unbuilt; see the comment on `World::isSolidIncludingSnappedLogs`.
+- Walkable logs work via "snap-on-sleep": a settled log's rotation snaps to the nearest of 24 axis-aligned orientations so it can reuse terrain's integer-voxel collision. This only works for logs that land close to square with the world grid — a log resting at a real off-axis tilt or on a slope stays walk-through. **Fixed in the web port at M8** (`packages/shared/src/sim/sceneQuery.ts`): the point-sampling collision transforms each sample into the body's own frame, so a log at any angle is walkable and nothing is snapped.
 - Floating terrain voxels (dug out from underneath, left hanging with no support check) are a known, still-open gap — no connectivity/support analysis exists yet. A named no-op seam for it lives in `World::digSphere`.
 - The raycast "what did I hit" result (`SceneHit`/`ActionHit`) is a `std::variant` that enumerates only what's currently hittable rather than always resolving to something in range — flagged in code as bad long-term design, not yet replaced.
 
