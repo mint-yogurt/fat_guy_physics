@@ -1,4 +1,11 @@
-import { Mesh, type Material, type Scene } from "three/webgpu";
+import {
+  Mesh,
+  Sprite,
+  SpriteMaterial,
+  type Material,
+  type Scene,
+  type Texture,
+} from "three/webgpu";
 
 import type { ChunkKey } from "@fgp/shared/sim/chunkKey";
 import type { ChunkResult } from "@fgp/shared/sim/chunkSource";
@@ -23,6 +30,8 @@ import { applyMeshData, createChunkGeometry, disposeChunkGeometry } from "./chun
 export class WorldRenderer implements ChunkSink {
   private readonly meshes = new Map<ChunkKey, Mesh>();
   private readonly treeMeshes = new Map<number, Mesh>();
+  private readonly bushes = new Map<number, Sprite>();
+  private bushMaterial: SpriteMaterial | undefined;
 
   /**
    * Where severed tree pieces go. Set by main once the physics layer has
@@ -36,6 +45,7 @@ export class WorldRenderer implements ChunkSink {
   constructor(
     private readonly scene: Scene,
     private readonly material: Material,
+    private readonly bushTexture?: Texture,
   ) {}
 
   get meshCount(): number {
@@ -156,7 +166,31 @@ export class WorldRenderer implements ChunkSink {
     this.onSevered?.(piece, centerX, centerY, centerZ, radiusMeters);
   }
 
+  /** Scattered plants: one camera-facing sprite each, no geometry. */
+  onBushPlaced(id: number, x: number, y: number, z: number, sizeMeters: number): void {
+    if (this.bushTexture === undefined || this.bushes.has(id)) return;
+    this.bushMaterial ??= new SpriteMaterial({
+      map: this.bushTexture,
+      // Cut out rather than blended: sorting hundreds of alpha-blended
+      // sprites against each other is not worth it for foliage.
+      alphaTest: 0.5,
+      transparent: false,
+    });
+    const sprite = new Sprite(this.bushMaterial);
+    sprite.scale.setScalar(sizeMeters);
+    sprite.position.set(x, y + sizeMeters / 2, z);
+    this.scene.add(sprite);
+    this.bushes.set(id, sprite);
+  }
+
   onTreeUnloaded(treeId: number): void {
+    const bush = this.bushes.get(treeId);
+    if (bush !== undefined) {
+      this.bushes.delete(treeId);
+      this.scene.remove(bush);
+      return;
+    }
+
     const object = this.treeMeshes.get(treeId);
     if (object === undefined) return;
     this.treeMeshes.delete(treeId);
@@ -187,5 +221,9 @@ export class WorldRenderer implements ChunkSink {
       disposeChunkGeometry(object.geometry);
     }
     this.treeMeshes.clear();
+    for (const sprite of this.bushes.values()) this.scene.remove(sprite);
+    this.bushes.clear();
+    this.bushMaterial?.dispose();
+    this.bushMaterial = undefined;
   }
 }

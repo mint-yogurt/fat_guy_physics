@@ -8,7 +8,7 @@ import { floorDiv, floorMod, isHandDiggable, isSolid, Material } from "../voxel/
 import { gridAt, gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
 import { createVoxelHit, raycastVoxel } from "../voxel/voxelRaycast.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
-import { generateTree, type TreeSpecies } from "../worldgen/trees.ts";
+import { generateTree, TreeSpecies } from "../worldgen/trees.ts";
 import { placeVegetation, type TreePlacement } from "../worldgen/vegetation.ts";
 
 /**
@@ -96,6 +96,11 @@ export interface ChunkSink {
    */
   onTreeMeshed(tree: Tree, vertices: Float32Array, vertexCount: number): void;
   onTreeUnloaded(treeId: number): void;
+  /**
+   * A scattered plant. These are billboards, not voxel objects: they are
+   * decorative, there are a lot of them, and nothing interacts with them.
+   */
+  onBushPlaced(id: number, x: number, y: number, z: number, sizeMeters: number): void;
   /**
    * A chop cut all the way through: `piece` is the part that came off, and
    * World has already removed it from the tree.
@@ -554,6 +559,24 @@ export class World {
     );
 
     for (const placement of placements) {
+      let owned = this.treesByChunk.get(key);
+      if (owned === undefined) {
+        owned = [];
+        this.treesByChunk.set(key, owned);
+      }
+
+      if (placement.species === TreeSpecies.Bush) {
+        owned.push(placement.id);
+        sink.onBushPlaced(
+          placement.id,
+          (placement.rootVoxelX + 0.5) * VOXEL_SIZE,
+          placement.rootVoxelY * VOXEL_SIZE,
+          (placement.rootVoxelZ + 0.5) * VOXEL_SIZE,
+          placement.sizeMeters,
+        );
+        continue;
+      }
+
       // A tree whose chunk is reloaded while the tree is somehow still
       // alive must not be duplicated.
       if (this.trees.has(placement.id)) continue;
@@ -573,11 +596,6 @@ export class World {
       };
 
       this.trees.set(tree.id, tree);
-      let owned = this.treesByChunk.get(key);
-      if (owned === undefined) {
-        owned = [];
-        this.treesByChunk.set(key, owned);
-      }
       owned.push(tree.id);
 
       this.meshTree(tree, sink);

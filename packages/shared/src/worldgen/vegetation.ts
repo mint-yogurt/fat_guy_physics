@@ -26,6 +26,8 @@ export interface TreePlacement {
   readonly rootVoxelX: number;
   readonly rootVoxelY: number;
   readonly rootVoxelZ: number;
+  /** Billboard height, for bushes. */
+  readonly sizeMeters: number;
 }
 
 /**
@@ -72,6 +74,8 @@ export function placeVegetation(
     rootVoxelX: worldX,
     rootVoxelY: surface,
     rootVoxelZ: worldZ,
+    // Matches the native build's 4-8 voxel bush sprite.
+    sizeMeters: (4 + hashFloat(worldX, worldZ, seed, 5) * 4) * 0.1,
   });
   return out;
 }

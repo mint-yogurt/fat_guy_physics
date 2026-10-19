@@ -28,6 +28,7 @@ export const TreeSpecies = {
   Conifer: 0,
   Broadleaf: 1,
   Dead: 2,
+  /** Not voxelised: scattered plants are billboards (see World's sink). */
   Bush: 3,
 } as const;
 export type TreeSpecies = (typeof TreeSpecies)[keyof typeof TreeSpecies];

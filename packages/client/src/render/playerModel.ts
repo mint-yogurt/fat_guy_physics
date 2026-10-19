@@ -1,29 +1,35 @@
 import {
-  BoxGeometry,
+  Box3,
   Group,
+  Matrix4,
   Mesh,
   MeshLambertMaterial,
   Quaternion,
+  Vector3,
   type Scene,
 } from "three/webgpu";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
-import { PlayerMode, type Player } from "@fgp/shared/sim/player";
+import { PlayerMode, WALK_HEIGHT, type Player } from "@fgp/shared/sim/player";
 
 /**
- * The player character: boxes, built in code, one half mirrored to the
- * other -- which is the model the design asks for and avoids an asset
- * pipeline for a shape this simple.
+ * The player character, from assets/meshes/playermodel_v2.glb.
  *
- * Limbs hang off pivot groups at the shoulder/hip so the walk cycle is two
- * sine waves, and so Ragball can retract them into the torso by scaling and
- * folding the same groups rather than swapping to a second model.
+ * The model authors each limb as its own node (arm_left/arm_right/body/
+ * head/leg_left/leg_right) specifically so they can be animated, so this
+ * hangs each limb off a pivot group placed at the top of that limb's own
+ * bounding box -- the shoulder or hip -- and rotates the group. The same
+ * groups fold inward for Ragball rather than there being a second model.
+ *
+ * The source is Z-up with +X forward, which is Blender's convention and
+ * not three's; geometry is rotated into Y-up once at load, after which +X
+ * is still forward and matches the sim's yaw of zero.
  */
 
 export interface Appearance {
   name: string;
   skin: string;
   shirt: string;
-  /** 0-2: brow/eye arrangement. */
   face: number;
 }
 
@@ -34,86 +40,120 @@ export const DEFAULT_APPEARANCE: Appearance = {
   face: 0,
 };
 
+const MODEL_URL = "/meshes/playermodel_v2.glb";
+
 const WALK_CYCLE_SPEED = 7;
 const RETRACT_RATE = 9;
 
-function box(w: number, h: number, d: number, material: MeshLambertMaterial): Mesh {
-  return new Mesh(new BoxGeometry(w, h, d), material);
+interface Limb {
+  readonly group: Group;
+  /** +1 for the left side, -1 for the right. */
+  readonly sign: number;
 }
 
 export class PlayerModel {
   readonly root = new Group();
 
-  private readonly skinMaterial: MeshLambertMaterial;
-  private readonly shirtMaterial: MeshLambertMaterial;
-  private readonly eyeMaterial = new MeshLambertMaterial({ color: 0x1b1b22 });
-
   private readonly body = new Group();
-  private readonly arms: Group[] = [];
-  private readonly legs: Group[] = [];
-  private readonly head: Mesh;
+  private readonly arms: Limb[] = [];
+  private readonly legs: Limb[] = [];
 
-  /** 0 = standing, 1 = fully tucked into the ball. */
   private tuck = 0;
   private phase = 0;
   private readonly rotation = new Quaternion();
 
-  constructor(scene: Scene, appearance: Appearance) {
-    this.skinMaterial = new MeshLambertMaterial({ color: appearance.skin });
-    this.shirtMaterial = new MeshLambertMaterial({ color: appearance.shirt });
+  private constructor(
+    private readonly scene: Scene,
+    parts: Map<string, Mesh>,
+    appearance: Appearance,
+  ) {
+    const skin = new MeshLambertMaterial({ color: appearance.skin });
+    const shirt = new MeshLambertMaterial({ color: appearance.shirt });
 
-    const torso = box(0.52, 0.62, 0.34, this.shirtMaterial);
-    torso.position.y = 1.15;
-    this.body.add(torso);
+    // The exported basis is not three's: measured off the parts, head-to-toe
+    // runs along -X, left-to-right along +Y, and the belly points -Z. This
+    // maps that onto three's Y-up with +X forward, which is also the sim's
+    // yaw of zero. Baked into the geometry rather than left on a parent
+    // transform, so limb pivots are computed in the space the animation
+    // runs in.
+    // prettier-ignore
+    const toYUp = new Matrix4().set(
+      0, 0, -1, 0,
+      -1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 0, 1,
+    );
+    const bounds = new Box3();
+    for (const mesh of parts.values()) {
+      mesh.geometry.applyMatrix4(toYUp);
+      mesh.geometry.computeBoundingBox();
+      bounds.union(mesh.geometry.boundingBox ?? new Box3());
+    }
 
-    this.head = box(0.34, 0.32, 0.32, this.skinMaterial);
-    this.head.position.y = 1.62;
-    this.body.add(this.head);
+    // Scaled to the collision capsule's height and dropped so the feet sit
+    // at the root, which is the sim's position.
+    const size = new Vector3();
+    bounds.getSize(size);
+    const scale = size.y > 0 ? WALK_HEIGHT / size.y : 1;
+    const lift = -bounds.min.y;
 
-    // The face is drawn on the half we build, then mirrored with it.
-    const browDrop = appearance.face === 1 ? 0.03 : 0;
-    const eyeGap = appearance.face === 2 ? 0.11 : 0.08;
+    const pivot = new Vector3();
+    const box = new Box3();
 
-    // One side, then mirrored: side = +1 is the half that is authored.
-    for (const side of [1, -1]) {
-      const eye = box(0.05, 0.06 - browDrop, 0.02, this.eyeMaterial);
-      eye.position.set(side * eyeGap, 1.66 - browDrop, -0.165);
-      this.body.add(eye);
+    for (const [name, mesh] of parts) {
+      mesh.geometry.translate(0, lift, 0);
+      mesh.geometry.scale(scale, scale, scale);
+      mesh.material = name === "body" ? shirt : skin;
+      mesh.frustumCulled = false;
 
-      const arm = new Group();
-      arm.position.set(side * 0.33, 1.42, 0);
-      const upper = box(0.14, 0.52, 0.16, this.shirtMaterial);
-      upper.position.y = -0.26;
-      const hand = box(0.14, 0.14, 0.16, this.skinMaterial);
-      hand.position.y = -0.58;
-      arm.add(upper, hand);
-      this.body.add(arm);
-      this.arms.push(arm);
+      const isLimb = name.startsWith("arm") || name.startsWith("leg");
+      if (!isLimb) {
+        this.body.add(mesh);
+        continue;
+      }
 
-      const leg = new Group();
-      leg.position.set(side * 0.14, 0.84, 0);
-      const thigh = box(0.18, 0.84, 0.2, this.skinMaterial);
-      thigh.position.y = -0.42;
-      leg.add(thigh);
-      this.body.add(leg);
-      this.legs.push(leg);
+      mesh.geometry.computeBoundingBox();
+      box.copy(mesh.geometry.boundingBox ?? new Box3());
+      box.getCenter(pivot);
+      const left = name.endsWith("left");
+      // Hips are the top of the leg; shoulders are the *inner* end of the
+      // arm, because the arms are stubby cylinders held out from the body
+      // rather than hanging down -- pivoting them at the top would swing
+      // them from the wrong end.
+      pivot.y = box.max.y;
+      if (name.startsWith("arm")) pivot.z = left ? box.min.z : box.max.z;
+
+      const group = new Group();
+      group.position.copy(pivot);
+      mesh.geometry.translate(-pivot.x, -pivot.y, -pivot.z);
+      group.add(mesh);
+      this.body.add(group);
+
+      const limb: Limb = { group, sign: left ? 1 : -1 };
+      (name.startsWith("arm") ? this.arms : this.legs).push(limb);
     }
 
     this.root.add(this.body);
     scene.add(this.root);
   }
 
-  /** `dt` is a real frame delta; this is cosmetic and not part of the sim. */
+  static async load(scene: Scene, appearance: Appearance): Promise<PlayerModel> {
+    const gltf = await new GLTFLoader().loadAsync(MODEL_URL);
+    const parts = new Map<string, Mesh>();
+    gltf.scene.traverse((object) => {
+      if (object instanceof Mesh) parts.set(object.name, object);
+    });
+    return new PlayerModel(scene, parts, appearance);
+  }
+
+  /** `dt` is a real frame delta: this is cosmetic, not part of the sim. */
   update(player: Player, dt: number, renderX: number, renderY: number, renderZ: number): void {
     this.root.position.set(renderX, renderY, renderZ);
 
     const ragball = player.mode === PlayerMode.Ragball;
-    const target = ragball ? 1 : 0;
-    this.tuck += Math.min(1, dt * RETRACT_RATE) * (target - this.tuck);
+    this.tuck += Math.min(1, dt * RETRACT_RATE) * ((ragball ? 1 : 0) - this.tuck);
 
     if (ragball) {
-      // The sim already tracks the ball's rolling orientation; the body
-      // just rides it, curled up.
       this.rotation.set(
         player.orientationX,
         player.orientationY,
@@ -122,39 +162,41 @@ export class PlayerModel {
       );
       this.root.quaternion.copy(this.rotation);
     } else {
-      this.root.rotation.set(0, player.yaw, 0);
+      // The model faces +X and a yaw of zero means +X, so the rotation
+      // about Y is the negated yaw (three turns +X towards -Z).
+      this.root.quaternion.identity();
+      this.root.rotation.set(0, -player.yaw, 0);
     }
 
     const speed = Math.hypot(player.vx, player.vz);
     this.phase += dt * WALK_CYCLE_SPEED * Math.min(1, speed / player.walkSpeed);
     const swing = player.grounded ? Math.sin(this.phase) * Math.min(1, speed / 2) * 0.7 : 0.35;
 
-    for (let i = 0; i < 2; i++) {
-      const sign = i === 0 ? 1 : -1;
-      const arm = this.arms[i];
-      const leg = this.legs[i];
-      if (arm === undefined || leg === undefined) continue;
-
-      // Retracting: limbs rotate up into the torso and shrink, so the
-      // silhouette becomes the collision sphere rather than a man-shape
-      // spinning end over end.
-      arm.rotation.x = swing * sign * (1 - this.tuck) + this.tuck * 2.4;
-      leg.rotation.x = -swing * sign * (1 - this.tuck) + this.tuck * -2.5;
-      const scale = 1 - this.tuck * 0.55;
-      arm.scale.setScalar(scale);
-      leg.scale.setScalar(scale);
+    // An arm points along the lateral axis, so swinging it forward is a
+    // rotation about Y -- and one angle serves both arms, since the two
+    // point opposite ways and so move opposite ways. A leg hangs down the
+    // Y axis, so its forward swing is a rotation about Z, which does need
+    // the per-side sign.
+    for (const limb of this.arms) {
+      limb.group.rotation.y = -swing * (1 - this.tuck);
+      limb.group.scale.setScalar(1 - this.tuck * 0.7);
+    }
+    for (const limb of this.legs) {
+      limb.group.rotation.z = swing * limb.sign * (1 - this.tuck);
+      limb.group.scale.setScalar(1 - this.tuck * 0.7);
     }
 
-    // Curl the whole body down towards the ball's centre.
-    this.body.position.y = -this.tuck * 0.72;
-    this.head.position.y = 1.62 - this.tuck * 0.42;
+    // Curl down so the tucked silhouette sits on the collision sphere
+    // rather than standing on top of it.
+    this.body.position.y = -this.tuck * 0.35;
+    this.body.scale.setScalar(1 - this.tuck * 0.2);
   }
 
   set visible(value: boolean) {
     this.root.visible = value;
   }
 
-  dispose(scene: Scene): void {
-    scene.remove(this.root);
+  dispose(): void {
+    this.scene.remove(this.root);
   }
 }

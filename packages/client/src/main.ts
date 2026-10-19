@@ -133,11 +133,12 @@ async function start(): Promise<void> {
   // mirror the C++'s asset layout rather than being a second copy.
   const cobble = await loadTexture("/textures/cobble.png");
   const material = createVoxelMaterial(cobble);
+  const bushTexture = await loadTexture("/billboard/bush.png");
 
   const radius = loadRadiusFromUrl();
   const source = new WorkerChunkSource(SEED);
   const world = new World(SEED, source, radius);
-  const worldRenderer = new WorldRenderer(scene, material);
+  const worldRenderer = new WorldRenderer(scene, material, bushTexture);
   hud.set("WORKERS", String(source.workerCount));
 
   // Everything that collides goes through this rather than the World
@@ -148,7 +149,7 @@ async function start(): Promise<void> {
   const spawnY = world.surfaceHeightVoxels(0, 0) * VOXEL_SIZE + SPAWN_CLEARANCE;
   const player = new Player(0, spawnY, 0);
   const playerCamera = new PlayerCamera();
-  const playerModel = new PlayerModel(scene, appearance);
+  const playerModel = await PlayerModel.load(scene, appearance);
   hud.set("NAME", appearance.name);
 
   // Jolt's WASM is fetched and compiled asynchronously. The game does not
@@ -252,6 +253,8 @@ async function start(): Promise<void> {
       player,
       worldRenderer,
       sceneQuery,
+      playerCamera,
+      playerModel,
       pickups,
       inventory,
       get logs(): LogSystem | undefined {
@@ -437,11 +440,19 @@ async function start(): Promise<void> {
       chupCooldown -= rawDt;
       if (chupCooldown <= 0) {
         if (hit.kind === HitKind.Tree) {
+          // Aim at the trunk axis at the height you are looking at, not at
+          // the exact voxel under the crosshair. A tree is mostly canopy,
+          // so hitting the actual trunk by eye means finding a 20cm pole
+          // inside a bush -- and every miss just shaves leaves, which
+          // reads as "chopping does not work".
+          const tree = world.getTree(hit.treeId);
+          const chopX = tree === undefined ? hit.centerX : (tree.rootVoxelX + 0.5) * VOXEL_SIZE;
+          const chopZ = tree === undefined ? hit.centerZ : (tree.rootVoxelZ + 0.5) * VOXEL_SIZE;
           const cleared = world.chopTree(
             hit.treeId,
-            hit.centerX,
+            chopX,
             hit.centerY,
-            hit.centerZ,
+            chopZ,
             CHUP_HORIZONTAL_RADIUS,
             CHUP_VERTICAL_HALF_THICKNESS,
             worldRenderer,
@@ -449,9 +460,9 @@ async function start(): Promise<void> {
           if (cleared) {
             const roll = Math.random();
             if (roll < STICK_DROP_CHANCE) {
-              dropItem(ItemType.Stick, hit.centerX, hit.centerY, hit.centerZ);
+              dropItem(ItemType.Stick, chopX, hit.centerY, chopZ);
             } else if (roll < STICK_DROP_CHANCE + LEAF_DROP_CHANCE) {
-              dropItem(ItemType.Leaf, hit.centerX, hit.centerY, hit.centerZ);
+              dropItem(ItemType.Leaf, chopX, hit.centerY, chopZ);
             }
           }
         }
@@ -508,7 +519,7 @@ async function start(): Promise<void> {
   import.meta.hot?.dispose(() => {
     void renderer.setAnimationLoop(null);
     input.dispose();
-    playerModel.dispose(scene);
+    playerModel.dispose();
     pickupRenderer.clear();
     logs?.clear();
     physics?.dispose();
