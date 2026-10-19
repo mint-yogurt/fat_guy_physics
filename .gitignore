@@ -14,6 +14,13 @@ compile_commands.json
 *.user
 .idea/
 
+# Node / web client
+node_modules/
+dist/
+dist-types/
+*.tsbuildinfo
+.vite/
+
 # OS cruft
 .DS_Store
 Thumbs.db

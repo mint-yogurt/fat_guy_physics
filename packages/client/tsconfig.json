@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "rootDir": "src",
+    "outDir": "dist-types"
+  },
+  // vite.config.ts is deliberately outside this project: it runs in Node, not
+  // the browser, and Vite compiles it itself. It is typechecked by
+  // tsconfig.node.json instead.
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../shared" }]
+}

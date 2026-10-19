@@ -5,9 +5,37 @@ See [DESIGN.md](DESIGN.md) for the design document and roadmap.
 
 ## Building
 
+The game is being ported to a browser client (TypeScript + three.js +
+`jolt-physics`); see [the port plan](#web-port) below. Both builds currently
+live in this repo and share the `assets/` tree.
+
+### Web client (the target)
+
+Requires Node 20+ (developed on 24 LTS). From the repo root:
+
+```sh
+npm install
+npm run dev
+```
+
+Then open http://localhost:5173. Append `?gl` to the URL to force the WebGL2
+backend instead of WebGPU — useful for telling "broken everywhere" apart from
+"broken on one backend".
+
+```sh
+npm run typecheck   # tsc --build across the workspace
+npm run test        # vitest
+npm run build       # static bundle into packages/client/dist
+```
+
+### Native build (the reference)
+
 Requires CMake 3.21+ and a C++20 compiler. Dependencies (GLFW, GLM) are fetched
 automatically at configure time via CMake FetchContent — no package manager
 (vcpkg/apt) setup required.
+
+The native build is retained as the **reference implementation** the port is
+verified against, not as a parallel target — see [Web port](#web-port).
 
 ### Linux
 
@@ -36,9 +64,48 @@ cmake --build build --config Debug
 build\Debug\fatguyphysics.exe
 ```
 
+## Web port
+
+The game is moving to the browser — playable with no download, single-player
+and multiplayer. The stack is TypeScript + three.js (`WebGPURenderer`, which
+falls back to WebGL2 on its own) + `jolt-physics`, which is the official
+Emscripten build of **the same Jolt** the C++ uses, so the physics layer ports
+near 1:1.
+
+Layout: an npm workspaces monorepo under `packages/` — `@fgp/shared` (the
+simulation; no three.js, no DOM, no browser APIs, because this is what the
+authoritative server will run), `@fgp/client` (Vite + three.js), and later
+`@fgp/server` (Node + ws).
+
+Milestones, in order. Each one is runnable and visually verifiable:
+
+- [x] **M0** Toolchain — monorepo, Vite, pinned three.js, backend readout
+- [ ] **M1** One chunk from the real generator, main thread + golden-data check
+- [ ] **M2** Fly camera + synchronous chunk streaming
+- [ ] **M3** Web Worker pool with transferable buffers
+- [ ] **M4** Player controller, collision, the fixed-timestep frame loop
+- [ ] **M5** Raycast (redesigned) + scoop
+- [ ] **M6** Trees + chup + the canopy-size fix
+- [ ] **M7** Jolt WASM + falling bodies
+- [ ] **M8** Oriented-body collision (replaces snap-on-sleep)
+- [ ] **M9** Items — **parity with the native build**
+- [ ] **M10** DOM UI — hotbar, controls legend, character create
+- [ ] **M11** Player rig + animation
+- [ ] **M12** Post-processing
+- [ ] **M13** World generation + biomes
+- [ ] **M14** Multiplayer
+
+The native C++ build is kept as the **reference implementation**: a
+golden-data dump (hash tuples, chunk meshes, a collision trace) is what the
+ported TypeScript is asserted against, so "it runs" and "it behaves the same"
+stay separate questions.
+
 ## Development Roadmap
 
 See the [Development Roadmap](DESIGN.md#development-roadmap-readme-added-to-as-each-step-gets-worked-on) section of DESIGN.md.
+
+The phase list below describes the **native build**, which is feature-complete
+through Phase 4. It doubles as the parity checklist for the port's M9.
 
 ### Phase 0 — Project setup
 

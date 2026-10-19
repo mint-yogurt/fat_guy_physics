@@ -1,0 +1,48 @@
+:root {
+  --hud-fg: #e8f0f7;
+  --hud-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0e13;
+}
+
+#viewport {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+/* The overlay never eats pointer events -- the canvas below needs every
+   click for pointer-lock capture. Interactive UI added later (hotbar,
+   character create) re-enables them on itself only. */
+#overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  font: 13px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: var(--hud-fg);
+  text-shadow: var(--hud-shadow);
+}
+
+#stats {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  white-space: pre;
+}
+
+.stat-label {
+  opacity: 0.55;
+}

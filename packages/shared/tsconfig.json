@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // NO "DOM". This is load-bearing: shared/ is the code the authoritative
+    // Node server runs, so a single window/document/performance reference
+    // that compiles today is a server port tomorrow. Keep this list at
+    // ES2022 only -- if something in here needs the DOM, it belongs in
+    // packages/client instead.
+    "lib": ["ES2022"],
+    "types": [],
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"]
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+
+    // Explicit .ts extensions on relative imports. Vite resolves them, Node
+    // 24 runs them directly via type stripping (which is what lets the future
+    // server package consume shared/ as source rather than as a build step),
+    // and they make the module graph unambiguous. The pair of flags below is
+    // what TypeScript requires to allow it.
+    "allowImportingTsExtensions": true,
+    "emitDeclarationOnly": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  }
+}
