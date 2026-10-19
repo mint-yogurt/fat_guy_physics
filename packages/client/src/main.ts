@@ -6,7 +6,15 @@ import "./ui/ui.css";
 // bundle while making `instanceof` checks across the boundary fail.
 // three/webgpu re-exports all of Three.Core, so there is never a reason to
 // reach for the bare "three" specifier in this package.
-import { Color, PerspectiveCamera, Scene, TextureLoader, type Texture } from "three/webgpu";
+import {
+  Color,
+  DirectionalLight,
+  HemisphereLight,
+  PerspectiveCamera,
+  Scene,
+  TextureLoader,
+  type Texture,
+} from "three/webgpu";
 
 import {
   FIXED_TIMESTEP,
@@ -30,9 +38,11 @@ import { LogSystem } from "./physics/logSystem.ts";
 import { PhysicsWorld } from "./physics/physicsWorld.ts";
 import { CameraPerspective, PlayerCamera } from "./render/playerCamera.ts";
 import { PickupRenderer } from "./render/pickupRenderer.ts";
+import { PlayerModel } from "./render/playerModel.ts";
 import { createRenderer, installResizeHandler, isRenderable } from "./render/renderer.ts";
 import { createVoxelMaterial } from "./render/voxelMaterial.ts";
 import { WorldRenderer } from "./render/worldRenderer.ts";
+import { askAppearance } from "./ui/characterCreate.ts";
 import { Hotbar } from "./ui/hotbar.ts";
 import { FrameStats, Hud } from "./ui/hud.ts";
 import { WorkerChunkSource } from "./workers/workerChunkSource.ts";
@@ -98,6 +108,8 @@ function loadRadiusFromUrl(): number {
 }
 
 async function start(): Promise<void> {
+  const appearance = await askAppearance(requireElement<HTMLDivElement>("#charcreate"));
+
   const canvas = requireElement<HTMLCanvasElement>("#viewport");
   const bundle = await createRenderer(canvas);
   const { renderer } = bundle;
@@ -108,6 +120,12 @@ async function start(): Promise<void> {
 
   const scene = new Scene();
   scene.background = new Color(0x87b8dc); // the C++ clear colour (0.53, 0.72, 0.86)
+
+  // The voxel terrain shader is unlit, but the character boxes are not.
+  scene.add(new HemisphereLight(0xcfe4f5, 0x4a3a2a, 2.2));
+  const sun = new DirectionalLight(0xfff4e0, 1.6);
+  sun.position.set(0.4, 1, 0.25);
+  scene.add(sun);
 
   const camera = new PerspectiveCamera(90, window.innerWidth / window.innerHeight, 0.1, 100);
 
@@ -130,6 +148,8 @@ async function start(): Promise<void> {
   const spawnY = world.surfaceHeightVoxels(0, 0) * VOXEL_SIZE + SPAWN_CLEARANCE;
   const player = new Player(0, spawnY, 0);
   const playerCamera = new PlayerCamera();
+  const playerModel = new PlayerModel(scene, appearance);
+  hud.set("NAME", appearance.name);
 
   // Jolt's WASM is fetched and compiled asynchronously. The game does not
   // wait for it: terrain, movement and digging have nothing to do with
@@ -447,6 +467,10 @@ async function start(): Promise<void> {
 
     logs?.update(player.x, player.y, player.z);
 
+    playerModel.update(player, rawDt, renderX, renderY, renderZ);
+    // Hidden in first person: inside the head is all you would see.
+    playerModel.visible = playerCamera.perspective !== CameraPerspective.FirstPerson;
+
     playerCamera.sync(camera, player, sceneQuery, renderX, renderY, renderZ);
 
     hud.set("POS", `${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}`);
@@ -484,6 +508,7 @@ async function start(): Promise<void> {
   import.meta.hot?.dispose(() => {
     void renderer.setAnimationLoop(null);
     input.dispose();
+    playerModel.dispose(scene);
     pickupRenderer.clear();
     logs?.clear();
     physics?.dispose();

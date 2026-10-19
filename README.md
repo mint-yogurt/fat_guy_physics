@@ -97,7 +97,7 @@ Milestones, in order. Each one is runnable and visually verifiable:
 - [x] **M8** Oriented-body collision (replaces snap-on-sleep)
 - [x] **M9** Items — pickups, inventory, hotbar gating
 - [x] **M10** DOM UI — hotbar, controls legend
-- [ ] **M11** Player rig + animation + character create
+- [x] **M11** Player rig + animation + character create
 - [ ] **M12** Post-processing
 - [ ] **M13** World generation + biomes
 - [ ] **M14** Multiplayer

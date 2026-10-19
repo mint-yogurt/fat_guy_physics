@@ -137,3 +137,82 @@ body {
   white-space: nowrap;
   overflow: hidden;
 }
+
+#charcreate {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0b0e13;
+  font: 14px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: var(--hud-fg);
+}
+
+#charcreate .panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 300px;
+}
+
+#charcreate h1 {
+  font-size: 20px;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+}
+
+#charcreate label,
+#charcreate .row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#charcreate .row > span {
+  width: 42px;
+  opacity: 0.55;
+}
+
+#charcreate input {
+  flex: 1;
+  padding: 5px 7px;
+  background: #151a22;
+  border: 1px solid rgba(232, 240, 247, 0.25);
+  color: inherit;
+  font: inherit;
+}
+
+.swatches {
+  display: flex;
+  gap: 6px;
+}
+
+.swatch {
+  width: 30px;
+  height: 26px;
+  border: 1px solid rgba(232, 240, 247, 0.25);
+  background: #151a22;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.swatch.on {
+  border-color: var(--hud-fg);
+  border-width: 2px;
+}
+
+#charcreate button#cc-play {
+  margin-top: 6px;
+  padding: 9px;
+  background: #2f6fb0;
+  border: 0;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+#charcreate[hidden] {
+  display: none;
+}
