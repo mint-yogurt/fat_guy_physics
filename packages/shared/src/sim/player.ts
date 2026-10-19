@@ -58,12 +58,18 @@ const RAGBALL_GROUND_FRICTION = 2;
 
 const DEG_TO_RAD = Math.PI / 180;
 
-export const WALK_HALF_WIDTH = 0.3;
+/**
+ * Half the walking collider's width. Sized to the player model's body,
+ * which is a wide round mass rather than a narrow capsule -- the 0.3 the
+ * native build used was built around a placeholder sphere and left the
+ * model clipping into terrain at its sides.
+ */
+export const WALK_HALF_WIDTH = 0.55;
 /** 190cm player. */
 export const WALK_HEIGHT = 1.9;
 /** Eyes sit just below the top of the head. */
 export const WALK_EYE_HEIGHT = 1.78;
-export const RAGBALL_RADIUS = 0.4;
+export const RAGBALL_RADIUS = 0.6;
 
 /**
  * Below the loaded vertical chunk band there is no terrain to catch a fall,
@@ -93,6 +99,14 @@ export class Player {
   orientationW = 1;
 
   /** Matches Player::mouseSensitivity. Degrees per pixel. */
+  /**
+   * Collider dimensions, as fields rather than constants so the golden
+   * trace can hold the reference build's values while the game uses ones
+   * that fit the actual model.
+   */
+  halfWidth = WALK_HALF_WIDTH;
+  ballRadius = RAGBALL_RADIUS;
+
   mouseSensitivity = 0.1;
   walkSpeed = 4.5;
   jumpSpeed = 6.3;
@@ -128,11 +142,11 @@ export class Player {
   }
 
   get eyeHeight(): number {
-    return this.mode === PlayerMode.Walking ? WALK_EYE_HEIGHT : RAGBALL_RADIUS * 1.3;
+    return this.mode === PlayerMode.Walking ? WALK_EYE_HEIGHT : this.ballRadius * 1.3;
   }
 
   get bodyRadius(): number {
-    return this.mode === PlayerMode.Walking ? WALK_HALF_WIDTH : RAGBALL_RADIUS;
+    return this.mode === PlayerMode.Walking ? this.halfWidth : this.ballRadius;
   }
 
   get yaw(): number {
@@ -196,12 +210,12 @@ export class Player {
         if (
           !aabbOverlapsSolid(
             query,
-            this.x - WALK_HALF_WIDTH,
+            this.x - this.halfWidth,
             candidateY,
-            this.z - WALK_HALF_WIDTH,
-            this.x + WALK_HALF_WIDTH,
+            this.z - this.halfWidth,
+            this.x + this.halfWidth,
             candidateY + WALK_HEIGHT,
-            this.z + WALK_HALF_WIDTH,
+            this.z + this.halfWidth,
           )
         ) {
           this.y = candidateY;
@@ -282,7 +296,7 @@ export class Player {
       this.x,
       this.y,
       this.z,
-      WALK_HALF_WIDTH,
+      this.halfWidth,
       WALK_HEIGHT,
       this.vx,
       this.vy,
@@ -324,9 +338,9 @@ export class Player {
     const result = sweepSphere(
       query,
       this.x,
-      this.y + RAGBALL_RADIUS,
+      this.y + this.ballRadius,
       this.z,
-      RAGBALL_RADIUS,
+      this.ballRadius,
       this.vx,
       this.vy,
       this.vz,
@@ -334,7 +348,7 @@ export class Player {
       this.sphereResult,
     );
     this.x = result.x;
-    this.y = result.y - RAGBALL_RADIUS;
+    this.y = result.y - this.ballRadius;
     this.z = result.z;
     this.vx = result.vx;
     this.vy = result.vy;

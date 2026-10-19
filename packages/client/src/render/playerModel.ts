@@ -47,6 +47,13 @@ const MODEL_URL = "/meshes/playermodel_v2.glb";
 const WALK_CYCLE_SPEED = 7;
 const RETRACT_RATE = 9;
 
+/**
+ * Vertical bounce at the top of each step, in metres. The whole model
+ * lifts, limbs included, which is what makes a heavy walk read as heavy
+ * rather than as two legs swinging under a static body.
+ */
+const BOUNCE_HEIGHT = 0.07;
+
 interface Limb {
   readonly group: Group;
   /** +1 left, -1 right. */
@@ -65,6 +72,7 @@ export class PlayerModel {
   private readonly legs: Limb[] = [];
 
   private baseScale = 1;
+  private baseLift = 0;
   private tuck = 0;
   private phase = 0;
   private readonly rotation = new Quaternion();
@@ -74,14 +82,16 @@ export class PlayerModel {
     parts: Map<string, Mesh>,
     appearance: Appearance,
   ) {
-    // -X is up, so stand it on +Y, then turn it to face +X, which is where
-    // a yaw of zero points in the sim. Composed explicitly rather than as
-    // an Euler triple: the order an Euler applies its axes in is the easy
-    // thing to get backwards, and backwards here lays the model on its
-    // side.
+    // Measured, not assumed: in the file the model lies on its back with
+    // the head toward -X and the arms spread along Y. Two turns stand it
+    // up -- one to bring the lateral axis onto Z, one to lift the head
+    // off the floor -- after which up is +Y, facing is +X (the sim's yaw
+    // of zero) and left is +Z.
+    const yAxis = new Vector3(0, 1, 0);
+    const lateral = new Quaternion().setFromAxisAngle(yAxis, -Math.PI / 2);
     const stand = new Quaternion().setFromAxisAngle(new Vector3(0, 0, 1), -Math.PI / 2);
-    const face = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), -Math.PI / 2);
-    this.orient.quaternion.copy(face.multiply(stand));
+    const face = new Quaternion().setFromAxisAngle(yAxis, -Math.PI / 2);
+    this.orient.quaternion.copy(face.multiply(stand).multiply(lateral));
 
     const skin = new MeshLambertMaterial({ color: appearance.skin });
     const shirt = new MeshLambertMaterial({ color: appearance.shirt });
@@ -127,7 +137,14 @@ export class PlayerModel {
     bounds.getSize(size);
     this.baseScale = size.y > 0 ? WALK_HEIGHT / size.y : 1;
     this.fit.scale.setScalar(this.baseScale);
-    this.fit.position.y = -bounds.min.y * this.baseScale;
+    this.baseLift = -bounds.min.y * this.baseScale;
+    this.fit.position.y = this.baseLift;
+    // Centred on the root horizontally, so he stands in his own collider
+    // rather than off to one side of it.
+    const center = new Vector3();
+    bounds.getCenter(center);
+    this.fit.position.x = -center.x * this.baseScale;
+    this.fit.position.z = -center.z * this.baseScale;
 
     this.root.add(this.fit);
     scene.add(this.root);
@@ -168,8 +185,14 @@ export class PlayerModel {
 
     const speed = Math.hypot(player.vx, player.vz);
     this.phase += dt * WALK_CYCLE_SPEED * Math.min(1, speed / player.walkSpeed);
-    const swing = player.grounded ? Math.sin(this.phase) * Math.min(1, speed / 2) * 0.7 : 0.3;
+    const gait = player.grounded ? Math.min(1, speed / 2) : 0;
+    const swing = player.grounded ? Math.sin(this.phase) * gait * 0.7 : 0.3;
     const active = 1 - this.tuck;
+
+    // Two bounces per stride -- one per footfall -- so it peaks as each
+    // leg passes under the body.
+    this.fit.position.y =
+      this.baseLift + Math.abs(Math.sin(this.phase)) * BOUNCE_HEIGHT * gait * active;
 
     // Model space faces -Z, so a limb swings forward about whichever axis
     // moves its far end that way: X for an arm, which lies along the

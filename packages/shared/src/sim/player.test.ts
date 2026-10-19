@@ -104,6 +104,10 @@ describe("player trace vs the C++ reference", () => {
   it("reproduces position, grounded state and mode substep by substep", () => {
     const query = new TraceQuery(golden.seed);
     const player = new Player(0, trace.spawnY, 0);
+    // The trace was recorded against the C++ collider, which the game has
+    // since widened to fit the player model.
+    player.halfWidth = 0.3;
+    player.ballRadius = 0.4;
     const input = createPlayerInput();
     const surface = (): number => query.surfaceHeightVoxels(0, 0);
 
