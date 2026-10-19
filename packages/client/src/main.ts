@@ -7,7 +7,6 @@ import "./ui/ui.css";
 // three/webgpu re-exports all of Three.Core, so there is never a reason to
 // reach for the bare "three" specifier in this package.
 import {
-  Color,
   DirectionalLight,
   HemisphereLight,
   PerspectiveCamera,
@@ -33,6 +32,7 @@ import {
   World,
 } from "@fgp/shared/sim/world";
 
+import { Atmosphere } from "./render/atmosphere.ts";
 import { InputState } from "./input/inputState.ts";
 import { LogSystem } from "./physics/logSystem.ts";
 import { PhysicsWorld } from "./physics/physicsWorld.ts";
@@ -40,6 +40,7 @@ import { CameraPerspective, PlayerCamera } from "./render/playerCamera.ts";
 import { PickupRenderer } from "./render/pickupRenderer.ts";
 import { PlayerModel } from "./render/playerModel.ts";
 import { createRenderer, installResizeHandler, isRenderable } from "./render/renderer.ts";
+import { Snow } from "./render/snow.ts";
 import { createVoxelMaterial } from "./render/voxelMaterial.ts";
 import { WorldRenderer } from "./render/worldRenderer.ts";
 import { askAppearance } from "./ui/characterCreate.ts";
@@ -85,6 +86,15 @@ const FOV_STEP = 2;
 const FOV_MIN = 50;
 const FOV_MAX = 120;
 
+/** Dominant biome, for the HUD readout. */
+function biomeLabel(weights: { christmas: number; halloween: number }): string {
+  if (weights.christmas > 0.5) return "christmas";
+  if (weights.halloween > 0.5) return "halloween";
+  if (weights.christmas > 0.05) return "christmas edge";
+  if (weights.halloween > 0.05) return "halloween edge";
+  return "plain";
+}
+
 function requireElement<T extends Element>(selector: string): T {
   const el = document.querySelector<T>(selector);
   if (el === null) throw new Error(`missing required element: ${selector}`);
@@ -119,20 +129,26 @@ async function start(): Promise<void> {
   hud.set("BACKEND", bundle.backend + (bundle.forcedWebGL ? " (forced via ?gl)" : ""));
 
   const scene = new Scene();
-  scene.background = new Color(0x87b8dc); // the C++ clear colour (0.53, 0.72, 0.86)
 
-  // The voxel terrain shader is unlit, but the character boxes are not.
-  scene.add(new HemisphereLight(0xcfe4f5, 0x4a3a2a, 2.2));
+  // The voxel terrain shader is unlit, but the player model is not. Both
+  // light levels are driven per frame by the Atmosphere, which is also what
+  // sets the sky colour -- see render/atmosphere.ts.
+  const hemisphere = new HemisphereLight(0xcfe4f5, 0x4a3a2a, 2.2);
+  scene.add(hemisphere);
   const sun = new DirectionalLight(0xfff4e0, 1.6);
   sun.position.set(0.4, 1, 0.25);
   scene.add(sun);
 
-  const camera = new PerspectiveCamera(90, window.innerWidth / window.innerHeight, 0.1, 100);
+  // Far plane well past the load radius: terrain fades out at the
+  // atmosphere's fog distance, and clipping it closer than that would undo
+  // the fade it exists to hide.
+  const camera = new PerspectiveCamera(90, window.innerWidth / window.innerHeight, 0.1, 400);
 
   // assets/ is served from the repo root via Vite's publicDir, so these paths
   // mirror the C++'s asset layout rather than being a second copy.
   const cobble = await loadTexture("/textures/cobble.png");
-  const material = createVoxelMaterial(cobble);
+  const voxelMaterial = createVoxelMaterial(cobble);
+  const material = voxelMaterial.material;
   const bushTexture = await loadTexture("/billboard/bush.png");
 
   const radius = loadRadiusFromUrl();
@@ -140,6 +156,9 @@ async function start(): Promise<void> {
   const world = new World(SEED, source, radius);
   const worldRenderer = new WorldRenderer(scene, material, bushTexture);
   hud.set("WORKERS", String(source.workerCount));
+
+  const atmosphere = new Atmosphere(scene, voxelMaterial, hemisphere, sun, radius);
+  const snow = new Snow(scene);
 
   // Everything that collides goes through this rather than the World
   // directly: terrain plus whatever settled rigid bodies the player is
@@ -257,6 +276,11 @@ async function start(): Promise<void> {
       playerModel,
       pickups,
       inventory,
+      scene,
+      camera,
+      atmosphere,
+      snow,
+      voxelMaterial,
       get logs(): LogSystem | undefined {
         return logs;
       },
@@ -484,6 +508,12 @@ async function start(): Promise<void> {
 
     playerCamera.sync(camera, player, sceneQuery, renderX, renderY, renderZ);
 
+    // After the camera, because the snow's billboards are built from the
+    // camera basis and its box is centred on the camera.
+    world.biomeAtMeters(player.x, player.z, atmosphere.weightsBuffer);
+    atmosphere.update(atmosphere.weightsBuffer, now);
+    snow.update(camera, now, atmosphere.snowIntensity, atmosphere.blizzard);
+
     hud.set("POS", `${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}`);
     hud.set("MODE", player.mode === PlayerMode.Walking ? "walking" : "ragball");
     hud.set("GROUND", player.grounded ? "yes" : "no");
@@ -493,6 +523,10 @@ async function start(): Promise<void> {
     hud.set("ITEMS", String(pickups.items.length));
     hud.set("TREES", `${world.treeCount} (${String(logs?.count ?? 0)} logs)`);
     hud.set("QUEUE", String(world.pendingCount));
+    hud.set(
+      "BIOME",
+      `${biomeLabel(atmosphere.weightsBuffer)}${atmosphere.blizzard > 0.01 ? ` blizzard ${(atmosphere.blizzard * 100).toFixed(0)}%` : ""}`,
+    );
     hud.set("UPLOAD", `${worstDrainMs.toFixed(1)}ms worst`);
     hud.set(
       "AIM",

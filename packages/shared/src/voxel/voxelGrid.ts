@@ -28,6 +28,16 @@ export interface VoxelGrid {
   readonly originZ: number;
   /** Length dimX*dimY*dimZ, indexed by `gridIndex`. */
   readonly cells: Uint8Array;
+  /**
+   * Packed biome tint per *column*, length dimX*dimZ, indexed `x + dimX*z`.
+   * See voxel/biomeTint.ts for the encoding.
+   *
+   * Absent on grids that have no place in the world's biome field -- trees
+   * and felled logs carry their own grid and are meshed with their own
+   * colours. The mesher treats absent as untinted, so nothing has to know
+   * which kind of grid it holds.
+   */
+  readonly columnTint?: Uint8Array;
 }
 
 export function gridIndex(grid: VoxelGrid, gx: number, gy: number, gz: number): number {
@@ -63,6 +73,7 @@ export function createChunkGrid(): VoxelGrid {
     originY: 0,
     originZ: 0,
     cells: new Uint8Array(CHUNK_VOLUME),
+    columnTint: new Uint8Array(CHUNK_SIZE * CHUNK_SIZE),
   };
 }
 

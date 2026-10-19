@@ -1,4 +1,10 @@
 import { VOXEL_SIZE } from "../sim/constants.ts";
+import {
+  BIOME_GROUND_COLORS,
+  biomeTintStrength,
+  unpackBiome,
+  unpackBiomeWeight,
+} from "./biomeTint.ts";
 import { FLOATS_PER_VERTEX, faceTint } from "./vertexLayout.ts";
 import { MATERIAL_COLORS, Material, isSolid } from "./voxel.ts";
 import type { VoxelGrid } from "./voxelGrid.ts";
@@ -48,6 +54,17 @@ function axisDim(grid: VoxelGrid, axis: number): number {
   return grid.dimZ;
 }
 
+/**
+ * Stride into `grid.columnTint` for a step along an axis. Y is zero: the
+ * biome tint is per column, so moving vertically does not change it, which
+ * is also what keeps a tall side-face quad a single colour.
+ */
+function columnStride(grid: VoxelGrid, axis: number): number {
+  if (axis === 0) return 1;
+  if (axis === 1) return 0;
+  return grid.dimX;
+}
+
 export class Mesher {
   /**
    * Parallel arrays rather than an array of {material, backFace} objects.
@@ -55,6 +72,14 @@ export class Mesher {
    */
   private maskMaterial = new Uint8Array(0);
   private maskBackFace = new Uint8Array(0);
+  /**
+   * Packed biome tint per mask cell. Part of a cell's *identity*, not just
+   * its colour: two cells of the same material that are tinted differently
+   * have to stay separate quads, or a merged quad would take one end's
+   * colour and the biome transition would come out as hard chunk-sized
+   * steps instead of a gradient.
+   */
+  private maskTint = new Uint8Array(0);
   private vertices = new Float32Array(0);
   private vertexCount = 0;
 
@@ -68,6 +93,7 @@ export class Mesher {
     if (this.maskMaterial.length < size) {
       this.maskMaterial = new Uint8Array(size);
       this.maskBackFace = new Uint8Array(size);
+      this.maskTint = new Uint8Array(size);
     }
   }
 
@@ -117,7 +143,16 @@ export class Mesher {
     this.ensureMask(maskSize);
     const maskMaterial = this.maskMaterial;
     const maskBackFace = this.maskBackFace;
+    const maskTint = this.maskTint;
     const cells = grid.cells;
+
+    // Length-zero counts as absent: that is what a grid built from a chunk
+    // result whose tint never made the trip looks like.
+    const gridTint = grid.columnTint;
+    const columnTint = gridTint !== undefined && gridTint.length > 0 ? gridTint : undefined;
+    const colStrideD = columnStride(grid, d);
+    const colStrideU = columnStride(grid, u);
+    const colStrideV = columnStride(grid, v);
 
     // Sweeps planes -1..dimD-1, comparing the cell at cd against cd+1. The
     // -1 start is what emits the grid's lower boundary plane, and the final
@@ -141,13 +176,27 @@ export class Mesher {
           if (aSolid === bSolid) {
             maskMaterial[n] = Material.Air;
             maskBackFace[n] = 0;
-          } else if (aSolid) {
+            maskTint[n] = 0;
+            continue;
+          }
+
+          if (aSolid) {
             maskMaterial[n] = a;
             maskBackFace[n] = 0;
           } else {
             maskMaterial[n] = b;
             maskBackFace[n] = 1;
           }
+
+          // The face belongs to whichever side is solid, so the tint comes
+          // from that side's column -- they differ by one along a
+          // horizontal axis.
+          maskTint[n] =
+            columnTint === undefined
+              ? 0
+              : (columnTint[
+                  colStrideD * (aSolid ? cd : cd + 1) + colStrideU * cu + colStrideV * cv
+                ] as number);
         }
       }
 
@@ -164,13 +213,15 @@ export class Mesher {
             continue;
           }
           const backFace = maskBackFace[n] as number;
+          const biomeTint = maskTint[n] as number;
 
           // Grow width along u while cells match.
           let w = 1;
           while (
             i + w < dimU &&
             maskMaterial[n + w] === material &&
-            maskBackFace[n + w] === backFace
+            maskBackFace[n + w] === backFace &&
+            maskTint[n + w] === biomeTint
           ) {
             ++w;
           }
@@ -183,7 +234,11 @@ export class Mesher {
           for (; j + h < dimV; ++h) {
             for (let k = 0; k < w; ++k) {
               const m = n + k + h * dimU;
-              if (maskMaterial[m] !== material || maskBackFace[m] !== backFace) {
+              if (
+                maskMaterial[m] !== material ||
+                maskBackFace[m] !== backFace ||
+                maskTint[m] !== biomeTint
+              ) {
                 done = true;
                 break;
               }
@@ -201,7 +256,15 @@ export class Mesher {
           this.normal[0] = this.normal[1] = this.normal[2] = 0;
           this.normal[d] = backFace ? -1 : 1;
 
-          this.emitQuad(grid, backFace !== 0, material, w, h, faceTint(d, backFace !== 0));
+          this.emitQuad(
+            grid,
+            backFace !== 0,
+            material,
+            w,
+            h,
+            faceTint(d, backFace !== 0),
+            biomeTint,
+          );
 
           // Zero the consumed region so it isn't emitted again.
           for (let l = 0; l < h; ++l) {
@@ -209,6 +272,7 @@ export class Mesher {
             for (let k = 0; k < w; ++k) {
               maskMaterial[rowBase + k] = Material.Air;
               maskBackFace[rowBase + k] = 0;
+              maskTint[rowBase + k] = 0;
             }
           }
 
@@ -226,6 +290,7 @@ export class Mesher {
     w: number,
     h: number,
     tint: number,
+    biomeTint: number,
   ): void {
     this.ensureVertexCapacity((this.vertexCount + 6) * FLOATS_PER_VERTEX);
 
@@ -233,9 +298,24 @@ export class Mesher {
     let p = this.vertexCount * FLOATS_PER_VERTEX;
 
     const ci = material * 3;
-    const r = (MATERIAL_COLORS[ci] as number) * tint;
-    const g = (MATERIAL_COLORS[ci + 1] as number) * tint;
-    const b = (MATERIAL_COLORS[ci + 2] as number) * tint;
+    let cr = MATERIAL_COLORS[ci] as number;
+    let cg = MATERIAL_COLORS[ci + 1] as number;
+    let cb = MATERIAL_COLORS[ci + 2] as number;
+
+    // Biome recolour, before the face tint so a snowy top face still reads
+    // as brighter than a snowy side face.
+    const strength = biomeTint === 0 ? 0 : biomeTintStrength(material);
+    if (strength > 0) {
+      const blend = unpackBiomeWeight(biomeTint) * strength;
+      const bi = unpackBiome(biomeTint) * 3;
+      cr += ((BIOME_GROUND_COLORS[bi] as number) - cr) * blend;
+      cg += ((BIOME_GROUND_COLORS[bi + 1] as number) - cg) * blend;
+      cb += ((BIOME_GROUND_COLORS[bi + 2] as number) - cb) * blend;
+    }
+
+    const r = cr * tint;
+    const g = cg * tint;
+    const b = cb * tint;
 
     const nx = this.normal[0] as number;
     const ny = this.normal[1] as number;

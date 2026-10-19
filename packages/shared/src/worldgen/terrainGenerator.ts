@@ -1,6 +1,7 @@
 import FastNoiseLite from "fastnoise-lite";
 
 import { CHUNK_SIZE } from "../sim/constants.ts";
+import { BiomeField, type BiomeWeights } from "./biome.ts";
 import { Material } from "../voxel/voxel.ts";
 import type { VoxelGrid } from "../voxel/voxelGrid.ts";
 
@@ -20,6 +21,11 @@ import type { VoxelGrid } from "../voxel/voxelGrid.ts";
  * the world is a uniform bumpy field with no continents, valleys, plateaus or
  * flats anywhere.
  *
+ * M13 adds the biome field on top without touching any of the above: it
+ * recolours terrain and drives sky, light and weather, but places no
+ * different material and shifts no height, so the golden diff still holds
+ * wherever `biomes` is off.
+ *
  * The `fastnoise-lite` npm package is the official JS port of the same
  * FastNoiseLite header the C++ uses. Substituting a different noise
  * implementation would silently change the entire world and destroy the
@@ -31,8 +37,18 @@ const AMPLITUDE = 24;
 
 export class TerrainGenerator {
   private readonly noise: FastNoiseLite;
+  readonly biomeField: BiomeField;
 
-  constructor(readonly seed: number) {
+  /**
+   * `biomes` exists for the golden-data tests, which assert vertex buffers
+   * recorded from the C++ reference -- and the reference has no biomes, so
+   * its colours are the untinted ones. Production always leaves it on.
+   */
+  constructor(
+    readonly seed: number,
+    private readonly biomes = true,
+  ) {
+    this.biomeField = new BiomeField(seed);
     this.noise = new FastNoiseLite();
     this.noise.SetSeed(seed);
     this.noise.SetNoiseType(FastNoiseLite.NoiseType.Perlin);
@@ -52,6 +68,17 @@ export class TerrainGenerator {
   surfaceHeight(worldX: number, worldZ: number): number {
     const n = this.noise.GetNoise(worldX, worldZ);
     return BASE_HEIGHT + Math.trunc(n * AMPLITUDE);
+  }
+
+  /** Biome blend weights at a voxel column, written into `out`. */
+  biomeAt(worldX: number, worldZ: number, out: BiomeWeights): BiomeWeights {
+    if (!this.biomes) {
+      out.plain = 1;
+      out.christmas = 0;
+      out.halloween = 0;
+      return out;
+    }
+    return this.biomeField.sample(worldX, worldZ, out);
   }
 
   private static materialForDepth(depthBelowSurface: number): Material {
@@ -74,12 +101,21 @@ export class TerrainGenerator {
     const originY = chunkY * CHUNK_SIZE;
     const originZ = chunkZ * CHUNK_SIZE;
     const cells = grid.cells;
+    const tint = grid.columnTint;
 
     for (let z = 0; z < CHUNK_SIZE; ++z) {
       const worldZ = originZ + z;
       for (let x = 0; x < CHUNK_SIZE; ++x) {
-        const height = this.surfaceHeight(originX + x, worldZ);
+        const worldX = originX + x;
+        const height = this.surfaceHeight(worldX, worldZ);
         const columnBase = x + CHUNK_SIZE * CHUNK_SIZE * z;
+
+        // Per column, not per voxel: the field is a function of (x,z) only,
+        // and sampling it 32 times down a column would triple generation
+        // cost for an identical answer.
+        if (tint !== undefined) {
+          tint[x + CHUNK_SIZE * z] = this.biomes ? this.biomeField.tintAt(worldX, worldZ) : 0;
+        }
 
         for (let y = 0; y < CHUNK_SIZE; ++y) {
           const worldY = originY + y;

@@ -28,6 +28,15 @@ export interface ChunkResult {
   cz: number;
   /** CHUNK_VOLUME material bytes. */
   cells: Uint8Array;
+  /**
+   * CHUNK_SIZE^2 packed biome tint bytes, one per column.
+   *
+   * Carried back from the worker rather than recomputed on arrival because
+   * the main thread re-meshes a chunk every time it is dug, and a re-mesh
+   * without the tint would flip the chunk back to its untinted colours the
+   * first time the player touched it.
+   */
+  columnTint: Uint8Array;
   /** Exactly `vertexCount * FLOATS_PER_VERTEX` long -- no slack. */
   vertices: Float32Array;
   vertexCount: number;
@@ -71,6 +80,7 @@ export function buildChunk(
     cy,
     cz,
     cells: grid.cells,
+    columnTint: grid.columnTint ?? new Uint8Array(0),
     vertices: mesh.vertices.slice(0, mesh.vertexCount * FLOATS_PER_VERTEX),
     vertexCount: mesh.vertexCount,
   };

@@ -84,6 +84,16 @@ rather than snapping at a border.
 Thematic direction: a world made of holiday-themed regions. Christmas and
 Halloween first; more may follow.
 
+A region is a weight, not a flag: a low-frequency noise field gives each
+column a blend strength, and ground colour, sky, light level and weather all
+read it, so a region fades in over ~20m rather than starting at a line.
+Biomes deliberately place no different *material* -- only colour -- so the
+material list can still be scrapped.
+
+Christmas snows continuously and throws a blizzard every few minutes that
+cuts visibility to a few metres. Halloween is permanent spooky night: dark
+enough to feel like night, light enough to still read the terrain.
+
 ---
 
 # Progression

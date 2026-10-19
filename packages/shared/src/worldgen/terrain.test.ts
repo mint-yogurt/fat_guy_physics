@@ -30,7 +30,7 @@ function voxelDigest(cells: Uint8Array, chunkSize: number): number {
 }
 
 describe("TerrainGenerator", () => {
-  const gen = new TerrainGenerator(golden.seed);
+  const gen = new TerrainGenerator(golden.seed, false);
 
   it("matches the C++ surface height, including at negative coordinates", () => {
     const mismatches: string[] = [];
@@ -55,7 +55,7 @@ describe("TerrainGenerator", () => {
 });
 
 describe("greedy mesher", () => {
-  const gen = new TerrainGenerator(golden.seed);
+  const gen = new TerrainGenerator(golden.seed, false);
 
   it("covers the structurally distinct cases", () => {
     // Guards the fixture itself: an earlier revision picked chunk coords

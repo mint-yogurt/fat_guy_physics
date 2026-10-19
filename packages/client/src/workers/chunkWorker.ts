@@ -43,6 +43,7 @@ export interface ChunkWorkerDone {
   cy: number;
   cz: number;
   cells: Uint8Array;
+  columnTint: Uint8Array;
   vertices: Float32Array;
   vertexCount: number;
 }
@@ -75,6 +76,7 @@ scope.onmessage = (event: MessageEvent<ChunkWorkerRequest>): void => {
   // chunk, ~20MB over a full initial load.
   scope.postMessage(result satisfies ChunkWorkerDone, [
     result.cells.buffer,
+    result.columnTint.buffer,
     result.vertices.buffer,
   ]);
 };

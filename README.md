@@ -65,7 +65,7 @@ Each one is runnable and visually verifiable.
 - [x] **M10** DOM UI — hotbar, controls legend
 - [x] **M11** Player rig + animation + character create
 - [ ] **M12** Post-processing
-- [ ] **M13** World generation + biomes
+- [~] **M13** Biome field, ground colour, sky/light, snow — vegetation pending
 - [ ] **M14** Multiplayer
 
 ### Known gaps
@@ -77,6 +77,10 @@ Each one is runnable and visually verifiable.
   (`assets/textures/faces/`) exist but are unused — character create's face
   option currently changes nothing.
 - The walking collider is an AABB, not a swept capsule.
+- Christmas and Halloween reuse the generic voxel trees; their authored
+  meshes (xmas trees, snowmen, dead trees, pumpkins, buildings) are not in
+  yet. `speciesForBiome` in `worldgen/vegetation.ts` is the one seam to
+  change when they land.
 
 ## Golden-data verification
 

@@ -2,6 +2,7 @@ import { CHUNK_SIZE } from "../sim/constants.ts";
 import { hashFloat } from "../rng/hash.ts";
 import { floorDiv } from "../voxel/voxel.ts";
 import { speciesForPlacement, treeHashAt, TreeSpecies } from "./trees.ts";
+import { Biome, unpackBiome } from "../voxel/biomeTint.ts";
 import type { TerrainGenerator } from "./terrainGenerator.ts";
 
 /**
@@ -19,10 +20,39 @@ import type { TerrainGenerator } from "./terrainGenerator.ts";
 const TREE_CHANCE = 0.055;
 const BUSH_CHANCE = 0.1;
 
+/**
+ * Per-biome vegetation, **stubbed**.
+ *
+ * The Christmas and Halloween regions get authored meshes -- xmas trees,
+ * snowmen, dead trees, pumpkins -- and none of them exist yet. Until they
+ * do, each themed region reuses the generic voxel species so the ground is
+ * not bare, and this function is the one place that changes when the real
+ * assets land: give a biome its own species list and the placement loop
+ * below needs no edit.
+ *
+ * Deliberately not inventing substitute voxel species in the meantime. The
+ * meshes are coming; a procedural stand-in would be thrown away and would
+ * set the wrong expectation about what the regions look like.
+ */
+export function speciesForBiome(biome: Biome, treeHash: number): TreeSpecies {
+  switch (biome) {
+    case Biome.Christmas:
+      // TODO(assets): xmas trees, snowmen. Conifers read closest for now.
+      return TreeSpecies.Conifer;
+    case Biome.Halloween:
+      // TODO(assets): dead trees, pumpkins, cobwebs, haunted buildings.
+      return TreeSpecies.Dead;
+    default:
+      return speciesForPlacement(treeHash);
+  }
+}
+
 export interface TreePlacement {
   /** Stable identity across streaming: the placement hash. */
   readonly id: number;
   readonly species: TreeSpecies;
+  /** Which region placed it, for the per-biome asset swap. */
+  readonly biome: Biome;
   readonly rootVoxelX: number;
   readonly rootVoxelY: number;
   readonly rootVoxelZ: number;
@@ -68,9 +98,11 @@ export function placeVegetation(
   if (roll >= TREE_CHANCE + BUSH_CHANCE) return out;
 
   const id = treeHashAt(worldX, worldZ, seed);
+  const biome = unpackBiome(generator.biomeField.tintAt(worldX, worldZ));
   out.push({
     id,
-    species: roll < TREE_CHANCE ? speciesForPlacement(id) : TreeSpecies.Bush,
+    biome,
+    species: roll < TREE_CHANCE ? speciesForBiome(biome, id) : TreeSpecies.Bush,
     rootVoxelX: worldX,
     rootVoxelY: surface,
     rootVoxelZ: worldZ,

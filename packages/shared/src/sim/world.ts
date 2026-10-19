@@ -7,6 +7,7 @@ import { Mesher, type MeshData } from "../voxel/greedyMesher.ts";
 import { floorDiv, floorMod, isHandDiggable, isSolid, Material } from "../voxel/voxel.ts";
 import { gridAt, gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
 import { createVoxelHit, raycastVoxel } from "../voxel/voxelRaycast.ts";
+import type { BiomeWeights } from "../worldgen/biome.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
 import { generateTree, TreeSpecies } from "../worldgen/trees.ts";
 import { placeVegetation, type TreePlacement } from "../worldgen/vegetation.ts";
@@ -35,7 +36,14 @@ import { placeVegetation, type TreePlacement } from "../worldgen/vegetation.ts";
 export const VERTICAL_CHUNK_MIN = 0;
 export const VERTICAL_CHUNK_MAX = 3;
 
-export const DEFAULT_LOAD_RADIUS_CHUNKS = 6;
+/**
+ * Doubled from the C++'s 6 at M13. Six chunks is 19m, which is close enough
+ * that terrain visibly pops into existence in front of the player; 12 is 38m,
+ * far enough that the atmosphere's distance fade hides the boundary. Costs
+ * ~4x the loaded chunks, which the worker pool absorbs because generation was
+ * never the bottleneck -- main-thread upload is, and that is budgeted.
+ */
+export const DEFAULT_LOAD_RADIUS_CHUNKS = 12;
 
 /** Chunk edge length in metres. */
 export const CHUNK_METERS = CHUNK_SIZE * VOXEL_SIZE;
@@ -298,6 +306,23 @@ export class World {
   }
 
   /**
+   * Biome blend weights at a world position in **metres**, written into
+   * `out`. Named for its unit on purpose: everything else on World that
+   * takes a world position takes voxels.
+   *
+   * Reads the generator rather than the loaded chunks, so it answers for
+   * positions outside the loaded radius too -- which is what the renderer
+   * needs to fade the sky toward a region before the player reaches it.
+   */
+  biomeAtMeters(metersX: number, metersZ: number, out: BiomeWeights): BiomeWeights {
+    return this.generator.biomeAt(
+      Math.floor(metersX / VOXEL_SIZE),
+      Math.floor(metersZ / VOXEL_SIZE),
+      out,
+    );
+  }
+
+  /**
    * Recomputes the desired set around a world-space position, unloading what
    * fell out of range and submitting what came into it. Returns the number
    * of chunks submitted.
@@ -403,6 +428,7 @@ export class World {
         originY: 0,
         originZ: 0,
         cells: result.cells,
+        columnTint: result.columnTint,
       });
       sink.onChunkLoaded(result);
       this.spawnVegetation(result.key, sink);
