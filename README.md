@@ -80,7 +80,7 @@ authoritative server will run), `@fgp/client` (Vite + three.js), and later
 Milestones, in order. Each one is runnable and visually verifiable:
 
 - [x] **M0** Toolchain — monorepo, Vite, pinned three.js, backend readout
-- [ ] **M1** One chunk from the real generator, main thread + golden-data check
+- [x] **M1** One chunk from the real generator, main thread + golden-data check
 - [ ] **M2** Fly camera + synchronous chunk streaming
 - [ ] **M3** Web Worker pool with transferable buffers
 - [ ] **M4** Player controller, collision, the fixed-timestep frame loop
@@ -95,10 +95,29 @@ Milestones, in order. Each one is runnable and visually verifiable:
 - [ ] **M13** World generation + biomes
 - [ ] **M14** Multiplayer
 
-The native C++ build is kept as the **reference implementation**: a
-golden-data dump (hash tuples, chunk meshes, a collision trace) is what the
-ported TypeScript is asserted against, so "it runs" and "it behaves the same"
-stay separate questions.
+### Golden-data verification
+
+The native C++ build is kept as the **reference implementation**. A
+golden-data dump is what the ported TypeScript is asserted against, so "it
+runs" and "it behaves the same" stay separate questions.
+
+```sh
+bash tools/golden/dump-golden.sh   # regenerate tools/golden/golden.json
+npm test                           # assert the TS port against it
+```
+
+The dumper compiles headlessly against the real voxel sources (no GL, no
+GLFW, no Jolt) with any C++17 compiler, and **extracts** `hash32`/`hashFloat`
+straight out of `Vegetation.cpp` rather than copying them — a golden test
+built on a hand-copied function can't catch a transcription error, which is
+the entire thing it exists to catch.
+
+Currently covered: 225 hash tuples, 84 surface-height samples including
+negative coordinates, and 8 chunks' voxel contents plus complete greedy-mesh
+vertex buffers. A collision trace joins them at M4.
+
+Regenerating `golden.json` to make a failing test pass defeats the point —
+if a test fails, the TypeScript is wrong until proven otherwise.
 
 ## Development Roadmap
 

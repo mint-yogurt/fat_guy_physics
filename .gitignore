@@ -21,6 +21,12 @@ dist-types/
 *.tsbuildinfo
 .vite/
 
+# Golden-data tooling build artifacts. golden.json itself IS committed --
+# it is the fixture the TypeScript port is asserted against.
+tools/golden/dump_golden.exe
+tools/golden/dump_golden
+tools/golden/hash_extracted.inc
+
 # OS cruft
 .DS_Store
 Thumbs.db

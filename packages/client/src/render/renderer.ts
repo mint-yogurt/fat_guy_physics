@@ -47,7 +47,11 @@ export async function createRenderer(canvas: HTMLCanvasElement): Promise<Rendere
   // alias, so rendering 9x the pixels on a 3x-DPR display buys nothing and
   // costs most of the frame budget.
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  // Floored at 1x1: a tab that has not been laid out yet (freshly opened, or
+  // opened in the background) reports innerWidth/innerHeight of 0, and
+  // building the swapchain at that size is a hard WebGPU validation error,
+  // not a silent no-op. See isRenderable() for the matching per-frame guard.
+  renderer.setSize(Math.max(1, window.innerWidth), Math.max(1, window.innerHeight), false);
 
   // Must complete before any material compiles or any buffer uploads. This
   // async step is new versus the C++ (where GL context creation is
@@ -67,11 +71,12 @@ export function installResizeHandler(bundle: RendererBundle, onResize: (w: numbe
   const apply = (): void => {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    // A minimized window (or a display change) reports 0x0, and resizing the
-    // drawing buffer to that makes the backend build zero-extent depth/colour
-    // textures -- which on WebGPU is a stream of GPUValidationErrors rather
-    // than a silent no-op. The C++ guards the same case in PostProcess via
-    // its `captured_` flag (src/PostProcess.cpp). Keep the last good size.
+    // A minimized window, a not-yet-laid-out tab, or a display change
+    // reports 0x0. Resizing the drawing buffer to that makes the backend
+    // build zero-extent depth/colour textures, which on WebGPU is a stream
+    // of GPUValidationErrors rather than a silent no-op. Keep the last good
+    // size instead. The C++ guards the same case in PostProcess via its
+    // `captured_` flag (src/PostProcess.cpp).
     if (w === 0 || h === 0) return;
     bundle.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     bundle.renderer.setSize(w, h, false);
@@ -79,4 +84,17 @@ export function installResizeHandler(bundle: RendererBundle, onResize: (w: numbe
   };
   window.addEventListener("resize", apply);
   apply();
+}
+
+/**
+ * Whether it is safe to render this frame.
+ *
+ * The resize handler keeps the drawing buffer at its last good size when the
+ * viewport collapses, but the swapchain texture itself still comes from the
+ * canvas, so presenting into a 0x0 canvas fails regardless. Skipping the
+ * frame entirely is the only thing that actually avoids it -- and a window
+ * with no area has nothing to show anyway.
+ */
+export function isRenderable(): boolean {
+  return window.innerWidth > 0 && window.innerHeight > 0;
 }

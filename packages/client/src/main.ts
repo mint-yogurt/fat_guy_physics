@@ -1,17 +1,44 @@
 import "./ui/ui.css";
 
-import { BoxGeometry, Mesh, MeshStandardNodeMaterial, PerspectiveCamera, Scene } from "three/webgpu";
-import { AmbientLight, Color, DirectionalLight } from "three";
+// Everything comes from "three/webgpu", never from "three". The webgpu entry
+// bundles its own copy of three's core, so mixing the two imports loads the
+// library twice -- three warns about it at runtime, and it doubles the
+// bundle while making `instanceof` checks across the boundary fail.
+// three/webgpu re-exports all of Three.Core, so there is never a reason to
+// reach for the bare "three" specifier in this package.
+import {
+  Color,
+  Mesh,
+  PerspectiveCamera,
+  Scene,
+  TextureLoader,
+  type Texture,
+} from "three/webgpu";
 
-import { MAX_FRAME_TIME, VOXEL_SIZE } from "@fgp/shared/sim/constants";
+import { CHUNK_SIZE, MAX_FRAME_TIME, VOXEL_SIZE } from "@fgp/shared/sim/constants";
+import { Mesher } from "@fgp/shared/voxel/greedyMesher";
+import { createChunkGrid } from "@fgp/shared/voxel/voxelGrid";
+import { TerrainGenerator } from "@fgp/shared/worldgen/terrainGenerator";
 
-import { createRenderer, installResizeHandler } from "./render/renderer.ts";
+import { createChunkGeometry } from "./render/chunkGeometry.ts";
+import { createRenderer, installResizeHandler, isRenderable } from "./render/renderer.ts";
+import { createVoxelMaterial } from "./render/voxelMaterial.ts";
 import { FrameStats, Hud } from "./ui/hud.ts";
+
+/** Matches the seed the golden fixture was generated with. */
+const SEED = 1337;
+
+/** The surface band at this seed. Chunk layer 2 covers voxel Y 64..95. */
+const CHUNK_COORD = { x: 0, y: 2, z: 0 };
 
 function requireElement<T extends Element>(selector: string): T {
   const el = document.querySelector<T>(selector);
   if (el === null) throw new Error(`missing required element: ${selector}`);
   return el;
+}
+
+function loadTexture(url: string): Promise<Texture> {
+  return new TextureLoader().loadAsync(url);
 }
 
 async function start(): Promise<void> {
@@ -21,29 +48,53 @@ async function start(): Promise<void> {
 
   const hud = new Hud(requireElement<HTMLDivElement>("#stats"));
   const stats = new FrameStats();
-
   hud.set("BACKEND", bundle.backend + (bundle.forcedWebGL ? " (forced via ?gl)" : ""));
 
   const scene = new Scene();
   scene.background = new Color(0x87b8dc); // the C++ clear colour (0.53, 0.72, 0.86)
 
   const camera = new PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
-  camera.position.set(2.5, 2, 6);
-  camera.lookAt(0, 0, 0);
 
-  // M0 placeholder: a cube scaled to one chunk edge (3.2m) so the sense of
-  // scale is right from the start and the real terrain lands at the same size.
-  const chunkEdge = VOXEL_SIZE * 32;
-  const cube = new Mesh(
-    new BoxGeometry(chunkEdge, chunkEdge, chunkEdge),
-    new MeshStandardNodeMaterial({ color: 0x8a6a4a, roughness: 0.85 }),
+  // assets/ is served from the repo root via Vite's publicDir, so these paths
+  // mirror the C++'s asset layout rather than being a second copy.
+  const cobble = await loadTexture("/textures/cobble.png");
+  const material = createVoxelMaterial(cobble);
+
+  // M1: one chunk, generated and meshed on the main thread. Streaming is M2,
+  // workers are M3.
+  const generator = new TerrainGenerator(SEED);
+  const grid = createChunkGrid();
+
+  const genStart = performance.now();
+  generator.generate(grid, CHUNK_COORD.x, CHUNK_COORD.y, CHUNK_COORD.z);
+  const genMs = performance.now() - genStart;
+
+  const meshStart = performance.now();
+  const mesh = new Mesher().mesh(grid);
+  const meshMs = performance.now() - meshStart;
+
+  const chunkMesh = new Mesh(createChunkGeometry(mesh), material);
+  const chunkMeters = CHUNK_SIZE * VOXEL_SIZE;
+  chunkMesh.position.set(
+    CHUNK_COORD.x * chunkMeters,
+    CHUNK_COORD.y * chunkMeters,
+    CHUNK_COORD.z * chunkMeters,
   );
-  scene.add(cube);
+  scene.add(chunkMesh);
 
-  scene.add(new AmbientLight(0xffffff, 1.1));
-  const sun = new DirectionalLight(0xffffff, 2.2);
-  sun.position.set(0.4, 1, 0.25);
-  scene.add(sun);
+  hud.set("CHUNK", `${CHUNK_COORD.x},${CHUNK_COORD.y},${CHUNK_COORD.z}`);
+  hud.set("VERTS", String(mesh.vertexCount));
+  hud.set("GEN", `${genMs.toFixed(2)}ms`);
+  hud.set("MESH", `${meshMs.toFixed(2)}ms`);
+
+  // Orbit the chunk's centre. A real camera arrives with the player at M4;
+  // this exists only so every face of the mesh can be inspected.
+  const centre = {
+    x: chunkMesh.position.x + chunkMeters / 2,
+    y: chunkMesh.position.y + chunkMeters / 2,
+    z: chunkMesh.position.z + chunkMeters / 2,
+  };
+  const orbitRadius = chunkMeters * 1.6;
 
   installResizeHandler(bundle, (w, h) => {
     camera.aspect = w / h;
@@ -51,24 +102,27 @@ async function start(): Promise<void> {
   });
 
   let lastTime = performance.now() / 1000;
+  let orbitAngle = 0;
 
-  // setAnimationLoop rather than a hand-rolled requestAnimationFrame: on the
-  // WebGPU backend it is also what drives XR and ensures the renderer is
-  // initialized before the first render.
   void renderer.setAnimationLoop(() => {
     const now = performance.now() / 1000;
     const rawDt = now - lastTime;
     lastTime = now;
 
     stats.sample(rawDt);
-
-    // The clamp that the real frame loop will apply before accumulating
-    // substeps (see MAX_FRAME_TIME). Applied here too so the placeholder
-    // animation can't take a giant jump after an alt-tab.
     const dt = Math.min(rawDt, MAX_FRAME_TIME);
 
-    cube.rotation.x += dt * 0.4;
-    cube.rotation.y += dt * 0.6;
+    // A collapsed viewport has no valid swapchain to present into. Bail
+    // before touching the renderer rather than letting it fail per frame.
+    if (!isRenderable()) return;
+
+    orbitAngle += dt * 0.25;
+    camera.position.set(
+      centre.x + Math.cos(orbitAngle) * orbitRadius,
+      centre.y + chunkMeters * 0.55,
+      centre.z + Math.sin(orbitAngle) * orbitRadius,
+    );
+    camera.lookAt(centre.x, centre.y, centre.z);
 
     hud.set("FPS", stats.fps.toFixed(0));
     hud.set("WORST", `${stats.worstMs.toFixed(1)}ms`);
