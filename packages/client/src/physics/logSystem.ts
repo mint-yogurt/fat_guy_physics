@@ -1,18 +1,14 @@
-import { Mesh, Quaternion, type Material, type Scene } from "three/webgpu";
+import { Quaternion, type BufferGeometry, type Object3D, type Scene } from "three/webgpu";
 
 import { chunkKey, keyX, keyY, keyZ } from "@fgp/shared/sim/chunkKey";
-import { VOXEL_SIZE } from "@fgp/shared/sim/constants";
 import type { OrientedBody, SceneSolidQuery } from "@fgp/shared/sim/sceneQuery";
 import { CHUNK_METERS, type World } from "@fgp/shared/sim/world";
-import { Mesher } from "@fgp/shared/voxel/greedyMesher";
-import type { VoxelGrid } from "@fgp/shared/voxel/voxelGrid";
 
-import { createChunkGeometry, disposeChunkGeometry } from "../render/chunkGeometry.ts";
 import type { BodyHandle, PhysicsWorld } from "./physicsWorld.ts";
 
 /**
  * Felled logs: the piece a chup cuts off a tree, as a falling rigid body
- * with the piece's own voxels drawn on it.
+ * with the sliced piece of the tree's own mesh drawn on it.
  *
  * Terrain collision bodies are created here rather than globally, and only
  * for the chunks immediately around a log. Static mesh bodies are not free
@@ -29,10 +25,13 @@ const LOG_CULL_METERS = 48;
 
 interface Log {
   readonly handle: BodyHandle;
-  readonly mesh: Mesh;
+  readonly object: Object3D;
+  /** Geometry this log owns, sliced for it, and disposes when culled. */
+  readonly owned: readonly BufferGeometry[];
   /**
-   * The piece's voxels, and the pose they are in. Handed to the scene
-   * query once the log settles, which is what makes it walkable.
+   * The cylinder standing in for the piece, and the pose it is in. Handed
+   * to the scene query once the log settles, which is what makes it
+   * walkable.
    */
   readonly body: OrientedBody;
   settled: boolean;
@@ -40,7 +39,6 @@ interface Log {
 
 export class LogSystem {
   private readonly logs: Log[] = [];
-  private readonly mesher = new Mesher();
   private readonly transform = new Float32Array(7);
   private readonly wantedChunks = new Set<number>();
   private readonly rotation = new Quaternion();
@@ -50,7 +48,6 @@ export class LogSystem {
     private readonly world: World,
     private readonly query: SceneSolidQuery,
     private readonly scene: Scene,
-    private readonly material: Material,
   ) {}
 
   get count(): number {
@@ -58,49 +55,37 @@ export class LogSystem {
   }
 
   /**
-   * Takes ownership of a severed piece. `centerX/Y/Z` is where its local
-   * origin sits in the world, which severGridAt already arranged to be the
-   * piece's own centre.
+   * Takes ownership of a cut piece. `object`'s origin is the piece's
+   * centre, which is the point a rigid body's transform describes, and the
+   * cylinder is what collision and walking see of it.
    */
   spawn(
-    piece: VoxelGrid,
-    centerX: number,
-    centerY: number,
-    centerZ: number,
-    radiusMeters: number,
+    object: Object3D,
+    owned: readonly BufferGeometry[],
+    x: number,
+    y: number,
+    z: number,
+    radius: number,
+    halfHeight: number,
   ): void {
     // Terrain bodies first: a log spawned into a world with no collision
     // under it falls through before the next sync can catch it.
-    this.markWanted(centerX, centerY, centerZ);
+    this.markWanted(x, y, z);
     this.syncTerrainBodies();
 
-    const halfHeight = Math.max(0.05, (piece.dimY * VOXEL_SIZE) / 2 - radiusMeters);
-    const handle = this.physics.spawnCapsule(
-      centerX,
-      centerY,
-      centerZ,
-      radiusMeters,
-      halfHeight,
-      true,
-    );
-    if (handle === undefined) return;
-
-    const mesh = this.mesher.mesh(piece);
-    if (mesh.vertexCount === 0) {
-      this.physics.removeBody(handle);
+    const handle = this.physics.spawnCapsule(x, y, z, radius, halfHeight, true);
+    if (handle === undefined) {
+      for (const geometry of owned) geometry.dispose();
       return;
     }
 
-    const object = new Mesh(
-      createChunkGeometry(mesh.vertices.slice(0, mesh.vertices.length), mesh.vertexCount),
-      this.material,
-    );
-    object.position.set(centerX, centerY, centerZ);
+    object.position.set(x, y, z);
     this.scene.add(object);
     this.logs.push({
       handle,
-      mesh: object,
-      body: { grid: piece, x: centerX, y: centerY, z: centerZ, qx: 0, qy: 0, qz: 0, qw: 1 },
+      object,
+      owned,
+      body: { radius, halfHeight, x, y, z, qx: 0, qy: 0, qz: 0, qw: 1 },
       settled: false,
     });
   }
@@ -123,14 +108,12 @@ export class LogSystem {
       const z = this.transform[2] ?? 0;
 
       if (Math.hypot(x - playerX, y - playerY, z - playerZ) > LOG_CULL_METERS) {
-        this.physics.removeBody(log.handle);
-        this.scene.remove(log.mesh);
-        disposeChunkGeometry(log.mesh.geometry);
+        this.remove(log);
         this.logs.splice(i, 1);
         continue;
       }
 
-      log.mesh.position.set(x, y, z);
+      log.object.position.set(x, y, z);
       log.body.x = x;
       log.body.y = y;
       log.body.z = z;
@@ -144,7 +127,7 @@ export class LogSystem {
         this.transform[5] ?? 0,
         this.transform[6] ?? 1,
       );
-      log.mesh.quaternion.copy(this.rotation);
+      log.object.quaternion.copy(this.rotation);
 
       // A sleeping log needs no terrain under it, so its chunk bodies are
       // allowed to go away until something wakes it.
@@ -200,12 +183,14 @@ export class LogSystem {
     }
   }
 
+  private remove(log: Log): void {
+    this.physics.removeBody(log.handle);
+    this.scene.remove(log.object);
+    for (const geometry of log.owned) geometry.dispose();
+  }
+
   clear(): void {
-    for (const log of this.logs) {
-      this.physics.removeBody(log.handle);
-      this.scene.remove(log.mesh);
-      disposeChunkGeometry(log.mesh.geometry);
-    }
+    for (const log of this.logs) this.remove(log);
     this.logs.length = 0;
   }
 }

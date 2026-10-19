@@ -12,12 +12,16 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 import { PlayerMode, WALK_HEIGHT, type Player } from "@fgp/shared/sim/player";
 
+import { faceOutward } from "./meshOrientation.ts";
+
 /**
  * The player character, from assets/meshes/playermodel_v2.glb.
  *
  * Orientation and scale are Object3D transforms over the file's own parts,
- * which are used exactly as exported -- the T-pose layout and the normals
- * are whatever the artist made them.
+ * which are used as exported -- the T-pose layout is whatever the artist
+ * made it -- with one correction: every part of this file is wound inside
+ * out, so each is righted on load (see meshOrientation.ts). Without that the
+ * body and head draw hollow, their near faces culled away.
  *
  * Limbs are the exception, deliberately: rotating a limb's whole mesh
  * tears it off the torso at the joint. Each limb is instead deformed per
@@ -118,6 +122,13 @@ export class PlayerModel {
     const skin = new MeshLambertMaterial({ color: appearance.skin });
     const shirt = new MeshLambertMaterial({ color: appearance.shirt });
 
+    // The torso and head were modelled facing the other way, so the belly
+    // sat where the back belongs. Turning those two nodes about the standing
+    // model's own vertical axis puts them the right way round; the limbs are
+    // front-to-back symmetric and stay as they are.
+    const up = new Vector3(0, 1, 0).applyQuaternion(this.orient.quaternion.clone().invert());
+    const turnAround = new Quaternion().setFromAxisAngle(up, Math.PI);
+
     const box = new Box3();
     const pivot = new Vector3();
     let body: Mesh | undefined;
@@ -126,6 +137,15 @@ export class PlayerModel {
       mesh.material = name === "body" ? shirt : skin;
       mesh.frustumCulled = false;
       mesh.geometry.computeBoundingBox();
+      if (name === "body" || name === "head") {
+        // Turn about the part's own centre, not the node origin, so it stays
+        // exactly where the limbs expect it: the pivot is that centre, and
+        // the translation puts it back after the rotation moves it.
+        const centre = (mesh.geometry.boundingBox ?? new Box3()).getCenter(new Vector3());
+        centre.applyQuaternion(mesh.quaternion);
+        mesh.quaternion.premultiply(turnAround);
+        mesh.position.copy(centre).sub(centre.clone().applyQuaternion(turnAround));
+      }
       this.orient.add(mesh);
 
       const isArm = name.startsWith("arm");
@@ -187,7 +207,10 @@ export class PlayerModel {
     const gltf = await new GLTFLoader().loadAsync(MODEL_URL);
     const parts = new Map<string, Mesh>();
     gltf.scene.traverse((object) => {
-      if (object instanceof Mesh) parts.set(object.name, object);
+      if (!(object instanceof Mesh)) return;
+      // Before the constructor, which copies the limb data it deforms from.
+      faceOutward(object.geometry);
+      parts.set(object.name, object);
     });
     return new PlayerModel(scene, parts, appearance);
   }

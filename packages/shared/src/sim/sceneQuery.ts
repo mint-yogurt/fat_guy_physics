@@ -1,10 +1,8 @@
 import { VOXEL_SIZE } from "./constants.ts";
 import type { SolidQuery } from "./collision.ts";
-import { Material } from "../voxel/voxel.ts";
-import { gridAt, type VoxelGrid } from "../voxel/voxelGrid.ts";
 
 /**
- * Terrain plus arbitrarily-oriented voxel bodies, as one {@link SolidQuery}.
+ * Terrain plus arbitrarily-oriented cylinders, as one {@link SolidQuery}.
  *
  * This is the real fix for walking on felled logs, replacing the native
  * build's "snap-on-sleep" stopgap -- there, a settled log's rotation was
@@ -15,9 +13,9 @@ import { gridAt, type VoxelGrid } from "../voxel/voxelGrid.ts";
  *
  * It is cheap here only because this collision code samples *points*
  * rather than intersecting shapes: a point transforms into a body's local
- * frame with one quaternion rotation, and the body's voxel grid answers
- * directly. There is no snapping, no second collision representation, and
- * nothing a body has to be rounded to.
+ * frame with one quaternion rotation, and a cylinder answers in two
+ * comparisons. There is no snapping, no second collision representation,
+ * and nothing a body has to be rounded to.
  *
  * Bodies are expected to be few (settled logs within a few metres). The
  * sweep calls isSolid a few hundred times per substep, so the list is
@@ -26,8 +24,10 @@ import { gridAt, type VoxelGrid } from "../voxel/voxelGrid.ts";
  */
 
 export interface OrientedBody {
-  readonly grid: VoxelGrid;
-  /** World position of the grid's local (0,0,0). */
+  /** Radius of the cylinder, and half its length along its own Y. */
+  readonly radius: number;
+  readonly halfHeight: number;
+  /** World position of the cylinder's centre. */
   x: number;
   y: number;
   z: number;
@@ -75,14 +75,7 @@ export class SceneSolidQuery implements SolidQuery {
       const ly = dy + qw * ty + (qz * tx - qx * tz);
       const lz = dz + qw * tz + (qx * ty - qy * tx);
 
-      if (
-        gridAt(
-          body.grid,
-          Math.floor(lx / VOXEL_SIZE),
-          Math.floor(ly / VOXEL_SIZE),
-          Math.floor(lz / VOXEL_SIZE),
-        ) !== Material.Air
-      ) {
+      if (Math.abs(ly) <= body.halfHeight && lx * lx + lz * lz <= body.radius * body.radius) {
         return true;
       }
     }

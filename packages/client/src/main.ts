@@ -29,6 +29,7 @@ import {
   createSceneHit,
   DEFAULT_LOAD_RADIUS_CHUNKS,
   HitKind,
+  TREE_PART_TRUNK,
   World,
 } from "@fgp/shared/sim/world";
 
@@ -41,6 +42,8 @@ import { PickupRenderer } from "./render/pickupRenderer.ts";
 import { PlayerModel } from "./render/playerModel.ts";
 import { createRenderer, installResizeHandler, isRenderable } from "./render/renderer.ts";
 import { Snow } from "./render/snow.ts";
+import { loadTreeAssets } from "./render/treeAssets.ts";
+import { TreeRenderer } from "./render/treeRenderer.ts";
 import { createVoxelMaterial } from "./render/voxelMaterial.ts";
 import { WorldRenderer } from "./render/worldRenderer.ts";
 import { askAppearance } from "./ui/characterCreate.ts";
@@ -68,18 +71,19 @@ const DIG_RADIUS_METERS = 0.35;
 const DIG_REANCHOR_POSITION = 0.05;
 const DIG_REANCHOR_DIRECTION = 0.995;
 
-/**
- * Chup (chop) tuning, also from src/main.cpp. A thin shear rather than a
- * gouge: wide enough in X/Z to cover the thickest trunk, ~1 voxel thick in
- * Y, so clearing a trunk's whole cross-section takes several swings.
- */
 /** Chance a clearing tick drops something. Rolled once per tick, as in the C++. */
 const LEAF_DROP_CHANCE = 0.35;
 const STICK_DROP_CHANCE = 0.4;
 
 const CHUP_TICK_SECONDS = 0.25;
-const CHUP_HORIZONTAL_RADIUS = 0.22;
-const CHUP_VERTICAL_HALF_THICKNESS = 0.06;
+
+/**
+ * Leaves a harvested canopy bursts into, and how far they scatter. A
+ * cluster is the whole of a tree's foliage at that height, so it is worth
+ * a handful of leaves rather than the one a voxel scoop dropped.
+ */
+const LEAF_PUFF_COUNT = 5;
+const LEAF_PUFF_SPREAD = 0.4;
 
 /** Matches the C++ FOV adjust step on the -/= keys. */
 const FOV_STEP = 2;
@@ -150,11 +154,15 @@ async function start(): Promise<void> {
   const voxelMaterial = createVoxelMaterial(cobble);
   const material = voxelMaterial.material;
   const bushTexture = await loadTexture("/billboard/bush.png");
+  const leafIcon = await loadTexture("/icons/leaf.png");
+  const stickIcon = await loadTexture("/icons/stick.png");
+  const treeAssets = await loadTreeAssets();
 
   const radius = loadRadiusFromUrl();
   const source = new WorkerChunkSource(SEED);
   const world = new World(SEED, source, radius);
-  const worldRenderer = new WorldRenderer(scene, material, bushTexture);
+  const treeRenderer = new TreeRenderer(scene, treeAssets, cobble);
+  const worldRenderer = new WorldRenderer(scene, material, treeRenderer, bushTexture);
   hud.set("WORKERS", String(source.workerCount));
 
   const atmosphere = new Atmosphere(scene, voxelMaterial, hemisphere, sun, radius);
@@ -181,9 +189,17 @@ async function start(): Promise<void> {
   void PhysicsWorld.create()
     .then((created) => {
       physics = created;
-      logs = new LogSystem(created, world, sceneQuery, scene, material);
-      worldRenderer.onSevered = (piece, x, y, z, r) => {
-        logs?.spawn(piece, x, y, z, r);
+      logs = new LogSystem(created, world, sceneQuery, scene);
+      treeRenderer.onFelled = (piece) => {
+        logs?.spawn(
+          piece.object,
+          piece.owned,
+          piece.x,
+          piece.y,
+          piece.z,
+          piece.radius,
+          piece.halfHeight,
+        );
       };
       hud.set("PHYSICS", "jolt");
     })
@@ -194,7 +210,10 @@ async function start(): Promise<void> {
   const inventory = new Inventory();
   const hotbar = new Hotbar(requireElement<HTMLDivElement>("#hotbar"));
   const pickups = new PickupField();
-  const pickupRenderer = new PickupRenderer(scene);
+  const pickupRenderer = new PickupRenderer(scene, {
+    [ItemType.Leaf]: leafIcon,
+    [ItemType.Stick]: stickIcon,
+  });
 
   /** Drops an item at a clearing point, to fall onto the terrain below. */
   const dropItem = (type: ItemType, x: number, y: number, z: number): void => {
@@ -263,6 +282,7 @@ async function start(): Promise<void> {
   let anchorCenterZ = 0;
   /** -1 when the anchored dig is on terrain. */
   let anchorTreeId = -1;
+  let anchorTreePart = TREE_PART_TRUNK;
 
   if (import.meta.env.DEV) {
     // Dev-only handle for driving the game from the console: aiming at a
@@ -274,6 +294,7 @@ async function start(): Promise<void> {
       sceneQuery,
       playerCamera,
       playerModel,
+      treeRenderer,
       pickups,
       inventory,
       scene,
@@ -414,6 +435,7 @@ async function start(): Promise<void> {
             anchorCenterY = hit.centerY;
             anchorCenterZ = hit.centerZ;
             anchorTreeId = hit.kind === HitKind.Tree ? hit.treeId : -1;
+            anchorTreePart = hit.treePart;
           } else {
             digAnchored = false;
           }
@@ -421,16 +443,20 @@ async function start(): Promise<void> {
 
         if (digAnchored) {
           if (anchorTreeId >= 0) {
-            const cleared = world.digTree(
-              anchorTreeId,
-              anchorCenterX,
-              anchorCenterY,
-              anchorCenterZ,
-              DIG_RADIUS_METERS,
-              worldRenderer,
-            );
-            if (cleared && Math.random() < LEAF_DROP_CHANCE) {
-              dropItem(ItemType.Leaf, anchorCenterX, anchorCenterY, anchorCenterZ);
+            // Foliage only: a trunk is chup-only, as it was when leaves
+            // were scoopable voxels and wood was not.
+            const puffed =
+              anchorTreePart !== TREE_PART_TRUNK &&
+              world.stripFoliage(anchorTreeId, anchorTreePart, worldRenderer);
+            if (puffed) {
+              for (let leaf = 0; leaf < LEAF_PUFF_COUNT; leaf++) {
+                dropItem(
+                  ItemType.Leaf,
+                  anchorCenterX + (Math.random() - 0.5) * LEAF_PUFF_SPREAD,
+                  anchorCenterY + (Math.random() - 0.5) * LEAF_PUFF_SPREAD,
+                  anchorCenterZ + (Math.random() - 0.5) * LEAF_PUFF_SPREAD,
+                );
+              }
             }
           } else {
             world.digSphere(
@@ -464,24 +490,15 @@ async function start(): Promise<void> {
       chupCooldown -= rawDt;
       if (chupCooldown <= 0) {
         if (hit.kind === HitKind.Tree) {
-          // Aim at the trunk axis at the height you are looking at, not at
-          // the exact voxel under the crosshair. A tree is mostly canopy,
-          // so hitting the actual trunk by eye means finding a 20cm pole
-          // inside a bush -- and every miss just shaves leaves, which
-          // reads as "chopping does not work".
+          // The swing lands on the trunk at the height you are looking at,
+          // whether the crosshair found trunk or canopy. A tree is mostly
+          // canopy, so demanding a hit on the pole inside it reads as
+          // "chopping does not work".
           const tree = world.getTree(hit.treeId);
-          const chopX = tree === undefined ? hit.centerX : (tree.rootVoxelX + 0.5) * VOXEL_SIZE;
-          const chopZ = tree === undefined ? hit.centerZ : (tree.rootVoxelZ + 0.5) * VOXEL_SIZE;
-          const cleared = world.chopTree(
-            hit.treeId,
-            chopX,
-            hit.centerY,
-            chopZ,
-            CHUP_HORIZONTAL_RADIUS,
-            CHUP_VERTICAL_HALF_THICKNESS,
-            worldRenderer,
-          );
-          if (cleared) {
+          const chopX = tree?.x ?? hit.centerX;
+          const chopZ = tree?.z ?? hit.centerZ;
+          const chop = world.chopTree(hit.treeId, hit.centerY, worldRenderer);
+          if (chop.landed) {
             const roll = Math.random();
             if (roll < STICK_DROP_CHANCE) {
               dropItem(ItemType.Stick, chopX, hit.centerY, chopZ);
@@ -531,7 +548,13 @@ async function start(): Promise<void> {
     hud.set(
       "AIM",
       aimed
-        ? `${hit.distance.toFixed(2)}m ${hit.kind === HitKind.Tree ? "tree" : "terrain"}`
+        ? `${hit.distance.toFixed(2)}m ${
+            hit.kind === HitKind.Tree
+              ? hit.treePart === TREE_PART_TRUNK
+                ? "trunk"
+                : `foliage ${String(hit.treePart)}`
+              : "terrain"
+          }`
         : "--",
     );
     hud.set("FPS", stats.fps.toFixed(0));
@@ -556,6 +579,7 @@ async function start(): Promise<void> {
     playerModel.dispose();
     pickupRenderer.clear();
     logs?.clear();
+    treeRenderer.clear();
     physics?.dispose();
     worldRenderer.clear();
     world.dispose();

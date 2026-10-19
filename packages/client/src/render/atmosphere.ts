@@ -1,4 +1,10 @@
-import { Color, type DirectionalLight, type HemisphereLight, type Scene } from "three/webgpu";
+import {
+  Color,
+  Fog,
+  type DirectionalLight,
+  type HemisphereLight,
+  type Scene,
+} from "three/webgpu";
 
 import { CHUNK_METERS } from "@fgp/shared/sim/world";
 import { createBiomeWeights, type BiomeWeights } from "@fgp/shared/worldgen/biome";
@@ -109,6 +115,7 @@ export class Atmosphere {
   private readonly blizzardSky = new Color(BLIZZARD_SKY);
   private readonly sky = new Color(PLAIN.sky);
   private readonly loadRadiusMeters: number;
+  private readonly fog: Fog;
 
   /** Last computed values, for the HUD and for the snow system. */
   snowIntensity = 0;
@@ -125,6 +132,13 @@ export class Atmosphere {
   ) {
     this.loadRadiusMeters = loadRadiusChunks * CHUNK_METERS;
     scene.background = this.sky;
+    // Scene fog is for the lit meshes -- trees, logs, the player -- which
+    // have no hand-rolled fade of their own, and without it a tree stays
+    // sharp against terrain that has already faded into the sky. The voxel
+    // material opts out so its own fade is not applied twice.
+    this.fog = new Fog(this.sky, 0, this.loadRadiusMeters);
+    scene.fog = this.fog;
+    voxel.material.fog = false;
   }
 
   /**
@@ -172,6 +186,9 @@ export class Atmosphere {
     // standing on, which in a snow region means a whiteout in calm weather.
     this.voxel.fogNear.value = fogFar * 0.5;
     this.voxel.fogFar.value = fogFar;
+    this.fog.color.copy(this.sky);
+    this.fog.near = fogFar * 0.5;
+    this.fog.far = fogFar;
 
     this.hemisphere.intensity = this.hemisphereBase * lights;
     this.sun.intensity = this.sunBase * lights;

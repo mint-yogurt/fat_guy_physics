@@ -1,4 +1,4 @@
-import { Sprite, SpriteMaterial, Color, type Scene } from "three/webgpu";
+import { Sprite, SpriteMaterial, Color, type Scene, type Texture } from "three/webgpu";
 
 import { ItemType } from "@fgp/shared/items/inventory";
 import type { PickupField } from "@fgp/shared/items/pickupField";
@@ -6,10 +6,9 @@ import type { PickupField } from "@fgp/shared/items/pickupField";
 /**
  * Dropped items, as camera-facing billboards.
  *
- * The native build draws textured quads with a per-item icon; there are no
- * item icons in the asset tree yet, so these are flat colours at the same
- * sizes. Swapping in textures later is a SpriteMaterial map and nothing
- * else.
+ * Each item draws its hotbar icon where one exists -- the leaf puff a
+ * harvested canopy bursts into is a crowd of the same leaf the hotbar
+ * shows -- and falls back to a flat colour where it does not.
  */
 
 const SIZES: Record<ItemType, number> = {
@@ -29,12 +28,22 @@ export class PickupRenderer {
   /** One material per item type, shared by every sprite of that type. */
   private readonly materials = new Map<ItemType, SpriteMaterial>();
 
-  constructor(private readonly scene: Scene) {}
+  constructor(
+    private readonly scene: Scene,
+    private readonly icons: Partial<Record<ItemType, Texture>> = {},
+  ) {}
 
   private materialFor(type: ItemType): SpriteMaterial {
     let material = this.materials.get(type);
     if (material === undefined) {
-      material = new SpriteMaterial({ color: new Color(COLORS[type]) });
+      const map = this.icons[type];
+      material =
+        map === undefined
+          ? new SpriteMaterial({ color: new Color(COLORS[type]) })
+          : // Cut out rather than blended, as the bushes are: an icon is
+            // mostly transparent, and sorting a few hundred of them against
+            // each other is not worth it for litter on the ground.
+            new SpriteMaterial({ map, alphaTest: 0.5, transparent: false });
       this.materials.set(type, material);
     }
     return material;

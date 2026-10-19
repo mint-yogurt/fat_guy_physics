@@ -10,15 +10,15 @@ import {
 import type { ChunkKey } from "@fgp/shared/sim/chunkKey";
 import type { ChunkResult } from "@fgp/shared/sim/chunkSource";
 import { CHUNK_METERS, type ChunkSink, type Tree } from "@fgp/shared/sim/world";
-import type { VoxelGrid } from "@fgp/shared/voxel/voxelGrid";
-import { VOXEL_SIZE } from "@fgp/shared/sim/constants";
 import { FLOATS_PER_VERTEX } from "@fgp/shared/voxel/vertexLayout";
 
 import { applyMeshData, createChunkGeometry, disposeChunkGeometry } from "./chunkGeometry.ts";
+import type { TreeRenderer } from "./treeRenderer.ts";
 
 /**
  * The client's half of streaming: turns World's chunk lifecycle events into
- * scene objects. Replaces the GL-owning parts of src/voxel/World.cpp
+ * scene objects. Trees are forwarded to the TreeRenderer, which owns the
+ * authored meshes; what is left here is chunk geometry and bush sprites. Replaces the GL-owning parts of src/voxel/World.cpp
  * (ChunkMesh construction, World::draw).
  *
  * There is no per-frame work here at all. three.js walks the scene graph and
@@ -29,22 +29,14 @@ import { applyMeshData, createChunkGeometry, disposeChunkGeometry } from "./chun
  */
 export class WorldRenderer implements ChunkSink {
   private readonly meshes = new Map<ChunkKey, Mesh>();
-  private readonly treeMeshes = new Map<number, Mesh>();
   private readonly bushes = new Map<number, Sprite>();
   private bushMaterial: SpriteMaterial | undefined;
-
-  /**
-   * Where severed tree pieces go. Set by main once the physics layer has
-   * finished loading its WASM; until then a chop that cuts through simply
-   * removes the piece, which is the M6 behaviour.
-   */
-  onSevered:
-    | ((piece: VoxelGrid, x: number, y: number, z: number, radiusMeters: number) => void)
-    | undefined;
 
   constructor(
     private readonly scene: Scene,
     private readonly material: Material,
+    /** Trees are meshes rather than chunk geometry, and own their own half. */
+    private readonly trees: TreeRenderer,
     private readonly bushTexture?: Texture,
   ) {}
 
@@ -120,50 +112,21 @@ export class WorldRenderer implements ChunkSink {
     );
   }
 
-  /**
-   * Create-or-replace for one tree's geometry. `vertices` is the shared
-   * tree mesher's scratch, so it is copied.
-   *
-   * Trees are separate scene objects rather than part of a chunk's mesh
-   * because a tree's canopy routinely overhangs the chunk that owns it, and
-   * because a chop remeshes one tree rather than 3-4 chunks.
-   */
-  onTreeMeshed(tree: Tree, vertices: Float32Array, vertexCount: number): void {
-    const existing = this.treeMeshes.get(tree.id);
-
-    if (vertexCount === 0) {
-      if (existing !== undefined) this.onTreeUnloaded(tree.id);
-      return;
-    }
-
-    const owned = vertices.slice(0, vertexCount * FLOATS_PER_VERTEX);
-    if (existing !== undefined) {
-      applyMeshData(existing.geometry, owned, vertexCount);
-      return;
-    }
-
-    const object = new Mesh(createChunkGeometry(owned, vertexCount), this.material);
-    // Mesh positions come out relative to the grid's local origin, which
-    // for a tree is the trunk's base.
-    object.position.set(
-      tree.rootVoxelX * VOXEL_SIZE,
-      tree.rootVoxelY * VOXEL_SIZE,
-      tree.rootVoxelZ * VOXEL_SIZE,
-    );
-    object.matrixAutoUpdate = false;
-    object.updateMatrix();
-    this.scene.add(object);
-    this.treeMeshes.set(tree.id, object);
+  onTreePlaced(tree: Tree): void {
+    this.trees.onTreePlaced(tree);
   }
 
-  onTreeSevered(
-    piece: VoxelGrid,
-    centerX: number,
-    centerY: number,
-    centerZ: number,
-    radiusMeters: number,
+  onTreeFoliageRemoved(tree: Tree, cluster: number): void {
+    this.trees.onTreeFoliageRemoved(tree, cluster);
+  }
+
+  onTreeCut(
+    tree: Tree,
+    cutHeightMeters: number,
+    pieceLengthMeters: number,
+    carriedFoliage: number,
   ): void {
-    this.onSevered?.(piece, centerX, centerY, centerZ, radiusMeters);
+    this.trees.onTreeCut(tree, cutHeightMeters, pieceLengthMeters, carriedFoliage);
   }
 
   /** Scattered plants: one camera-facing sprite each, no geometry. */
@@ -190,12 +153,7 @@ export class WorldRenderer implements ChunkSink {
       this.scene.remove(bush);
       return;
     }
-
-    const object = this.treeMeshes.get(treeId);
-    if (object === undefined) return;
-    this.treeMeshes.delete(treeId);
-    this.scene.remove(object);
-    disposeChunkGeometry(object.geometry);
+    this.trees.onTreeUnloaded(treeId);
   }
 
   onChunkUnloaded(key: ChunkKey): void {
@@ -216,11 +174,7 @@ export class WorldRenderer implements ChunkSink {
       disposeChunkGeometry(object.geometry);
     }
     this.meshes.clear();
-    for (const object of this.treeMeshes.values()) {
-      this.scene.remove(object);
-      disposeChunkGeometry(object.geometry);
-    }
-    this.treeMeshes.clear();
+    this.trees.clear();
     for (const sprite of this.bushes.values()) this.scene.remove(sprite);
     this.bushes.clear();
     this.bushMaterial?.dispose();

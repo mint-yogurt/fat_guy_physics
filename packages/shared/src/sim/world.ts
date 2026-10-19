@@ -2,14 +2,13 @@ import { chunkKey, keyX, keyY, keyZ, type ChunkKey } from "./chunkKey.ts";
 import type { ChunkResult, ChunkSource } from "./chunkSource.ts";
 import { CHUNK_SIZE, VOXEL_SIZE } from "./constants.ts";
 import { nowMs } from "./time.ts";
-import { chopGridDisc, digGridSphere, severGridAt } from "../voxel/gridEdit.ts";
 import { Mesher, type MeshData } from "../voxel/greedyMesher.ts";
 import { floorDiv, floorMod, isHandDiggable, isSolid, Material } from "../voxel/voxel.ts";
-import { gridAt, gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
+import { gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
 import { createVoxelHit, raycastVoxel } from "../voxel/voxelRaycast.ts";
 import type { BiomeWeights } from "../worldgen/biome.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
-import { generateTree, TreeSpecies } from "../worldgen/trees.ts";
+import { metricsFor, treeShape, TreeSpecies } from "../worldgen/trees.ts";
 import { placeVegetation, type TreePlacement } from "../worldgen/vegetation.ts";
 
 /**
@@ -96,58 +95,81 @@ export interface ChunkSink {
     vertexCount: number,
   ): void;
   /**
-   * A tree appeared or changed shape. Same scratch-buffer caveat as
-   * onChunkRemeshed: trees are meshed on the calling thread.
-   *
-   * One callback covers both cases because the only sensible sink
-   * implementation is create-or-replace either way.
+   * A tree came into range. The sink builds its scene objects from the
+   * tree's species and dimensions; no geometry is passed, because a tree is
+   * an authored mesh and every tree of a species shares it.
    */
-  onTreeMeshed(tree: Tree, vertices: Float32Array, vertexCount: number): void;
+  onTreePlaced(tree: Tree): void;
   onTreeUnloaded(treeId: number): void;
+  /** One foliage cluster was knocked off. The tree keeps standing. */
+  onTreeFoliageRemoved(tree: Tree, cluster: number): void;
   /**
    * A scattered plant. These are billboards, not voxel objects: they are
    * decorative, there are a lot of them, and nothing interacts with them.
    */
   onBushPlaced(id: number, x: number, y: number, z: number, sizeMeters: number): void;
   /**
-   * A chop cut all the way through: `piece` is the part that came off, and
-   * World has already removed it from the tree.
+   * A chop cut through the trunk. The tree has already been shortened to
+   * `cutHeightMeters` above its base, and the piece above that -- a length
+   * of trunk plus whichever foliage clusters `carriedFoliage` has bits for
+   * -- is the sink's to drop as a rigid body.
    *
-   * The sink owns the grid outright. Its local (0,0,0) is the piece's own
-   * centre, given here in world metres, so the sink can hand it straight to
-   * a rigid body without an offset of its own.
+   * The sink does the geometry: it owns the authored mesh, so it is the
+   * only side that can slice the trunk at the cut.
    */
-  onTreeSevered(
-    piece: VoxelGrid,
-    centerX: number,
-    centerY: number,
-    centerZ: number,
-    radiusMeters: number,
+  onTreeCut(
+    tree: Tree,
+    cutHeightMeters: number,
+    pieceLengthMeters: number,
+    carriedFoliage: number,
   ): void;
 }
 
 /**
- * A standing tree (and from M7, a felled log): its own voxel grid, rooted
- * at an integer world voxel.
+ * A standing tree: an authored mesh placed in the world, plus the simple
+ * shapes that stand in for it when something has to be aimed at or cut.
  *
- * Trees are not folded into the terrain chunk grid because a tree is an
- * object with identity -- it gets chopped, it remembers having been
- * chopped, and at M7 its top half becomes a rigid body. A chunk edit has
- * none of those.
+ * Trees are objects with identity rather than terrain voxels, because a
+ * tree gets chopped, remembers having been chopped, and hands its top half
+ * to the rigid-body layer. A chunk edit has none of those.
+ *
+ * Everything here is world metres rather than voxels: the mesh is
+ * continuous, so there is nothing left that wants the voxel lattice.
  */
 export interface Tree {
   /** Placement hash. Stable across streaming, so edits can persist. */
   readonly id: number;
   readonly species: TreeSpecies;
-  /** Grid-local (0,0,0) sits at this world voxel: the trunk's base. */
-  readonly rootVoxelX: number;
-  readonly rootVoxelY: number;
-  readonly rootVoxelZ: number;
-  readonly grid: VoxelGrid;
-  trunkHeightVoxels: number;
-  readonly trunkRadiusVoxels: number;
+  /** Centre of the trunk's base. */
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  /** Authored units to metres, and the yaw the mesh is planted at. */
+  readonly scale: number;
+  readonly yaw: number;
+  readonly heightMeters: number;
+  readonly trunkRadiusMeters: number;
+  /** Top of the standing trunk, metres above the base. A chop lowers it. */
+  trunkTopMeters: number;
+  /** Which foliage clusters are still attached, one bit each. */
+  foliageMask: number;
   severed: boolean;
+  /**
+   * Chop progress: the cut height being worked on, and how many swings have
+   * landed on it. A trunk takes several swings, and moving the cut more
+   * than CHOP_REANCHOR_METERS starts a fresh one -- otherwise nibbling at
+   * three heights would fell a tree as fast as three clean swings at one.
+   */
+  chopHeightMeters: number;
+  chopHits: number;
 }
+
+/** Swings to cut through a trunk, and how far a cut may wander. */
+const CHOPS_TO_FELL = 3;
+const CHOP_REANCHOR_METERS = 0.4;
+/** The shortest stump left standing, and the shortest piece worth dropping. */
+const MIN_STUMP_METERS = 0.3;
+const MIN_PIECE_METERS = 0.4;
 
 export const HitKind = {
   None: 0,
@@ -166,10 +188,28 @@ export type HitKind = (typeof HitKind)[keyof typeof HitKind];
  * A kind tag plus the world-space centre of the hit voxel is all any
  * caller has ever actually wanted.
  */
+export const TREE_PART_TRUNK = -1;
+
+/** What one chup swing did. */
+export interface ChopResult {
+  /** The swing hit the trunk at all. Drives the item drops. */
+  readonly landed: boolean;
+  /** This swing cut through, so a piece is on its way down. */
+  readonly felled: boolean;
+}
+
+const NO_CHOP: ChopResult = { landed: false, felled: false };
+
 export interface SceneHit {
   kind: HitKind;
   /** Valid when kind is Tree. */
   treeId: number;
+  /**
+   * Which part of that tree: TREE_PART_TRUNK, or a foliage cluster index.
+   * The trunk is chopped and the clusters are harvested, so the two are
+   * never interchangeable at a call site.
+   */
+  treePart: number;
   voxelX: number;
   voxelY: number;
   voxelZ: number;
@@ -184,6 +224,7 @@ export function createSceneHit(): SceneHit {
   return {
     kind: HitKind.None,
     treeId: 0,
+    treePart: TREE_PART_TRUNK,
     voxelX: 0,
     voxelY: 0,
     voxelZ: 0,
@@ -253,19 +294,23 @@ export class World {
   /** Which chunk spawned which trees, so unloading a chunk unloads them. */
   private readonly treesByChunk = new Map<ChunkKey, number[]>();
   /**
-   * Trees chup-severed while loaded, and the local Y they were cut at. This
-   * is the whole of tree edit persistence: a severed tree streaming back in
-   * regenerates as a stump rather than growing its top back.
+   * Tree edit persistence, and the whole of it: where a tree was cut
+   * (metres above its base) and which of its foliage clusters have been
+   * knocked off. A chopped tree streaming back in comes back as the stump
+   * it was left as rather than growing its top back.
    *
-   * Never pruned. One number per tree the player has actually chopped is
+   * Never pruned. Two numbers per tree the player has actually touched is
    * not a leak worth code.
    */
   private readonly severedTrees = new Map<number, number>();
-  private readonly treeMesher = new Mesher();
+  private readonly strippedFoliage = new Map<number, number>();
   private readonly placementScratch: TreePlacement[] = [];
 
   /** Trees the in-flight raycast might hit. Refilled per raycast. */
   private readonly rayTrees: Tree[] = [];
+  /** What the in-flight raycast last found solid. Filled by treeSolidAt. */
+  private rayHitTree: Tree | undefined;
+  private rayHitPart = TREE_PART_TRUNK;
   private readonly rayHit = createVoxelHit();
   /**
    * Allocated once in the constructor rather than per raycast: this closes
@@ -273,7 +318,7 @@ export class World {
    */
   private readonly sceneQuery = {
     isSolid: (vx: number, vy: number, vz: number): boolean =>
-      isSolid(this.materialAt(vx, vy, vz)) || this.treeIdAt(vx, vy, vz) !== undefined,
+      isSolid(this.materialAt(vx, vy, vz)) || this.treeSolidAt(vx, vy, vz),
   };
 
   private hasCenter = false;
@@ -607,52 +652,111 @@ export class World {
       // alive must not be duplicated.
       if (this.trees.has(placement.id)) continue;
 
-      const severedAt = this.severedTrees.get(placement.id);
-      const shape = generateTree(placement.id, placement.species, severedAt);
+      const shape = treeShape(placement.id, placement.species);
+      // A species with no metrics is not placeable. Nothing generates one
+      // today, but a half-added species should leave a gap in the forest
+      // rather than throw inside streaming.
+      if (shape === undefined) continue;
+
+      const cutAt = this.severedTrees.get(placement.id);
+      const clusters = metricsFor(placement.species)?.foliage.length ?? 0;
+      const intactMask = (1 << clusters) - 1;
       const tree: Tree = {
         id: placement.id,
         species: placement.species,
-        rootVoxelX: placement.rootVoxelX,
-        rootVoxelY: placement.rootVoxelY,
-        rootVoxelZ: placement.rootVoxelZ,
-        grid: shape.grid,
-        trunkHeightVoxels: shape.trunkHeightVoxels,
-        trunkRadiusVoxels: shape.trunkRadiusVoxels,
-        severed: severedAt !== undefined,
+        // Roots sit on the voxel lattice, so the base is the centre of the
+        // surface voxel's top face.
+        x: (placement.rootVoxelX + 0.5) * VOXEL_SIZE,
+        y: placement.rootVoxelY * VOXEL_SIZE,
+        z: (placement.rootVoxelZ + 0.5) * VOXEL_SIZE,
+        scale: shape.scale,
+        yaw: shape.yaw,
+        heightMeters: shape.heightMeters,
+        trunkRadiusMeters: shape.trunkRadiusMeters,
+        trunkTopMeters: cutAt ?? shape.trunkTopMeters,
+        foliageMask: intactMask & ~(this.strippedFoliage.get(placement.id) ?? 0),
+        severed: cutAt !== undefined,
+        chopHeightMeters: 0,
+        chopHits: 0,
       };
 
       this.trees.set(tree.id, tree);
       owned.push(tree.id);
 
-      this.meshTree(tree, sink);
+      sink.onTreePlaced(tree);
     }
   }
 
-  private meshTree(tree: Tree, sink: ChunkSink): void {
-    const mesh = this.treeMesher.mesh(tree.grid);
-    sink.onTreeMeshed(tree, mesh.vertices, mesh.vertexCount);
+  /**
+   * Cleared before each cast. A method rather than an assignment at the
+   * call site so the compiler does not narrow the field to undefined for
+   * the rest of the cast -- it cannot see that the DDA calls back into
+   * treeSolidAt in between.
+   */
+  private clearRayHit(): void {
+    this.rayHitTree = undefined;
   }
 
-  /** The id of the tree occupying a world voxel, searching the ray set. */
-  private treeIdAt(vx: number, vy: number, vz: number): number | undefined {
+  /**
+   * Whether a tree in the ray set covers a world voxel, and which part of
+   * which tree it was. A trunk is a cylinder and a foliage cluster is an
+   * on-axis ellipsoid -- crude, but a tree is a thin pole inside a blob,
+   * and those are exactly the two shapes that describes.
+   *
+   * The yaw does not enter into it: both shapes are rotationally symmetric
+   * about the trunk, so the planted rotation changes the mesh and nothing
+   * that is tested here.
+   */
+  private treeSolidAt(vx: number, vy: number, vz: number): boolean {
+    const px = (vx + 0.5) * VOXEL_SIZE;
+    const py = (vy + 0.5) * VOXEL_SIZE;
+    const pz = (vz + 0.5) * VOXEL_SIZE;
+
     for (const tree of this.rayTrees) {
+      const dx = px - tree.x;
+      const dy = py - tree.y;
+      const dz = pz - tree.z;
+      const horizontalSq = dx * dx + dz * dz;
+
       if (
-        gridAt(tree.grid, vx - tree.rootVoxelX, vy - tree.rootVoxelY, vz - tree.rootVoxelZ) !==
-        Material.Air
+        dy >= 0 &&
+        dy <= tree.trunkTopMeters &&
+        horizontalSq <= tree.trunkRadiusMeters * tree.trunkRadiusMeters
       ) {
-        return tree.id;
+        this.rayHitTree = tree;
+        this.rayHitPart = TREE_PART_TRUNK;
+        return true;
+      }
+
+      const foliage = metricsFor(tree.species)?.foliage;
+      if (foliage === undefined) continue;
+      for (let i = 0; i < foliage.length; i++) {
+        if ((tree.foliageMask & (1 << i)) === 0) continue;
+        const cluster = foliage[i];
+        if (cluster === undefined) continue;
+        const radiusXZ = cluster.radiusXZ * tree.scale;
+        const radiusY = cluster.radiusY * tree.scale;
+        const offsetY = (dy - cluster.y * tree.scale) / radiusY;
+        if (horizontalSq / (radiusXZ * radiusXZ) + offsetY * offsetY <= 1) {
+          this.rayHitTree = tree;
+          this.rayHitPart = i;
+          return true;
+        }
       }
     }
-    return undefined;
+    return false;
   }
 
   /**
    * Casts against terrain and trees at once and reports what was hit.
    *
-   * One DDA over world voxels covers both because trees share the terrain's
-   * voxel lattice (see placeVegetation). The C++ runs a separate raycast per
-   * tree and then picks the nearest result, which is both slower and where
-   * its "nearest hit" bugs came from.
+   * One DDA over world voxels covers both: the ray steps voxels, and each
+   * step asks the terrain for its material and the nearby trees whether
+   * their trunk or foliage shapes contain that voxel's centre. Voxel
+   * granularity on a mesh tree is coarser than the mesh, but the shapes
+   * being tested are approximations anyway, and this keeps one raycast
+   * rather than one per tree -- which is where the C++'s "nearest hit"
+   * bugs came from.
    */
   raycastScene(
     originX: number,
@@ -664,16 +768,18 @@ export class World {
     maxDistanceMeters: number,
     out: SceneHit,
   ): SceneHit {
-    // Broad phase: a tree can only be hit if its root is within reach plus
-    // its own extent. Grids are at most ~3m across, hence the slack.
+    // Broad phase: a tree can only be hit if its base is within reach plus
+    // its own canopy radius. Canopies are at most ~2m across, hence the
+    // slack.
     const reach = maxDistanceMeters + 4;
     const reachSq = reach * reach;
     this.rayTrees.length = 0;
     for (const tree of this.trees.values()) {
-      const ox = tree.rootVoxelX * VOXEL_SIZE - originX;
-      const oz = tree.rootVoxelZ * VOXEL_SIZE - originZ;
+      const ox = tree.x - originX;
+      const oz = tree.z - originZ;
       if (ox * ox + oz * oz <= reachSq) this.rayTrees.push(tree);
     }
+    this.clearRayHit();
 
     const hit = raycastVoxel(
       this.sceneQuery,
@@ -692,9 +798,12 @@ export class World {
       return out;
     }
 
-    const treeId = this.treeIdAt(hit.x, hit.y, hit.z);
-    out.kind = treeId === undefined ? HitKind.Terrain : HitKind.Tree;
-    out.treeId = treeId ?? 0;
+    // The DDA stops on the voxel treeSolidAt last answered for, so the
+    // tree and part it recorded are that voxel's -- no second lookup.
+    const tree = this.rayHitTree;
+    out.kind = tree === undefined ? HitKind.Terrain : HitKind.Tree;
+    out.treeId = tree?.id ?? 0;
+    out.treePart = tree === undefined ? TREE_PART_TRUNK : this.rayHitPart;
     out.voxelX = hit.x;
     out.voxelY = hit.y;
     out.voxelZ = hit.z;
@@ -705,82 +814,83 @@ export class World {
     return out;
   }
 
-  /** Scoop on a tree: foliage only, since Wood is not hand-diggable. */
-  digTree(
-    treeId: number,
-    centerX: number,
-    centerY: number,
-    centerZ: number,
-    radiusMeters: number,
-    sink: ChunkSink,
-  ): boolean {
+  /**
+   * Scoop on a tree: knocks one whole foliage cluster off, which is the
+   * mesh equivalent of the voxel build's scooping leaves away a handful at
+   * a time. A cluster is the smallest piece of canopy the artist authored,
+   * so it is also the smallest piece that can come off.
+   *
+   * Trunks are not scoopable -- they are chup-only, as before.
+   */
+  stripFoliage(treeId: number, cluster: number, sink: ChunkSink): boolean {
     const tree = this.trees.get(treeId);
     if (tree === undefined) return false;
-    const changed = digGridSphere(
-      tree.grid,
-      tree.rootVoxelX,
-      tree.rootVoxelY,
-      tree.rootVoxelZ,
-      centerX,
-      centerY,
-      centerZ,
-      radiusMeters,
-    );
-    if (changed) this.meshTree(tree, sink);
-    return changed;
+    if (cluster < 0) return false;
+    const bit = 1 << cluster;
+    if ((tree.foliageMask & bit) === 0) return false;
+
+    tree.foliageMask &= ~bit;
+    this.strippedFoliage.set(treeId, (this.strippedFoliage.get(treeId) ?? 0) | bit);
+    sink.onTreeFoliageRemoved(tree, cluster);
+    return true;
   }
 
   /**
-   * Chup on a tree. Severing currently *removes* the piece above the cut
-   * rather than dropping it: there is no rigid-body layer until M7, and a
-   * severed top left floating in place is worse than one that vanishes.
-   * M7 turns the removed grid into a falling body.
+   * Chup on a trunk, at a world height. Returns whether the swing landed,
+   * and whether it was the one that cut through.
+   *
+   * A swing lands anywhere on the standing trunk; it takes CHOPS_TO_FELL of
+   * them at roughly one height to cut through. The cut itself is where the
+   * "procedural" part of the destruction lives, and it is deliberately
+   * trivial: a trunk is a tapered cylinder, so cutting it is one number
+   * going down and a piece of known length coming off. The sink slices the
+   * authored mesh to match.
    */
-  chopTree(
-    treeId: number,
-    centerX: number,
-    centerY: number,
-    centerZ: number,
-    horizontalRadiusMeters: number,
-    verticalHalfThicknessMeters: number,
-    sink: ChunkSink,
-  ): boolean {
+  chopTree(treeId: number, hitHeightMeters: number, sink: ChunkSink): ChopResult {
     const tree = this.trees.get(treeId);
-    if (tree === undefined) return false;
+    if (tree === undefined || tree.trunkTopMeters <= 0) return NO_CHOP;
 
-    const result = chopGridDisc(
-      tree.grid,
-      tree.rootVoxelX,
-      tree.rootVoxelY,
-      tree.rootVoxelZ,
-      centerX,
-      centerY,
-      centerZ,
-      horizontalRadiusMeters,
-      verticalHalfThicknessMeters,
-    );
-    if (!result.changed) return false;
+    const local = hitHeightMeters - tree.y;
+    if (local < 0 || local > tree.trunkTopMeters) return NO_CHOP;
 
-    if (result.severedAtLocalY >= 0) {
-      const piece = severGridAt(tree.grid, result.severedAtLocalY);
-      tree.severed = true;
-      tree.trunkHeightVoxels = result.severedAtLocalY;
-      this.severedTrees.set(tree.id, result.severedAtLocalY);
-      if (piece !== undefined) {
-        // The piece's own origin is its centre, so its world position is
-        // just where that cell sits.
-        sink.onTreeSevered(
-          piece,
-          (tree.rootVoxelX + 0.5) * VOXEL_SIZE,
-          (tree.rootVoxelY + result.severedAtLocalY + piece.originY + 0.5) * VOXEL_SIZE,
-          (tree.rootVoxelZ + 0.5) * VOXEL_SIZE,
-          Math.max(tree.trunkRadiusVoxels, 1) * VOXEL_SIZE,
-        );
-      }
+    if (Math.abs(local - tree.chopHeightMeters) > CHOP_REANCHOR_METERS || tree.chopHits === 0) {
+      tree.chopHeightMeters = local;
+      tree.chopHits = 0;
+    }
+    tree.chopHits++;
+    if (tree.chopHits < CHOPS_TO_FELL) return { landed: true, felled: false };
+
+    // Where the cut actually falls. A cut too near the top would drop a
+    // stub, and one too near the ground would leave a stump you cannot
+    // chop again -- so a trunk short enough that both cannot be satisfied
+    // goes over whole, which is also how a stump is finally cleared.
+    let cut = Math.min(tree.chopHeightMeters, tree.trunkTopMeters - MIN_PIECE_METERS);
+    if (cut < MIN_STUMP_METERS) cut = 0;
+
+    const pieceLength = tree.trunkTopMeters - cut;
+    const foliage = metricsFor(tree.species)?.foliage ?? [];
+    let carried = 0;
+    for (let i = 0; i < foliage.length; i++) {
+      const cluster = foliage[i];
+      if (cluster === undefined) continue;
+      if ((tree.foliageMask & (1 << i)) === 0) continue;
+      // A cluster rides with the piece if its centre is above the cut. A
+      // skirt straddling the cut goes with whichever side holds its middle,
+      // which is wrong by a few leaves and right about where the branch is.
+      if (cluster.y * tree.scale > cut) carried |= 1 << i;
     }
 
-    this.meshTree(tree, sink);
-    return true;
+    tree.trunkTopMeters = cut;
+    tree.foliageMask &= ~carried;
+    tree.severed = true;
+    tree.chopHits = 0;
+    this.severedTrees.set(tree.id, cut);
+    if (carried !== 0) {
+      this.strippedFoliage.set(tree.id, (this.strippedFoliage.get(tree.id) ?? 0) | carried);
+    }
+
+    sink.onTreeCut(tree, cut, pieceLength, carried);
+    return { landed: true, felled: true };
   }
 
   dispose(): void {

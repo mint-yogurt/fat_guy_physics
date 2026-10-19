@@ -74,18 +74,26 @@ Each one is runnable and visually verifiable.
 - Floating terrain voxels: dig from underneath and the material above hangs
   there. No connectivity or support analysis exists yet.
 - Debris particles and foliage-impact shatter are not ported.
-- Item icons (`assets/icons/`) and face textures
-  (`assets/textures/faces/`) exist but are unused — character create's face
-  option currently changes nothing.
+- Face textures (`assets/textures/faces/`) exist but are unused —
+  character create's face option currently changes nothing. Item icons
+  (`assets/icons/`) are used for dropped leaves and sticks only.
 - The walking collider is an AABB, not a swept capsule.
 - The r6 -> r12 load radius is unmeasured: the dev browser pane pins at
   exactly 30 FPS at both radii, so it caps the measurement rather than
   reporting it. Check FPS/WORST on real hardware before trusting the
   default.
-- Christmas and Halloween reuse the generic voxel trees; their authored
-  meshes (xmas trees, snowmen, dead trees, pumpkins, buildings) are not in
-  yet. `speciesForBiome` in `worldgen/vegetation.ts` is the one seam to
-  change when they land.
+- Each region has one authored tree (`worldgen/trees.ts`); the rest of
+  its props — snowmen, pumpkins, cobwebs, buildings — are not in yet.
+  `speciesForBiome` in `worldgen/vegetation.ts` is the one seam to change
+  when they land.
+- Tree sizes are set by `targetHeightMeters` per species, which scales the
+  authored mesh to roughly the height the voxel trees it replaced stood at.
+  The files themselves are five to seven times that; the numbers are a
+  judgement call, not a measurement.
+- A felled piece collides as a capsule the width of its trunk, so a
+  toppled canopy is walked through rather than stood on.
+- Trees are not solid to the player, only to the aiming raycast — as the
+  voxel trees were.
 
 ## Golden-data verification
 
