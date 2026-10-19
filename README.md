@@ -95,9 +95,9 @@ Milestones, in order. Each one is runnable and visually verifiable:
 - [x] **M6** Trees + chup + the canopy-size fix
 - [x] **M7** Jolt WASM + falling bodies
 - [x] **M8** Oriented-body collision (replaces snap-on-sleep)
-- [ ] **M9** Items — **parity with the native build**
-- [ ] **M10** DOM UI — hotbar, controls legend, character create
-- [ ] **M11** Player rig + animation
+- [x] **M9** Items — pickups, inventory, hotbar gating
+- [x] **M10** DOM UI — hotbar, controls legend
+- [ ] **M11** Player rig + animation + character create
 - [ ] **M12** Post-processing
 - [ ] **M13** World generation + biomes
 - [ ] **M14** Multiplayer

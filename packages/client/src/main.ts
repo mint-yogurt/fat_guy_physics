@@ -15,6 +15,8 @@ import {
   VOXEL_SIZE,
 } from "@fgp/shared/sim/constants";
 import { createPlayerInput, Player, PlayerMode } from "@fgp/shared/sim/player";
+import { HOTBAR_SLOTS, Inventory, ItemType } from "@fgp/shared/items/inventory";
+import { PickupField } from "@fgp/shared/items/pickupField";
 import { SceneSolidQuery } from "@fgp/shared/sim/sceneQuery";
 import {
   createSceneHit,
@@ -27,9 +29,11 @@ import { InputState } from "./input/inputState.ts";
 import { LogSystem } from "./physics/logSystem.ts";
 import { PhysicsWorld } from "./physics/physicsWorld.ts";
 import { CameraPerspective, PlayerCamera } from "./render/playerCamera.ts";
+import { PickupRenderer } from "./render/pickupRenderer.ts";
 import { createRenderer, installResizeHandler, isRenderable } from "./render/renderer.ts";
 import { createVoxelMaterial } from "./render/voxelMaterial.ts";
 import { WorldRenderer } from "./render/worldRenderer.ts";
+import { Hotbar } from "./ui/hotbar.ts";
 import { FrameStats, Hud } from "./ui/hud.ts";
 import { WorkerChunkSource } from "./workers/workerChunkSource.ts";
 
@@ -58,6 +62,10 @@ const DIG_REANCHOR_DIRECTION = 0.995;
  * gouge: wide enough in X/Z to cover the thickest trunk, ~1 voxel thick in
  * Y, so clearing a trunk's whole cross-section takes several swings.
  */
+/** Chance a clearing tick drops something. Rolled once per tick, as in the C++. */
+const LEAF_DROP_CHANCE = 0.35;
+const STICK_DROP_CHANCE = 0.4;
+
 const CHUP_TICK_SECONDS = 0.25;
 const CHUP_HORIZONTAL_RADIUS = 0.22;
 const CHUP_VERTICAL_HALF_THICKNESS = 0.06;
@@ -143,6 +151,19 @@ async function start(): Promise<void> {
       hud.set("PHYSICS", `unavailable: ${String(err)}`);
     });
 
+  const inventory = new Inventory();
+  const hotbar = new Hotbar(requireElement<HTMLDivElement>("#hotbar"));
+  const pickups = new PickupField();
+  const pickupRenderer = new PickupRenderer(scene);
+
+  /** Drops an item at a clearing point, to fall onto the terrain below. */
+  const dropItem = (type: ItemType, x: number, y: number, z: number): void => {
+    const groundY =
+      world.surfaceHeightVoxels(Math.floor(x / VOXEL_SIZE), Math.floor(z / VOXEL_SIZE)) *
+      VOXEL_SIZE;
+    pickups.spawn(type, x, y, z, groundY, performance.now() / 1000);
+  };
+
   const input = new InputState(canvas);
   input.attach();
   const playerInput = createPlayerInput();
@@ -211,6 +232,8 @@ async function start(): Promise<void> {
       player,
       worldRenderer,
       sceneQuery,
+      pickups,
+      inventory,
       get logs(): LogSystem | undefined {
         return logs;
       },
@@ -233,6 +256,10 @@ async function start(): Promise<void> {
     // sensitivity depend on how many substeps the frame happened to run.
     if (input.locked) {
       player.look(input.consumeMouseX(), input.consumeMouseY());
+    }
+
+    for (let slot = 0; slot < HOTBAR_SLOTS; slot++) {
+      if (input.wasPressed(`Digit${String(slot + 1)}`)) inventory.selectSlot(slot);
     }
 
     if (input.wasPressed("KeyR")) player.toggleMode(sceneQuery);
@@ -308,8 +335,14 @@ async function start(): Promise<void> {
     const aimed = hit.kind !== HitKind.None;
 
     // Walking only: there is no hand free to swing while tucked into a ball.
+    // Scoop and chup are the Unarmed slot's actions: holding an item means
+    // your hands are full. It is the whole of the tool system for now, and
+    // the natural place future tools hook in.
     const canDig =
-      input.locked && player.mode === PlayerMode.Walking && input.isMouseDown(0);
+      input.locked &&
+      player.mode === PlayerMode.Walking &&
+      inventory.isUnarmedSelected &&
+      input.isMouseDown(0);
 
     if (canDig) {
       digCooldown -= rawDt;
@@ -341,7 +374,7 @@ async function start(): Promise<void> {
 
         if (digAnchored) {
           if (anchorTreeId >= 0) {
-            world.digTree(
+            const cleared = world.digTree(
               anchorTreeId,
               anchorCenterX,
               anchorCenterY,
@@ -349,6 +382,9 @@ async function start(): Promise<void> {
               DIG_RADIUS_METERS,
               worldRenderer,
             );
+            if (cleared && Math.random() < LEAF_DROP_CHANCE) {
+              dropItem(ItemType.Leaf, anchorCenterX, anchorCenterY, anchorCenterZ);
+            }
           } else {
             world.digSphere(
               anchorCenterX,
@@ -373,12 +409,15 @@ async function start(): Promise<void> {
     // the cut is a thin shear that has to follow the trunk as it is eaten
     // away, so anchoring it would make repeat swings miss.
     const canChup =
-      input.locked && player.mode === PlayerMode.Walking && input.isMouseDown(2);
+      input.locked &&
+      player.mode === PlayerMode.Walking &&
+      inventory.isUnarmedSelected &&
+      input.isMouseDown(2);
     if (canChup) {
       chupCooldown -= rawDt;
       if (chupCooldown <= 0) {
         if (hit.kind === HitKind.Tree) {
-          world.chopTree(
+          const cleared = world.chopTree(
             hit.treeId,
             hit.centerX,
             hit.centerY,
@@ -387,12 +426,24 @@ async function start(): Promise<void> {
             CHUP_VERTICAL_HALF_THICKNESS,
             worldRenderer,
           );
+          if (cleared) {
+            const roll = Math.random();
+            if (roll < STICK_DROP_CHANCE) {
+              dropItem(ItemType.Stick, hit.centerX, hit.centerY, hit.centerZ);
+            } else if (roll < STICK_DROP_CHANCE + LEAF_DROP_CHANCE) {
+              dropItem(ItemType.Leaf, hit.centerX, hit.centerY, hit.centerZ);
+            }
+          }
         }
         chupCooldown = CHUP_TICK_SECONDS;
       }
     } else {
       chupCooldown = 0;
     }
+
+    pickups.update(rawDt, now, player.x, player.y, player.z, inventory);
+    pickupRenderer.sync(pickups);
+    hotbar.sync(inventory);
 
     logs?.update(player.x, player.y, player.z);
 
@@ -404,6 +455,7 @@ async function start(): Promise<void> {
     hud.set("VIEW", playerCamera.perspective === CameraPerspective.FirstPerson ? "1st" : "3rd");
     hud.set("FOV", playerCamera.fovDegrees.toFixed(0));
     hud.set("CHUNKS", `${world.loadedCount} (r${radius}, ${worldRenderer.meshCount} drawn)`);
+    hud.set("ITEMS", String(pickups.items.length));
     hud.set("TREES", `${world.treeCount} (${String(logs?.count ?? 0)} logs)`);
     hud.set("QUEUE", String(world.pendingCount));
     hud.set("UPLOAD", `${worstDrainMs.toFixed(1)}ms worst`);
@@ -432,6 +484,7 @@ async function start(): Promise<void> {
   import.meta.hot?.dispose(() => {
     void renderer.setAnimationLoop(null);
     input.dispose();
+    pickupRenderer.clear();
     logs?.clear();
     physics?.dispose();
     worldRenderer.clear();
