@@ -8,28 +8,26 @@ import "./ui/ui.css";
 // reach for the bare "three" specifier in this package.
 import {
   Color,
-  Mesh,
   PerspectiveCamera,
   Scene,
   TextureLoader,
   type Texture,
 } from "three/webgpu";
 
-import { CHUNK_SIZE, MAX_FRAME_TIME, VOXEL_SIZE } from "@fgp/shared/sim/constants";
-import { Mesher } from "@fgp/shared/voxel/greedyMesher";
-import { createChunkGrid } from "@fgp/shared/voxel/voxelGrid";
-import { TerrainGenerator } from "@fgp/shared/worldgen/terrainGenerator";
+import { MAX_FRAME_TIME, VOXEL_SIZE } from "@fgp/shared/sim/constants";
+import { DEFAULT_LOAD_RADIUS_CHUNKS, World } from "@fgp/shared/sim/world";
 
-import { createChunkGeometry } from "./render/chunkGeometry.ts";
+import { FlyCamera } from "./input/flyCamera.ts";
 import { createRenderer, installResizeHandler, isRenderable } from "./render/renderer.ts";
 import { createVoxelMaterial } from "./render/voxelMaterial.ts";
+import { WorldRenderer } from "./render/worldRenderer.ts";
 import { FrameStats, Hud } from "./ui/hud.ts";
 
 /** Matches the seed the golden fixture was generated with. */
 const SEED = 1337;
 
-/** The surface band at this seed. Chunk layer 2 covers voxel Y 64..95. */
-const CHUNK_COORD = { x: 0, y: 2, z: 0 };
+/** Metres above the ground to spawn the fly camera. */
+const SPAWN_CLEARANCE = 6;
 
 function requireElement<T extends Element>(selector: string): T {
   const el = document.querySelector<T>(selector);
@@ -39,6 +37,46 @@ function requireElement<T extends Element>(selector: string): T {
 
 function loadTexture(url: string): Promise<Texture> {
   return new TextureLoader().loadAsync(url);
+}
+
+/**
+ * Yields long enough for the browser to actually paint.
+ *
+ * One rAF only schedules work for the *next* frame; the paint happens after
+ * the callback returns. Waiting two frames is what guarantees the first one
+ * reached the screen -- which matters here because the thing being painted is
+ * the "generating" message that covers a multi-second synchronous stall.
+ *
+ * Raced against a timer because a hidden tab does not run rAF *at all* --
+ * not throttled, suspended. Opening the game in a background tab would
+ * otherwise deadlock startup here until the tab was focused, which looks
+ * exactly like a crash. There is nothing to paint in a hidden tab anyway, so
+ * the timeout just gets on with it.
+ */
+function nextPaint(timeoutMs = 250): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    requestAnimationFrame(() => requestAnimationFrame(finish));
+    setTimeout(finish, timeoutMs);
+  });
+}
+
+/**
+ * Load radius in chunks. Overridable via `?radius=N` purely for iteration
+ * speed: the M2 initial load is synchronous, and at the default radius that
+ * is a multi-second freeze on every page reload. `?radius=2` makes it
+ * instant while developing anything that is not streaming itself.
+ */
+function loadRadiusFromUrl(): number {
+  const raw = new URLSearchParams(window.location.search).get("radius");
+  if (raw === null) return DEFAULT_LOAD_RADIUS_CHUNKS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_LOAD_RADIUS_CHUNKS;
 }
 
 async function start(): Promise<void> {
@@ -60,49 +98,39 @@ async function start(): Promise<void> {
   const cobble = await loadTexture("/textures/cobble.png");
   const material = createVoxelMaterial(cobble);
 
-  // M1: one chunk, generated and meshed on the main thread. Streaming is M2,
-  // workers are M3.
-  const generator = new TerrainGenerator(SEED);
-  const grid = createChunkGrid();
+  const radius = loadRadiusFromUrl();
+  const world = new World(SEED, radius);
+  const worldRenderer = new WorldRenderer(scene, material);
 
-  const genStart = performance.now();
-  generator.generate(grid, CHUNK_COORD.x, CHUNK_COORD.y, CHUNK_COORD.z);
-  const genMs = performance.now() - genStart;
-
-  const meshStart = performance.now();
-  const mesh = new Mesher().mesh(grid);
-  const meshMs = performance.now() - meshStart;
-
-  const chunkMesh = new Mesh(createChunkGeometry(mesh), material);
-  const chunkMeters = CHUNK_SIZE * VOXEL_SIZE;
-  chunkMesh.position.set(
-    CHUNK_COORD.x * chunkMeters,
-    CHUNK_COORD.y * chunkMeters,
-    CHUNK_COORD.z * chunkMeters,
+  camera.position.set(
+    0,
+    world.surfaceHeightVoxels(0, 0) * VOXEL_SIZE + SPAWN_CLEARANCE,
+    0,
   );
-  scene.add(chunkMesh);
 
-  hud.set("CHUNK", `${CHUNK_COORD.x},${CHUNK_COORD.y},${CHUNK_COORD.z}`);
-  hud.set("VERTS", String(mesh.vertexCount));
-  hud.set("GEN", `${genMs.toFixed(2)}ms`);
-  hud.set("MESH", `${meshMs.toFixed(2)}ms`);
-
-  // Orbit the chunk's centre. A real camera arrives with the player at M4;
-  // this exists only so every face of the mesh can be inspected.
-  const centre = {
-    x: chunkMesh.position.x + chunkMeters / 2,
-    y: chunkMesh.position.y + chunkMeters / 2,
-    z: chunkMesh.position.z + chunkMeters / 2,
-  };
-  const orbitRadius = chunkMeters * 1.6;
+  const flyCamera = new FlyCamera(camera, canvas);
+  flyCamera.attach();
 
   installResizeHandler(bundle, (w, h) => {
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   });
 
+  // M2: every chunk load is synchronous on the main thread, so the initial
+  // full-radius load freezes the tab outright. Paint the sky and a message
+  // first so the freeze is explained rather than looking like a hang. The
+  // fix is M3 (workers), not a longer loading screen.
+  hud.set("STATUS", `generating ${radius}-chunk radius...`);
+  renderer.render(scene, camera);
+  await nextPaint();
+
+  // Seeded from the initial load rather than starting at zero, so the
+  // readout accounts for the stall the player actually sat through instead
+  // of only the boundary crossings that happen after spawn.
+  let worstStreamMs = world.update(camera.position.x, camera.position.z, worldRenderer).ms;
+  hud.remove("STATUS");
+
   let lastTime = performance.now() / 1000;
-  let orbitAngle = 0;
 
   void renderer.setAnimationLoop(() => {
     const now = performance.now() / 1000;
@@ -116,16 +144,17 @@ async function start(): Promise<void> {
     // before touching the renderer rather than letting it fail per frame.
     if (!isRenderable()) return;
 
-    orbitAngle += dt * 0.25;
-    camera.position.set(
-      centre.x + Math.cos(orbitAngle) * orbitRadius,
-      centre.y + chunkMeters * 0.55,
-      centre.z + Math.sin(orbitAngle) * orbitRadius,
-    );
-    camera.lookAt(centre.x, centre.y, centre.z);
+    flyCamera.update(dt);
 
+    const streamed = world.update(camera.position.x, camera.position.z, worldRenderer);
+    if (streamed.ms > worstStreamMs) worstStreamMs = streamed.ms;
+
+    hud.set("POS", `${camera.position.x.toFixed(1)} ${camera.position.y.toFixed(1)} ${camera.position.z.toFixed(1)}`);
+    hud.set("CHUNKS", `${world.loadedCount} (r${radius}, ${worldRenderer.meshCount} drawn)`);
+    hud.set("STREAM", `${worstStreamMs.toFixed(1)}ms worst`);
     hud.set("FPS", stats.fps.toFixed(0));
     hud.set("WORST", `${stats.worstMs.toFixed(1)}ms`);
+    hud.set("LOOK", flyCamera.locked ? "captured (Esc to release)" : "click to capture mouse");
 
     renderer.render(scene, camera);
   });

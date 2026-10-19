@@ -22,6 +22,12 @@ Then open http://localhost:5173. Append `?gl` to the URL to force the WebGL2
 backend instead of WebGPU — useful for telling "broken everywhere" apart from
 "broken on one backend".
 
+Controls are a free-flying debug camera until the player controller lands at
+M4: click to capture the mouse, WASD to fly, Space/C for up/down, Shift to
+boost. `?radius=N` overrides the chunk load radius — the initial load is
+synchronous until M3, so `?radius=2` is worth it while iterating on anything
+that isn't streaming itself.
+
 ```sh
 npm run typecheck   # tsc --build across the workspace
 npm run test        # vitest
@@ -81,7 +87,7 @@ Milestones, in order. Each one is runnable and visually verifiable:
 
 - [x] **M0** Toolchain — monorepo, Vite, pinned three.js, backend readout
 - [x] **M1** One chunk from the real generator, main thread + golden-data check
-- [ ] **M2** Fly camera + synchronous chunk streaming
+- [x] **M2** Fly camera + synchronous chunk streaming
 - [ ] **M3** Web Worker pool with transferable buffers
 - [ ] **M4** Player controller, collision, the fixed-timestep frame loop
 - [ ] **M5** Raycast (redesigned) + scoop
