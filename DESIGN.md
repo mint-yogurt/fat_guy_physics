@@ -1,379 +1,131 @@
 # fatguyphysics
 
-**Working title**
+**Working title.** Early design document — nothing here is final. The
+priority is a fun prototype, not adherence to a fixed design.
 
-## Status
-
-Early design document.
-
-This document exists to record the current direction of the project. Nothing here should be considered final. Mechanics, implementation details, technology choices, art direction, and gameplay systems may change as development progresses. The priority is producing a fun prototype rather than adhering to a fixed design.
+For build instructions, milestones and known gaps, see
+[README.md](README.md).
 
 ---
 
 # Overview
 
-fatguyphysics is a multiplayer voxel physics sandbox written in C++.
+A multiplayer voxel physics sandbox, played in the browser with no download.
 
-The world consists of procedurally generated deformable voxel terrain. Players can excavate terrain, manipulate physics objects, and construct simple mechanical contraptions. Multiplayer interaction and emergent physics are intended to be the primary source of gameplay.
+The world is procedurally generated deformable voxel terrain. Players
+excavate it, throw physics objects around, and build simple mechanical
+contraptions. Multiplayer interaction and emergent physics are meant to be
+the gameplay, not a layer on top of it.
 
-The project is intentionally **not** being designed as a traditional survival game.
+Explicitly **not** a survival game.
 
-Current goals include:
+Goals:
 
-* Dedicated server architecture.
-* Cross-platform client.
-* Procedurally generated voxel terrain.
-* Terrain modification.
-* Physics-driven gameplay.
-* Cooperative and PvP multiplayer.
-* Simple construction mechanics.
-* Stylized low-poly presentation.
+- Authoritative dedicated server; the simulation runs identically on both sides.
+- Procedural, modifiable voxel terrain.
+- Physics-driven gameplay.
+- Co-op and PvP out of the same mechanics.
+- Simple construction.
+- Stylized low-poly presentation.
 
 ---
 
-# Design Goals
-
-The project should prioritize the following.
+# Design goals
 
 ## Deformable terrain
 
-Terrain should be editable at runtime.
+Terrain is editable at runtime. Excavation removes small volumes rather than
+fixed cubes, so holes come out rounded and irregular. Voxels are ~10 cm.
 
-Instead of removing fixed cubes, excavation removes small volumes of material, producing rounded or irregular holes.
-
-Voxel size is currently planned at approximately 10 cm.
-
-Materials have different hardness values.
-
-Example material progression:
-
-* Sand
-* Snow
-* Dirt
-* Clay
-* Gravel
-* Rock
-* Granite
-* Ice
-
-Harder materials require progressively better tools.
-
----
+Materials have hardness, and harder ones need better tools. Rough
+progression: Sand, Snow, Dirt, Clay, Gravel, Rock, Granite, Ice.
 
 ## Physics
 
-Physics is the primary gameplay system.
-
-Examples include:
-
-* Rolling objects
-* Falling terrain
-* Explosions
-* Moving platforms
-* Seesaws
-* Ramps
-* Swinging ropes
-* Collapsing structures
-
-The intention is for interesting situations to emerge naturally rather than relying on scripted mechanics.
-
----
+The primary system. Rolling objects, falling terrain, explosions, moving
+platforms, seesaws, ramps, swinging ropes, collapsing structures. Interesting
+situations should emerge rather than be scripted.
 
 ## Construction
 
-Construction is centered around assembling simple machines rather than constructing detailed buildings.
-
-Current object ideas include:
-
-* Beams
-* Planks
-* Wheels
-* Hinges
-* Ropes
-* Springs
-* Axles
-* Chains
-* Barrels
-* Crates
-* Explosives
-
-These components should be usable to build simple mechanical systems such as catapults, bridges, elevators, launchers, traps, and similar contraptions.
-
----
+Simple machines, not detailed buildings. Beams, planks, wheels, hinges,
+ropes, springs, axles, chains, barrels, crates, explosives — enough to make
+catapults, bridges, elevators, launchers and traps.
 
 ## Multiplayer
 
-The game is intended primarily for multiplayer.
-
-Both cooperative and PvP play should emerge naturally from the same mechanics.
-
-Examples:
-
-* Excavating beneath another player's structure.
-* Launching players using improvised machines.
-* Destroying supports.
-* Triggering collapses.
-* Sharing construction projects.
+Excavate under someone's structure. Launch each other with improvised
+machines. Destroy supports, trigger collapses, share projects. Co-op and PvP
+should fall out of the same toolkit.
 
 ---
 
 # Player
 
-Players are represented by spherical characters with small arms and legs.
+Players are round, soft characters — a big spherical torso with stubby chubby
+limbs and a spherical head. Not boxes. The authored model lives at
+`assets/meshes/playermodel_v2.glb` (Z up, front is +X, T-posed, separate
+head/arm/leg parts for animation).
 
-Instead of using ragdolls, players roll.
+No ragdolls — players roll. **Ragball mode** tucks the player into a sphere
+for faster, momentum-based traversal; WASD only lightly steers. Rotation is
+about the torso's centre of mass.
 
-A dedicated "ragball" mode allows players to tuck into a sphere for faster rolling movement and momentum-based traversal.
-
-Character customization is intentionally limited.
-
-Current plans include:
-
-* Face selection
-* Shirt texture
-* Skin color
+Customization is intentionally limited: name, face, shirt colour, skin
+colour.
 
 ---
 
-# World Generation
+# World generation
 
-Terrain is procedurally generated using layered noise.
+Layered Perlin/fractal noise. Biome transitions blend gradually with noise
+rather than snapping at a border.
 
-Current techniques under consideration:
-
-* Perlin noise
-* Fractal noise
-
-Biome transitions should blend gradually using noise rather than abrupt borders.
-
-Current thematic direction is a world formed from multiple holiday-themed regions.
-
-Initial regions:
-
-* Christmas
-* Halloween
-
-Additional themes may be added later.
+Thematic direction: a world made of holiday-themed regions. Christmas and
+Halloween first; more may follow.
 
 ---
 
 # Progression
 
-No survival mechanics are currently planned.
-
-Current assumptions:
-
-* No hunger.
-* No thirst.
-* Health regenerates automatically.
-* Combat is not the primary gameplay focus.
-
-Progression should primarily unlock additional interactions rather than increase player power.
-
-Examples:
-
-* New tools
-* New construction components
-* New materials
-* Additional mechanical systems
+No hunger, no thirst, health regenerates, combat is not the focus.
+Progression unlocks interactions rather than raising power: new tools,
+construction components, materials, mechanical systems.
 
 ---
 
 # Materials
 
-Excavation produces usable material.
-
-Instead of placing terrain voxel-by-voxel, collected material may be converted into physics objects.
-
-Examples:
-
-* Counterweights
-* Boulders
-* Snowballs
-* Sandbags
-* Construction pieces
-
-Exact implementation remains undecided.
+Excavation yields usable material. Rather than placing it back voxel by
+voxel, it converts into physics objects — counterweights, boulders,
+snowballs, sandbags, construction pieces. Implementation undecided.
 
 ---
 
-# Visual Direction
+# Visual direction
 
-Current goals:
+Chunky voxel terrain, low-poly models, vertex colours where practical, low
+texture memory ([quod textures](https://daivuk.itch.io/quod-textures)),
+atlases where they help, simple shaders.
 
-* Chunky voxel terrain.
-* Low-poly models.
-* Vertex colors where practical.
-* Low texture memory usage. (see https://daivuk.itch.io/quod-textures)
-* Texture atlases where appropriate.
-* Simple shader(s).
-* Mild post-processing.
-
-Current effects being considered:
-
-* Slight texture filtering similar to late-1990s hardware.
-* Subtle chromatic aberration.
-* Mild color bleed.
-
-These are presentation details only and may change.
+Mild post-processing, under consideration: slight texture filtering like
+late-90s hardware, subtle chromatic aberration, mild colour bleed.
 
 ---
 
-# Technical Goals
+# Technical direction
 
-Current implementation targets:
+TypeScript end to end — the simulation is shared verbatim between client and
+server, which is the whole reason the port happened.
 
-* C++
-* Dedicated server
-* OpenGL renderer (subject to change)
-* Cross-platform
-* Chunk-based voxel terrain
-* Greedy meshing
-* Face culling
-* Frustum culling
-* Efficient chunk updates
-* Shared code between client and server where practical
-* Live update - allowing changes to reflect during runtime
+- three.js `WebGPURenderer`, falling back to WebGL2 on its own.
+- Jolt (`jolt-physics`, the Emscripten build) for rigid bodies.
+- Chunk-based voxel terrain, greedy meshing, face and frustum culling.
+- Chunk generation and meshing on a Web Worker pool with transferable
+  buffers; only the GPU upload touches the main thread.
+- Fixed-timestep simulation with render interpolation, so physics is
+  deterministic and frame rate independent.
+- Zero-allocation frame loop: no garbage means no GC pauses mid-roll.
+- Authoritative server (Node + ws), with terrain edits replicated.
 
-Optimization should be considered throughout development rather than postponed until later.
-
----
-
-# Initial Prototype
-
-The first milestone is intended to answer a single question:
-
-Can terrain excavation be made responsive and satisfying?
-
-Prototype requirements:
-
-* Window
-* Camera
-* Procedural terrain
-* Chunk generation
-* Terrain meshing
-* Terrain excavation
-* Chunk rebuild after modification
-* Collision updates
-
-No additional gameplay systems are required until this is working.
-
----
-
-# Development Roadmap (README added to as each step gets worked on)
-
-## Phase 0
-
-Project setup.
-
-* Repository
-* Build system
-* Rendering
-* Camera
-* Basic application framework
-
-## Phase 1
-
-Voxel terrain.
-
-* Chunk storage
-* Procedural generation
-* Meshing
-* Streaming
-
-## Phase 2
-
-Terrain editing.
-
-* Scoop mechanic
-* Material hardness
-* Mesh regeneration
-* Collision updates
-
-## Phase 3
-
-Player controller.
-
-* Walking
-* Jumping
-* Rolling
-* Ragball mode
-
-## Phase 4
-
-Networking.
-
-* Dedicated server
-* Client synchronization
-* Terrain replication
-* Live-update support
-
-## Phase 5
-
-Physics objects.
-
-* Rigid bodies
-* Pick up
-* Carry
-* Throw
-* Placement
-
-## Phase 6
-
-Construction.
-
-* Beams
-* Ropes
-* Hinges
-* Wheels
-* Springs
-* Snapping
-
-## Phase 7
-
-Gameplay systems.
-
-* Explosions
-* Chain reactions
-* Additional tools
-* Materials
-* Objects
-
-## Phase 8
-
-Content.
-
-* Biomes
-* Creatures
-* Assets
-* Audio
-* Polish
-* Optimization
-
----
-
-# Repository Organization (Tentative)
-
-```
-fatguyphysics/
-├── client/
-├── server/
-├── shared/
-├── engine/
-│   ├── graphics/
-│   ├── networking/
-│   ├── physics/
-│   ├── voxel/
-│   ├── world/
-│   └── util/
-├── assets/
-│   ├── models/
-│   ├── shaders/
-│   ├── textures/
-│   └── audio/
-├── tools/
-├── third_party/
-└── docs/
-```
-
-This layout is expected to change as the project grows.
+Optimization is considered as it goes, not postponed.
