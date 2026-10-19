@@ -1,7 +1,6 @@
 import {
   Box3,
   Group,
-  Matrix4,
   Mesh,
   MeshLambertMaterial,
   Quaternion,
@@ -15,15 +14,18 @@ import { PlayerMode, WALK_HEIGHT, type Player } from "@fgp/shared/sim/player";
 /**
  * The player character, from assets/meshes/playermodel_v2.glb.
  *
- * The model authors each limb as its own node (arm_left/arm_right/body/
- * head/leg_left/leg_right) specifically so they can be animated, so this
- * hangs each limb off a pivot group placed at the top of that limb's own
- * bounding box -- the shoulder or hip -- and rotates the group. The same
- * groups fold inward for Ragball rather than there being a second model.
+ * Nothing here modifies the model's geometry -- no baked rotations, no
+ * re-centred vertices. The file's parts are already in the right places
+ * relative to each other (a T-pose), so every transform is on an Object3D:
+ * parent groups orient and scale the whole model, and each limb is
+ * re-parented to a group sitting at its joint with the mesh offset back by
+ * the same amount. Rewriting the vertex data instead is what broke the
+ * normals and threw the limbs off the body the first time.
  *
- * The source is Z-up with +X forward, which is Blender's convention and
- * not three's; geometry is rotated into Y-up once at load, after which +X
- * is still forward and matches the sim's yaw of zero.
+ * Axes, measured off the exported part bounds rather than assumed: the
+ * model's own up is -X, its lateral axis is Y, and it faces -Z. The limb
+ * rotations below are written in those axes, because the limbs live inside
+ * the group that does the fixing up.
  */
 
 export interface Appearance {
@@ -47,17 +49,22 @@ const RETRACT_RATE = 9;
 
 interface Limb {
   readonly group: Group;
-  /** +1 for the left side, -1 for the right. */
+  /** +1 left, -1 right. */
   readonly sign: number;
 }
 
 export class PlayerModel {
   readonly root = new Group();
 
-  private readonly body = new Group();
+  /** Scale, and the offset that stands the model on the root. */
+  private readonly fit = new Group();
+  /** Model axes -> world axes. Everything under this is in model space. */
+  private readonly orient = new Group();
+
   private readonly arms: Limb[] = [];
   private readonly legs: Limb[] = [];
 
+  private baseScale = 1;
   private tuck = 0;
   private phase = 0;
   private readonly rotation = new Quaternion();
@@ -67,73 +74,62 @@ export class PlayerModel {
     parts: Map<string, Mesh>,
     appearance: Appearance,
   ) {
+    // -X is up, so stand it on +Y, then turn it to face +X, which is where
+    // a yaw of zero points in the sim. Composed explicitly rather than as
+    // an Euler triple: the order an Euler applies its axes in is the easy
+    // thing to get backwards, and backwards here lays the model on its
+    // side.
+    const stand = new Quaternion().setFromAxisAngle(new Vector3(0, 0, 1), -Math.PI / 2);
+    const face = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), -Math.PI / 2);
+    this.orient.quaternion.copy(face.multiply(stand));
+
     const skin = new MeshLambertMaterial({ color: appearance.skin });
     const shirt = new MeshLambertMaterial({ color: appearance.shirt });
 
-    // The exported basis is not three's: measured off the parts, head-to-toe
-    // runs along -X, left-to-right along +Y, and the belly points -Z. This
-    // maps that onto three's Y-up with +X forward, which is also the sim's
-    // yaw of zero. Baked into the geometry rather than left on a parent
-    // transform, so limb pivots are computed in the space the animation
-    // runs in.
-    // prettier-ignore
-    const toYUp = new Matrix4().set(
-      0, 0, -1, 0,
-      -1, 0, 0, 0,
-      0, 1, 0, 0,
-      0, 0, 0, 1,
-    );
-    const bounds = new Box3();
-    for (const mesh of parts.values()) {
-      mesh.geometry.applyMatrix4(toYUp);
-      mesh.geometry.computeBoundingBox();
-      bounds.union(mesh.geometry.boundingBox ?? new Box3());
-    }
-
-    // Scaled to the collision capsule's height and dropped so the feet sit
-    // at the root, which is the sim's position.
-    const size = new Vector3();
-    bounds.getSize(size);
-    const scale = size.y > 0 ? WALK_HEIGHT / size.y : 1;
-    const lift = -bounds.min.y;
-
-    const pivot = new Vector3();
     const box = new Box3();
+    const pivot = new Vector3();
 
     for (const [name, mesh] of parts) {
-      mesh.geometry.translate(0, lift, 0);
-      mesh.geometry.scale(scale, scale, scale);
       mesh.material = name === "body" ? shirt : skin;
       mesh.frustumCulled = false;
+      mesh.geometry.computeBoundingBox();
 
-      const isLimb = name.startsWith("arm") || name.startsWith("leg");
-      if (!isLimb) {
-        this.body.add(mesh);
+      const isArm = name.startsWith("arm");
+      if (!isArm && !name.startsWith("leg")) {
+        this.orient.add(mesh);
         continue;
       }
 
-      mesh.geometry.computeBoundingBox();
       box.copy(mesh.geometry.boundingBox ?? new Box3());
       box.getCenter(pivot);
       const left = name.endsWith("left");
-      // Hips are the top of the leg; shoulders are the *inner* end of the
-      // arm, because the arms are stubby cylinders held out from the body
-      // rather than hanging down -- pivoting them at the top would swing
-      // them from the wrong end.
-      pivot.y = box.max.y;
-      if (name.startsWith("arm")) pivot.z = left ? box.min.z : box.max.z;
+      if (isArm) {
+        // Shoulder: the end of the arm nearest the body along the lateral
+        // axis, since the arms are held out in the T-pose.
+        pivot.y = left ? box.min.y : box.max.y;
+      } else {
+        // Hip: the top of the leg, and up is -X.
+        pivot.x = box.min.x;
+      }
 
       const group = new Group();
       group.position.copy(pivot);
-      mesh.geometry.translate(-pivot.x, -pivot.y, -pivot.z);
+      mesh.position.copy(pivot).negate();
       group.add(mesh);
-      this.body.add(group);
-
-      const limb: Limb = { group, sign: left ? 1 : -1 };
-      (name.startsWith("arm") ? this.arms : this.legs).push(limb);
+      this.orient.add(group);
+      (isArm ? this.arms : this.legs).push({ group, sign: left ? 1 : -1 });
     }
 
-    this.root.add(this.body);
+    // Measured after orienting, so "height" means height.
+    this.fit.add(this.orient);
+    const bounds = new Box3().setFromObject(this.fit);
+    const size = new Vector3();
+    bounds.getSize(size);
+    this.baseScale = size.y > 0 ? WALK_HEIGHT / size.y : 1;
+    this.fit.scale.setScalar(this.baseScale);
+    this.fit.position.y = -bounds.min.y * this.baseScale;
+
+    this.root.add(this.fit);
     scene.add(this.root);
   }
 
@@ -162,34 +158,33 @@ export class PlayerModel {
       );
       this.root.quaternion.copy(this.rotation);
     } else {
-      // The model faces +X and a yaw of zero means +X, so the rotation
-      // about Y is the negated yaw (three turns +X towards -Z).
       this.root.quaternion.identity();
-      this.root.rotation.set(0, -player.yaw, 0);
+      // Taken from the front vector rather than player.yaw, which is in
+      // degrees -- feeding those to a radians rotation is what had the
+      // model lying on its side. Facing is +X after orienting, and three
+      // turns +X towards -Z, hence the negation.
+      this.root.rotation.set(0, -Math.atan2(player.frontZ, player.frontX), 0);
     }
 
     const speed = Math.hypot(player.vx, player.vz);
     this.phase += dt * WALK_CYCLE_SPEED * Math.min(1, speed / player.walkSpeed);
-    const swing = player.grounded ? Math.sin(this.phase) * Math.min(1, speed / 2) * 0.7 : 0.35;
+    const swing = player.grounded ? Math.sin(this.phase) * Math.min(1, speed / 2) * 0.7 : 0.3;
+    const active = 1 - this.tuck;
 
-    // An arm points along the lateral axis, so swinging it forward is a
-    // rotation about Y -- and one angle serves both arms, since the two
-    // point opposite ways and so move opposite ways. A leg hangs down the
-    // Y axis, so its forward swing is a rotation about Z, which does need
-    // the per-side sign.
+    // Model space faces -Z, so a limb swings forward about whichever axis
+    // moves its far end that way: X for an arm, which lies along the
+    // lateral axis, and Y for a leg, which hangs along +X. One angle
+    // serves both arms, since they point opposite ways to begin with.
     for (const limb of this.arms) {
-      limb.group.rotation.y = -swing * (1 - this.tuck);
+      limb.group.rotation.x = swing * active;
       limb.group.scale.setScalar(1 - this.tuck * 0.7);
     }
     for (const limb of this.legs) {
-      limb.group.rotation.z = swing * limb.sign * (1 - this.tuck);
+      limb.group.rotation.y = swing * limb.sign * active;
       limb.group.scale.setScalar(1 - this.tuck * 0.7);
     }
 
-    // Curl down so the tucked silhouette sits on the collision sphere
-    // rather than standing on top of it.
-    this.body.position.y = -this.tuck * 0.35;
-    this.body.scale.setScalar(1 - this.tuck * 0.2);
+    this.fit.scale.setScalar(this.baseScale * (1 - this.tuck * 0.2));
   }
 
   set visible(value: boolean) {
