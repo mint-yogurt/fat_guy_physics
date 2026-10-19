@@ -2,7 +2,7 @@ import { chunkKey, keyX, keyY, keyZ, type ChunkKey } from "./chunkKey.ts";
 import type { ChunkResult, ChunkSource } from "./chunkSource.ts";
 import { CHUNK_SIZE, VOXEL_SIZE } from "./constants.ts";
 import { nowMs } from "./time.ts";
-import { floorDiv, floorMod, Material } from "../voxel/voxel.ts";
+import { floorDiv, floorMod, isSolid, Material } from "../voxel/voxel.ts";
 import { gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
 
@@ -263,6 +263,27 @@ export class World {
         floorMod(worldVoxelZ, CHUNK_SIZE),
       )
     ] as Material;
+  }
+
+  /** Whether the chunk containing a world-space point is loaded. */
+  hasChunkAt(worldX: number, worldY: number, worldZ: number): boolean {
+    return this.chunks.has(
+      chunkKey(
+        Math.floor(worldX / CHUNK_METERS),
+        Math.floor(worldY / CHUNK_METERS),
+        Math.floor(worldZ / CHUNK_METERS),
+      ),
+    );
+  }
+
+  /**
+   * {@link SolidQuery} for the collision code. Terrain only: felled logs
+   * and other oriented rigid bodies join this at M8, via a composite query
+   * rather than by being special-cased in here (see the stopgap comment on
+   * the C++ World::isSolidIncludingSnappedLogs).
+   */
+  isSolid(vx: number, vy: number, vz: number): boolean {
+    return isSolid(this.materialAt(vx, vy, vz));
   }
 
   dispose(): void {

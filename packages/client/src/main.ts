@@ -8,10 +8,17 @@ import "./ui/ui.css";
 // reach for the bare "three" specifier in this package.
 import { Color, PerspectiveCamera, Scene, TextureLoader, type Texture } from "three/webgpu";
 
-import { MAX_FRAME_TIME, VOXEL_SIZE } from "@fgp/shared/sim/constants";
+import {
+  FIXED_TIMESTEP,
+  MAX_FRAME_TIME,
+  MAX_SUBSTEPS,
+  VOXEL_SIZE,
+} from "@fgp/shared/sim/constants";
+import { createPlayerInput, Player, PlayerMode } from "@fgp/shared/sim/player";
 import { DEFAULT_LOAD_RADIUS_CHUNKS, World } from "@fgp/shared/sim/world";
 
-import { FlyCamera } from "./input/flyCamera.ts";
+import { InputState } from "./input/inputState.ts";
+import { CameraPerspective, PlayerCamera } from "./render/playerCamera.ts";
 import { createRenderer, installResizeHandler, isRenderable } from "./render/renderer.ts";
 import { createVoxelMaterial } from "./render/voxelMaterial.ts";
 import { WorldRenderer } from "./render/worldRenderer.ts";
@@ -21,8 +28,13 @@ import { WorkerChunkSource } from "./workers/workerChunkSource.ts";
 /** Matches the seed the golden fixture was generated with. */
 const SEED = 1337;
 
-/** Metres above the ground to spawn the fly camera. */
-const SPAWN_CLEARANCE = 6;
+/** Metres above the ground to spawn, so the player falls onto terrain. */
+const SPAWN_CLEARANCE = 2;
+
+/** Matches the C++ FOV adjust step on the -/= keys. */
+const FOV_STEP = 2;
+const FOV_MIN = 50;
+const FOV_MAX = 120;
 
 function requireElement<T extends Element>(selector: string): T {
   const el = document.querySelector<T>(selector);
@@ -35,11 +47,9 @@ function loadTexture(url: string): Promise<Texture> {
 }
 
 /**
- * Load radius in chunks, overridable via `?radius=N`.
- *
- * Kept after M3 even though the initial load no longer blocks: it is the
- * fastest way to tell "slow because there is a lot of terrain" apart from
- * "slow for some other reason".
+ * Load radius in chunks, overridable via `?radius=N` -- the quickest way to
+ * tell "slow because there is a lot of terrain" apart from "slow for some
+ * other reason".
  */
 function loadRadiusFromUrl(): number {
   const raw = new URLSearchParams(window.location.search).get("radius");
@@ -60,7 +70,7 @@ async function start(): Promise<void> {
   const scene = new Scene();
   scene.background = new Color(0x87b8dc); // the C++ clear colour (0.53, 0.72, 0.86)
 
-  const camera = new PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
+  const camera = new PerspectiveCamera(90, window.innerWidth / window.innerHeight, 0.1, 100);
 
   // assets/ is served from the repo root via Vite's publicDir, so these paths
   // mirror the C++'s asset layout rather than being a second copy.
@@ -73,10 +83,13 @@ async function start(): Promise<void> {
   const worldRenderer = new WorldRenderer(scene, material);
   hud.set("WORKERS", String(source.workerCount));
 
-  camera.position.set(0, world.surfaceHeightVoxels(0, 0) * VOXEL_SIZE + SPAWN_CLEARANCE, 0);
+  const spawnY = world.surfaceHeightVoxels(0, 0) * VOXEL_SIZE + SPAWN_CLEARANCE;
+  const player = new Player(0, spawnY, 0);
+  const playerCamera = new PlayerCamera();
 
-  const flyCamera = new FlyCamera(camera, canvas);
-  flyCamera.attach();
+  const input = new InputState(canvas);
+  input.attach();
+  const playerInput = createPlayerInput();
 
   installResizeHandler(bundle, (w, h) => {
     camera.aspect = w / h;
@@ -86,11 +99,33 @@ async function start(): Promise<void> {
   // Nothing is awaited before the loop starts. The initial load is just the
   // first streaming update: chunks are submitted to the workers here and
   // arrive over the next second or so, nearest-first, while the frame loop
-  // keeps running. That replaces M2's multi-second synchronous freeze.
-  world.update(camera.position.x, camera.position.z, worldRenderer);
+  // keeps running.
+  world.update(player.x, player.z, worldRenderer);
 
   let lastTime = performance.now() / 1000;
   let worstDrainMs = 0;
+
+  /**
+   * Leftover simulation time, carried between frames. Physics runs at a
+   * fixed 120Hz regardless of display rate: at 10cm voxels, integrating a
+   * raw frame delta in one step tunnels the player straight through terrain.
+   */
+  let accumulator = 0;
+
+  // Previous and current simulated feet position, for render interpolation.
+  // Without this a 60Hz display shows whichever 120Hz substep happened to
+  // land last, which reads as a fine vertical shimmer while walking.
+  // Physics stays frozen until the chunk under the player exists. Without
+  // this the player free-falls through an empty world during the ~1s
+  // asynchronous initial load, drops past the kill plane, respawns, and
+  // falls again -- a loop that only ends when terrain happens to arrive.
+  let spawned = false;
+
+  const spawnSurface = (): number => world.surfaceHeightVoxels(0, 0);
+
+  let prevX = player.x;
+  let prevY = player.y;
+  let prevZ = player.z;
 
   void renderer.setAnimationLoop(() => {
     const now = performance.now() / 1000;
@@ -98,24 +133,77 @@ async function start(): Promise<void> {
     lastTime = now;
 
     stats.sample(rawDt);
-    const dt = Math.min(rawDt, MAX_FRAME_TIME);
 
     // A collapsed viewport has no valid swapchain to present into. Bail
     // before touching the renderer rather than letting it fail per frame.
     if (!isRenderable()) return;
 
-    flyCamera.update(dt);
+    // Look is applied once per frame, not per substep: mouse delta is a
+    // per-frame quantity and dividing it across substeps would make
+    // sensitivity depend on how many substeps the frame happened to run.
+    if (input.locked) {
+      player.look(input.consumeMouseX(), input.consumeMouseY());
+    }
 
-    world.update(camera.position.x, camera.position.z, worldRenderer);
+    if (input.wasPressed("KeyR")) player.toggleMode(world);
+    if (input.wasPressed("KeyV")) playerCamera.togglePerspective();
+    if (input.wasPressed("Minus")) {
+      playerCamera.fovDegrees = Math.max(FOV_MIN, playerCamera.fovDegrees - FOV_STEP);
+    }
+    if (input.wasPressed("Equal")) {
+      playerCamera.fovDegrees = Math.min(FOV_MAX, playerCamera.fovDegrees + FOV_STEP);
+    }
+
+    playerInput.moveX = (input.isDown("KeyD") ? 1 : 0) - (input.isDown("KeyA") ? 1 : 0);
+    playerInput.moveZ = (input.isDown("KeyW") ? 1 : 0) - (input.isDown("KeyS") ? 1 : 0);
+    // Edge-triggered, then latched for the whole frame: the jump has to
+    // survive to whichever substep runs it, but must not fire in more than
+    // one of them.
+    playerInput.jumpPressed = input.wasPressed("Space");
+
+    // Clamp BEFORE accumulating so a long stall -- alt-tab, a GC pause, a
+    // breakpoint -- cannot dump a huge backlog of substeps into the next
+    // frame.
+    accumulator += Math.min(rawDt, MAX_FRAME_TIME);
+
+    if (!spawned && world.hasChunkAt(player.x, player.y, player.z)) spawned = true;
+
+    let substeps = 0;
+    while (spawned && accumulator >= FIXED_TIMESTEP && substeps < MAX_SUBSTEPS) {
+      prevX = player.x;
+      prevY = player.y;
+      prevZ = player.z;
+      player.update(playerInput, FIXED_TIMESTEP, world, spawnSurface);
+      // Consumed: a single keypress is one impulse, not one per substep.
+      playerInput.jumpPressed = false;
+      accumulator -= FIXED_TIMESTEP;
+      substeps++;
+    }
+    if (!spawned) accumulator = 0;
+    if (substeps === MAX_SUBSTEPS) {
+      // Time is deliberately dropped rather than carried, so a slow frame
+      // cannot spiral into progressively slower ones.
+      accumulator = 0;
+    }
+
+    const alpha = accumulator / FIXED_TIMESTEP;
+    const renderX = prevX + (player.x - prevX) * alpha;
+    const renderY = prevY + (player.y - prevY) * alpha;
+    const renderZ = prevZ + (player.z - prevZ) * alpha;
+
+    world.update(player.x, player.z, worldRenderer);
     // Every frame, not only on boundary crossings -- otherwise finished
     // chunks sit in the queue until the player happens to move again.
     const drainMs = world.drain(worldRenderer);
     if (drainMs > worstDrainMs) worstDrainMs = drainMs;
 
-    hud.set(
-      "POS",
-      `${camera.position.x.toFixed(1)} ${camera.position.y.toFixed(1)} ${camera.position.z.toFixed(1)}`,
-    );
+    playerCamera.sync(camera, player, world, renderX, renderY, renderZ);
+
+    hud.set("POS", `${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}`);
+    hud.set("MODE", player.mode === PlayerMode.Walking ? "walking" : "ragball");
+    hud.set("GROUND", player.grounded ? "yes" : "no");
+    hud.set("VIEW", playerCamera.perspective === CameraPerspective.FirstPerson ? "1st" : "3rd");
+    hud.set("FOV", playerCamera.fovDegrees.toFixed(0));
     hud.set("CHUNKS", `${world.loadedCount} (r${radius}, ${worldRenderer.meshCount} drawn)`);
     hud.set("QUEUE", String(world.pendingCount));
     hud.set("UPLOAD", `${worstDrainMs.toFixed(1)}ms worst`);
@@ -123,12 +211,11 @@ async function start(): Promise<void> {
     hud.set("WORST", `${stats.worstMs.toFixed(1)}ms`);
     hud.set(
       "LOOK",
-      flyCamera.locked
-        ? "captured (Esc to release)"
-        : (flyCamera.lockError ?? "click to capture mouse"),
+      input.locked ? "captured (Esc to release)" : (input.lockError ?? "click to capture mouse"),
     );
 
     renderer.render(scene, camera);
+    input.endFrame();
   });
 
   // Vite replaces this module on edit without reloading the page, which
@@ -137,7 +224,7 @@ async function start(): Promise<void> {
   // worlds at once.
   import.meta.hot?.dispose(() => {
     void renderer.setAnimationLoop(null);
-    flyCamera.dispose();
+    input.dispose();
     worldRenderer.clear();
     world.dispose();
   });

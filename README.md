@@ -22,11 +22,11 @@ Then open http://localhost:5173. Append `?gl` to the URL to force the WebGL2
 backend instead of WebGPU — useful for telling "broken everywhere" apart from
 "broken on one backend".
 
-Controls are a free-flying debug camera until the player controller lands at
-M4: click to capture the mouse, WASD to fly, Space/C for up/down, Shift to
-boost. `?radius=N` overrides the chunk load radius — the initial load is
-synchronous until M3, so `?radius=2` is worth it while iterating on anything
-that isn't streaming itself.
+Controls: click to capture the mouse, WASD to walk, Space to jump, R to
+toggle Ragball, V for first/third person, -/= for FOV.
+
+`?radius=N` overrides the chunk load radius, which is the quickest way to tell "slow because there is a lot of terrain" apart from "slow for some
+other reason".
 
 ```sh
 npm run typecheck   # tsc --build across the workspace
@@ -89,7 +89,7 @@ Milestones, in order. Each one is runnable and visually verifiable:
 - [x] **M1** One chunk from the real generator, main thread + golden-data check
 - [x] **M2** Fly camera + synchronous chunk streaming
 - [x] **M3** Web Worker pool with transferable buffers
-- [ ] **M4** Player controller, collision, the fixed-timestep frame loop
+- [x] **M4** Player controller, collision, the fixed-timestep frame loop
 - [ ] **M5** Raycast (redesigned) + scoop
 - [ ] **M6** Trees + chup + the canopy-size fix
 - [ ] **M7** Jolt WASM + falling bodies
@@ -119,8 +119,10 @@ built on a hand-copied function can't catch a transcription error, which is
 the entire thing it exists to catch.
 
 Currently covered: 225 hash tuples, 84 surface-height samples including
-negative coordinates, and 8 chunks' voxel contents plus complete greedy-mesh
-vertex buffers. A collision trace joins them at M4.
+negative coordinates, 8 chunks' voxel contents plus complete greedy-mesh
+vertex buffers, and an 870-substep player trace (walking, jumping,
+diagonal step-ups, and a Ragball roll) recorded by compiling the real,
+unmodified Collision.cpp and Player.cpp against a stub World.
 
 Regenerating `golden.json` to make a failing test pass defeats the point —
 if a test fails, the TypeScript is wrong until proven otherwise.

@@ -22,6 +22,12 @@
 #include "../../src/voxel/TerrainGenerator.hpp"
 #include "../../src/voxel/Voxel.hpp"
 
+// Collision.cpp and Player.cpp are compiled against tools/golden/stub/World.hpp
+// rather than the real one -- see that header for why, and dump-golden.sh for
+// how. The sources themselves are unmodified.
+#include "World.hpp"
+#include "Player.hpp"
+
 namespace {
 #include "hash_extracted.inc"
 } // namespace
@@ -142,6 +148,116 @@ void dumpChunks(std::FILE* out, const fgp::TerrainGenerator& gen) {
 
 } // namespace
 
+
+// ---------------------------------------------------------------------------
+// Player + collision trace
+//
+// Collision.cpp is the most behaviourally fragile file in the project: a
+// dozen hand-tuned epsilons, an asymmetric floor/ceil bias, and a step-up
+// search whose exit conditions were arrived at empirically. A port of it
+// that is 99% right is indistinguishable from one that is 100% right until
+// someone walks into a specific ledge at a specific angle.
+//
+// So rather than testing the sweep functions in isolation, this drives the
+// real Player through a scripted input sequence -- walking into slopes,
+// jumping, toggling into Ragball and rolling -- and records the full state
+// every substep. Any divergence in epsilon handling, axis ordering, or
+// step-up logic shows up as a position that drifts apart from the
+// reference's within a few hundred substeps.
+
+namespace {
+
+struct ScriptSegment {
+    int substeps;
+    float moveX;
+    float moveZ;
+    bool jump;      // fired on the first substep of the segment only
+    bool toggle;    // mode toggle, applied before the segment runs
+    float lookYaw;  // mouse X offset applied before the segment runs
+};
+
+// Deliberately varied: straight walking into rising terrain, strafing,
+// diagonal approaches (where the step-up assist's "blocked axes only" rule
+// matters), a jump, and a long Ragball roll where sweepSphere's iterative
+// push-out and slide response take over.
+const ScriptSegment kScript[] = {
+    {60, 0.0f, 1.0f, false, false, 0.0f},     // walk forward onto terrain
+    {60, 0.0f, 1.0f, true, false, 0.0f},      // jump while walking
+    {90, 1.0f, 1.0f, false, false, 0.0f},     // diagonal: step-up assist
+    {60, 0.0f, 1.0f, false, false, 400.0f},   // turn 40 degrees, keep going
+    {90, -1.0f, 1.0f, false, false, 0.0f},    // opposite diagonal
+    {30, 0.0f, 0.0f, false, false, 0.0f},     // stand still, settle
+    {240, 0.0f, 1.0f, false, true, 0.0f},     // Ragball: roll under gravity
+    {120, 1.0f, 0.0f, false, false, 0.0f},    // steer the ball
+    {60, 0.0f, 0.0f, false, true, 0.0f},      // back to Walking (unstuck lift)
+    {60, 0.0f, 1.0f, false, false, 0.0f},
+};
+
+constexpr float kFixedTimestep = 1.0f / 120.0f;
+
+void dumpPlayerTrace(std::FILE* out) {
+    const fgp::World world(kSeed);
+
+    // Spawn directly above the generator's surface at the origin, matching
+    // what the client does.
+    const float spawnY = static_cast<float>(world.surfaceHeightVoxels(0, 0)) * fgp::kVoxelSize + 2.0f;
+    fgp::Player player(glm::vec3(0.0f, spawnY, 0.0f));
+
+    std::fprintf(out, ",\n  \"playerTrace\": {\n");
+    std::fprintf(out, "    \"spawnY\": ");
+    printFloat(out, spawnY);
+    std::fprintf(out, ",\n    \"fixedTimestep\": ");
+    printFloat(out, kFixedTimestep);
+    std::fprintf(out, ",\n    \"script\": [\n");
+
+    bool firstSeg = true;
+    for (const ScriptSegment& seg : kScript) {
+        if (!firstSeg) std::fprintf(out, ",\n");
+        firstSeg = false;
+        std::fprintf(out, "      {\"n\":%d,\"mx\":", seg.substeps);
+        printFloat(out, seg.moveX);
+        std::fprintf(out, ",\"mz\":");
+        printFloat(out, seg.moveZ);
+        std::fprintf(out, ",\"jump\":%s,\"toggle\":%s,\"yaw\":", seg.jump ? "true" : "false",
+                     seg.toggle ? "true" : "false");
+        printFloat(out, seg.lookYaw);
+        std::fprintf(out, "}");
+    }
+    std::fprintf(out, "\n    ],\n    \"steps\": [\n");
+
+    bool firstStep = true;
+    for (const ScriptSegment& seg : kScript) {
+        if (seg.toggle) {
+            player.toggleMode(world);
+        }
+        if (seg.lookYaw != 0.0f) {
+            player.look(seg.lookYaw, 0.0f);
+        }
+
+        for (int i = 0; i < seg.substeps; ++i) {
+            fgp::PlayerInput input;
+            input.moveAxis = glm::vec2(seg.moveX, seg.moveZ);
+            input.jumpPressed = seg.jump && i == 0;
+            player.update(input, kFixedTimestep, world);
+
+            if (!firstStep) std::fprintf(out, ",\n");
+            firstStep = false;
+
+            const glm::vec3 p = player.feetPosition();
+            std::fprintf(out, "      [");
+            printFloat(out, p.x);
+            std::fprintf(out, ",");
+            printFloat(out, p.y);
+            std::fprintf(out, ",");
+            printFloat(out, p.z);
+            std::fprintf(out, ",%d,%d]", player.grounded() ? 1 : 0,
+                         player.mode() == fgp::PlayerMode::Walking ? 0 : 1);
+        }
+    }
+    std::fprintf(out, "\n    ]\n  }\n");
+}
+
+} // namespace
 int main(int argc, char** argv) {
     const char* path = (argc > 1) ? argv[1] : "golden.json";
     std::FILE* out = std::fopen(path, "wb");
@@ -160,6 +276,7 @@ int main(int argc, char** argv) {
     dumpHashes(out);
     dumpSurfaceHeights(out, gen);
     dumpChunks(out, gen);
+    dumpPlayerTrace(out);
     std::fprintf(out, "}\n");
 
     std::fclose(out);

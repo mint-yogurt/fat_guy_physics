@@ -37,15 +37,44 @@ if ! grep -q '0x01000193u' "$extracted"; then
   exit 1
 fi
 
+# Collision.cpp and Player.cpp reach World through a three-method surface,
+# but the real World.hpp drags in OpenGL, Vegetation and a thread pool. Stage
+# the two UNMODIFIED sources in a scratch directory alongside a stub
+# World.hpp (tools/golden/stub/World.hpp), so the compiler's quoted-include
+# lookup -- which checks the including file's own directory first -- resolves
+# to the stub. The behaviour under test is the real code; only the terrain
+# storage around it is simplified.
+stage="$here/.stage"
+rm -rf "$stage"
+mkdir -p "$stage/voxel"
+cp "$repo/src/voxel/Collision.cpp" "$repo/src/voxel/Collision.hpp" "$stage/"
+cp "$repo/src/Player.cpp" "$repo/src/Player.hpp" "$stage/"
+cp "$here/stub/World.hpp" "$stage/"
+# Player.cpp includes its headers as "voxel/Collision.hpp" and friends, so
+# mirror that layout -- as one-line forwarding shims rather than copies,
+# because two copies of the same header at different paths each satisfy
+# their own #pragma once and redefine everything in them.
+for header in Collision.hpp World.hpp; do
+  printf '#pragma once\n#include "../%s"\n' "$header" > "$stage/voxel/$header"
+done
+# Everything else (Voxel.hpp, Chunk.hpp, TerrainGenerator.hpp) is NOT staged:
+# it resolves to the real headers via -I below, so the dumper and the staged
+# sources agree on one definition of each.
+
 cxx="${CXX:-g++}"
 out="$here/dump_golden.exe"
 
 echo "compiling with $cxx ..."
 "$cxx" -std=c++20 -O1 -o "$out" \
   "$here/dump_golden.cpp" \
+  "$stage/Collision.cpp" \
+  "$stage/Player.cpp" \
   "$repo/src/voxel/Voxel.cpp" \
   "$repo/src/voxel/ChunkMesher.cpp" \
   "$repo/src/voxel/TerrainGenerator.cpp" \
+  -I"$stage" \
+  -I"$repo/src" \
+  -I"$repo/src/voxel" \
   -I"$glm" \
   -I"$repo/third_party/fastnoiselite"
 

@@ -30,3 +30,4 @@ tools/golden/hash_extracted.inc
 # OS cruft
 .DS_Store
 Thumbs.db
+tools/golden/.stage/
