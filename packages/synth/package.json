@@ -1,0 +1,14 @@
+{
+  "name": "@fgp/synth",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Six-slider additive/FM/modal/Karplus-Strong synth. Dependency-free; the DSP core runs in a browser, worker or Node.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "dev": "vite --port 5174"
+  }
+}

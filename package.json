@@ -13,6 +13,7 @@
     "dev": "npm run dev --workspace @fgp/client",
     "build": "npm run build --workspace @fgp/client",
     "preview": "npm run preview --workspace @fgp/client",
+    "synth": "npm run dev --workspace @fgp/synth",
     "typecheck": "tsc --build --force && tsc -p packages/client/tsconfig.node.json",
     "test": "vitest run",
     "test:watch": "vitest"

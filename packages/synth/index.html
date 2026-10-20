@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>synth</title>
+    <link rel="stylesheet" href="/demo/synth.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>synth</h1>
+        <div class="code-wrap">
+          <input id="code" spellcheck="false" autocomplete="off" aria-label="patch code" />
+          <button id="copy">copy</button>
+        </div>
+      </header>
+      <section id="sliders"></section>
+      <canvas id="scope" width="900" height="150"></canvas>
+      <footer>
+        <label class="note">note <input id="note" type="range" min="24" max="96" /><output id="noteName"></output></label>
+        <label class="auto"><input id="auto" type="checkbox" checked /> play on release</label>
+        <button id="random">random</button>
+        <button id="reset">reset</button>
+        <button id="play" class="primary">play <kbd>space</kbd></button>
+      </footer>
+      <p class="hint">keys <kbd>a</kbd>–<kbd>;</kbd> play a chromatic octave from the note · paste any code into the box to load it</p>
+    </main>
+    <script type="module" src="/demo/main.ts"></script>
+  </body>
+</html>

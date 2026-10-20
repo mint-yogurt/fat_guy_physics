@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // DOM is only needed by player.ts and demo/. The DSP core (patch.ts,
+    // dsp.ts) touches no browser API, so it can move to a worker or Node
+    // unchanged -- keep it that way.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": [],
+    "rootDir": ".",
+    "outDir": "dist-types"
+  },
+  "include": ["src/**/*.ts", "demo/**/*.ts"]
+}

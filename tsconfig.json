@@ -1,4 +1,4 @@
 {
   "files": [],
-  "references": [{ "path": "packages/shared" }, { "path": "packages/client" }]
+  "references": [{ "path": "packages/shared" }, { "path": "packages/client" }, { "path": "packages/synth" }]
 }
