@@ -22,7 +22,7 @@ import {
   VOXEL_SIZE,
 } from "@fgp/shared/sim/constants";
 import { createPlayerInput, Player, PlayerMode } from "@fgp/shared/sim/player";
-import { HOTBAR_SLOTS, Inventory, ItemType } from "@fgp/shared/items/inventory";
+import { HOTBAR_SLOTS, Inventory, ItemType, itemTypeFromName } from "@fgp/shared/items/inventory";
 import { PickupField } from "@fgp/shared/items/pickupField";
 import { SceneSolidQuery } from "@fgp/shared/sim/sceneQuery";
 import {
@@ -39,6 +39,8 @@ import { LogSystem } from "./physics/logSystem.ts";
 import { PhysicsWorld } from "./physics/physicsWorld.ts";
 import { CameraPerspective, PlayerCamera } from "./render/playerCamera.ts";
 import { PickupRenderer } from "./render/pickupRenderer.ts";
+import { loadPropAssets } from "./render/propAssets.ts";
+import { PropRenderer } from "./render/propRenderer.ts";
 import { PlayerModel } from "./render/playerModel.ts";
 import { createRenderer, installResizeHandler, isRenderable } from "./render/renderer.ts";
 import { Snow } from "./render/snow.ts";
@@ -157,12 +159,14 @@ async function start(): Promise<void> {
   const leafIcon = await loadTexture("/icons/leaf.png");
   const stickIcon = await loadTexture("/icons/stick.png");
   const treeAssets = await loadTreeAssets();
+  const propAssets = await loadPropAssets();
 
   const radius = loadRadiusFromUrl();
   const source = new WorkerChunkSource(SEED);
   const world = new World(SEED, source, radius);
   const treeRenderer = new TreeRenderer(scene, treeAssets, cobble);
-  const worldRenderer = new WorldRenderer(scene, material, treeRenderer, bushTexture);
+  const propRenderer = new PropRenderer(scene, propAssets);
+  const worldRenderer = new WorldRenderer(scene, material, treeRenderer, propRenderer, bushTexture);
   hud.set("WORKERS", String(source.workerCount));
 
   const atmosphere = new Atmosphere(scene, voxelMaterial, hemisphere, sun, radius);
@@ -282,6 +286,8 @@ async function start(): Promise<void> {
   let anchorCenterZ = 0;
   /** -1 when the anchored dig is on terrain. */
   let anchorTreeId = -1;
+  /** A scoop on a prop does nothing: digging at its centre would hollow the ground beside it. */
+  let anchorOnProp = false;
   let anchorTreePart = TREE_PART_TRUNK;
 
   if (import.meta.env.DEV) {
@@ -295,6 +301,7 @@ async function start(): Promise<void> {
       playerCamera,
       playerModel,
       treeRenderer,
+      propRenderer,
       pickups,
       inventory,
       scene,
@@ -435,13 +442,14 @@ async function start(): Promise<void> {
             anchorCenterY = hit.centerY;
             anchorCenterZ = hit.centerZ;
             anchorTreeId = hit.kind === HitKind.Tree ? hit.treeId : -1;
+            anchorOnProp = hit.kind === HitKind.Prop;
             anchorTreePart = hit.treePart;
           } else {
             digAnchored = false;
           }
         }
 
-        if (digAnchored) {
+        if (digAnchored && !anchorOnProp) {
           if (anchorTreeId >= 0) {
             // Foliage only: a trunk is chup-only, as it was when leaves
             // were scoopable voxels and wood was not.
@@ -489,7 +497,17 @@ async function start(): Promise<void> {
     if (canChup) {
       chupCooldown -= rawDt;
       if (chupCooldown <= 0) {
-        if (hit.kind === HitKind.Tree) {
+        if (hit.kind === HitKind.Prop) {
+          // Resources come out of props the way sticks come off trees: a
+          // swing that lands has a chance of knocking one loose. What and
+          // how often is the generation sheet's call, not ours.
+          const prop = world.getProp(hit.propId);
+          const name = world.harvestProp(hit.propId, Math.random);
+          const type = name === undefined ? undefined : itemTypeFromName(name);
+          if (prop !== undefined && type !== undefined) {
+            dropItem(type, prop.x, hit.centerY, prop.z);
+          }
+        } else if (hit.kind === HitKind.Tree) {
           // The swing lands on the trunk at the height you are looking at,
           // whether the crosshair found trunk or canopy. A tree is mostly
           // canopy, so demanding a hit on the pole inside it reads as
@@ -539,6 +557,7 @@ async function start(): Promise<void> {
     hud.set("CHUNKS", `${world.loadedCount} (r${radius}, ${worldRenderer.meshCount} drawn)`);
     hud.set("ITEMS", String(pickups.items.length));
     hud.set("TREES", `${world.treeCount} (${String(logs?.count ?? 0)} logs)`);
+    hud.set("PROPS", String(world.propCount));
     hud.set("QUEUE", String(world.pendingCount));
     hud.set(
       "BIOME",
@@ -553,7 +572,9 @@ async function start(): Promise<void> {
               ? hit.treePart === TREE_PART_TRUNK
                 ? "trunk"
                 : `foliage ${String(hit.treePart)}`
-              : "terrain"
+              : hit.kind === HitKind.Prop
+                ? (world.getProp(hit.propId)?.kind ?? "prop")
+                : "terrain"
           }`
         : "--",
     );

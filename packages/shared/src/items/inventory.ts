@@ -17,6 +17,16 @@ export const ITEM_TYPE_COUNT = 3;
 
 export const ITEM_NAMES = ["stick", "leaf", "log"] as const;
 
+/**
+ * The item a generation-sheet name refers to, if there is one yet. The sheet
+ * is allowed to name items that do not exist (eggnog, zinc) so a row can be
+ * written ahead of the item; those resolve to nothing and are skipped.
+ */
+export function itemTypeFromName(name: string): ItemType | undefined {
+  const index = (ITEM_NAMES as readonly string[]).indexOf(name);
+  return index < 0 ? undefined : (index as ItemType);
+}
+
 export const HOTBAR_SLOTS = 8;
 export const BACKPACK_SLOTS = 16;
 export const TOTAL_SLOTS = HOTBAR_SLOTS + BACKPACK_SLOTS;

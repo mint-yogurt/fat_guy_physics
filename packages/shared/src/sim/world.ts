@@ -6,10 +6,14 @@ import { Mesher, type MeshData } from "../voxel/greedyMesher.ts";
 import { floorDiv, floorMod, isHandDiggable, isSolid, Material } from "../voxel/voxel.ts";
 import { gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
 import { createVoxelHit, raycastVoxel } from "../voxel/voxelRaycast.ts";
+import type { Biome } from "../voxel/biomeTint.ts";
 import type { BiomeWeights } from "../worldgen/biome.ts";
+import { DROP_CHANCE, OBJECT_SHEET } from "../worldgen/generationSheet.ts";
+import { PROP_METRICS, type PropKind } from "../worldgen/props.ts";
+import { placeVegetation, type Placement } from "../worldgen/spawns.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
-import { metricsFor, treeShape, TreeSpecies } from "../worldgen/trees.ts";
-import { placeVegetation, type TreePlacement } from "../worldgen/vegetation.ts";
+import { metricsFor, treeShape } from "../worldgen/trees.ts";
+import type { TreeSpecies } from "../worldgen/trees.ts";
 
 /**
  * Chunk streaming and voxel storage. Ports the data half of
@@ -31,9 +35,14 @@ import { placeVegetation, type TreePlacement } from "../worldgen/vegetation.ts";
  * true once caves or full 3D density generation exist (M13).
  */
 
-/** Matches the C++ kVerticalChunkMin/kVerticalChunkMax. */
+/**
+ * The C++ had 0..3 (12.8 m), enough for its +/-2.4 m bumps. Cliffs and
+ * tiered bluffs reach 6.4 m base + ~9 m, so one more layer: 0..4 is 16 m.
+ * The extra layer is mostly air and meshes to nothing, but it is a fifth of
+ * the chunks generated and tested for, which is why it is not simply 8.
+ */
 export const VERTICAL_CHUNK_MIN = 0;
-export const VERTICAL_CHUNK_MAX = 3;
+export const VERTICAL_CHUNK_MAX = 4;
 
 /**
  * Doubled from the C++'s 6 at M13. Six chunks is 19m, which is close enough
@@ -101,6 +110,12 @@ export interface ChunkSink {
    */
   onTreePlaced(tree: Tree): void;
   onTreeUnloaded(treeId: number): void;
+  /**
+   * A prop came into range: a snowman, a present, a tombstone, a grave. Like
+   * a tree it is an authored mesh shared by every prop of its kind.
+   */
+  onPropPlaced(prop: Prop): void;
+  onPropUnloaded(propId: number): void;
   /** One foliage cluster was knocked off. The tree keeps standing. */
   onTreeFoliageRemoved(tree: Tree, cluster: number): void;
   /**
@@ -140,6 +155,8 @@ export interface Tree {
   /** Placement hash. Stable across streaming, so edits can persist. */
   readonly id: number;
   readonly species: TreeSpecies;
+  /** The region that placed it: a Halloween broadleaf is drawn in autumn colours. */
+  readonly biome: Biome;
   /** Centre of the trunk's base. */
   readonly x: number;
   readonly y: number;
@@ -164,6 +181,33 @@ export interface Tree {
   chopHits: number;
 }
 
+/**
+ * A placed prop. Decoration, a container, or a source of resources, and not
+ * (yet) solid to the player -- only the aiming raycast sees it, through the
+ * cylinder `radius` x `height`.
+ */
+export interface Prop {
+  readonly id: number;
+  readonly kind: PropKind;
+  readonly biome: Biome;
+  /** Where its base sits on the ground. */
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly scale: number;
+  readonly yaw: number;
+  /** Lean about its own X and Z, radians; at most one is non-zero. */
+  readonly tiltX: number;
+  readonly tiltZ: number;
+  /** Graves: covered, or open. */
+  readonly topsoil: boolean;
+  /** Item names inside, for a container. */
+  readonly loot: readonly string[];
+  /** Aiming cylinder, metres. Zero height means it cannot be aimed at. */
+  readonly radius: number;
+  readonly height: number;
+}
+
 /** Swings to cut through a trunk, and how far a cut may wander. */
 const CHOPS_TO_FELL = 3;
 const CHOP_REANCHOR_METERS = 0.4;
@@ -175,6 +219,7 @@ export const HitKind = {
   None: 0,
   Terrain: 1,
   Tree: 2,
+  Prop: 3,
 } as const;
 export type HitKind = (typeof HitKind)[keyof typeof HitKind];
 
@@ -204,6 +249,8 @@ export interface SceneHit {
   kind: HitKind;
   /** Valid when kind is Tree. */
   treeId: number;
+  /** Valid when kind is Prop. */
+  propId: number;
   /**
    * Which part of that tree: TREE_PART_TRUNK, or a foliage cluster index.
    * The trunk is chopped and the clusters are harvested, so the two are
@@ -224,6 +271,7 @@ export function createSceneHit(): SceneHit {
   return {
     kind: HitKind.None,
     treeId: 0,
+    propId: 0,
     treePart: TREE_PART_TRUNK,
     voxelX: 0,
     voxelY: 0,
@@ -304,12 +352,22 @@ export class World {
    */
   private readonly severedTrees = new Map<number, number>();
   private readonly strippedFoliage = new Map<number, number>();
-  private readonly placementScratch: TreePlacement[] = [];
+  private readonly placementScratch: Placement[] = [];
+
+  private readonly props = new Map<number, Prop>();
+  /**
+   * Uses left on each prop's resources, by entry, for props that have been
+   * harvested at least once. Like severedTrees, never pruned: a few numbers
+   * per thing the player has actually touched.
+   */
+  private readonly propUses = new Map<number, number[]>();
 
   /** Trees the in-flight raycast might hit. Refilled per raycast. */
   private readonly rayTrees: Tree[] = [];
+  private readonly rayProps: Prop[] = [];
   /** What the in-flight raycast last found solid. Filled by treeSolidAt. */
   private rayHitTree: Tree | undefined;
+  private rayHitProp: Prop | undefined;
   private rayHitPart = TREE_PART_TRUNK;
   private readonly rayHit = createVoxelHit();
   /**
@@ -318,7 +376,9 @@ export class World {
    */
   private readonly sceneQuery = {
     isSolid: (vx: number, vy: number, vz: number): boolean =>
-      isSolid(this.materialAt(vx, vy, vz)) || this.treeSolidAt(vx, vy, vz),
+      isSolid(this.materialAt(vx, vy, vz)) ||
+      this.treeSolidAt(vx, vy, vz) ||
+      this.propSolidAt(vx, vy, vz),
   };
 
   private hasCenter = false;
@@ -394,6 +454,10 @@ export class World {
       const spawned = this.treesByChunk.get(key);
       if (spawned !== undefined) {
         for (const id of spawned) {
+          if (this.props.delete(id)) {
+            sink.onPropUnloaded(id);
+            continue;
+          }
           this.trees.delete(id);
           sink.onTreeUnloaded(id);
         }
@@ -619,6 +683,14 @@ export class World {
     return this.trees.size;
   }
 
+  getProp(propId: number): Prop | undefined {
+    return this.props.get(propId);
+  }
+
+  get propCount(): number {
+    return this.props.size;
+  }
+
   private spawnVegetation(key: ChunkKey, sink: ChunkSink): void {
     const placements = placeVegetation(
       this.generator,
@@ -636,7 +708,7 @@ export class World {
         this.treesByChunk.set(key, owned);
       }
 
-      if (placement.species === TreeSpecies.Bush) {
+      if (placement.type === "bush") {
         owned.push(placement.id);
         sink.onBushPlaced(
           placement.id,
@@ -645,6 +717,31 @@ export class World {
           (placement.rootVoxelZ + 0.5) * VOXEL_SIZE,
           placement.sizeMeters,
         );
+        continue;
+      }
+
+      if (placement.type === "prop") {
+        if (this.props.has(placement.id)) continue;
+        const metrics = PROP_METRICS[placement.kind];
+        const prop: Prop = {
+          id: placement.id,
+          kind: placement.kind,
+          biome: placement.biome,
+          x: placement.x,
+          y: placement.y,
+          z: placement.z,
+          scale: placement.scale,
+          yaw: placement.yaw,
+          tiltX: placement.tiltX,
+          tiltZ: placement.tiltZ,
+          topsoil: placement.topsoil,
+          loot: placement.loot,
+          radius: metrics.radius * placement.scale,
+          height: metrics.height * placement.scale,
+        };
+        this.props.set(prop.id, prop);
+        owned.push(prop.id);
+        sink.onPropPlaced(prop);
         continue;
       }
 
@@ -664,6 +761,7 @@ export class World {
       const tree: Tree = {
         id: placement.id,
         species: placement.species,
+        biome: placement.biome,
         // Roots sit on the voxel lattice, so the base is the centre of the
         // surface voxel's top face.
         x: (placement.rootVoxelX + 0.5) * VOXEL_SIZE,
@@ -688,6 +786,44 @@ export class World {
   }
 
   /**
+   * One swing at a prop's resources. Returns the item name it gave up, if it
+   * did: each resource entry in the sheet is rolled in turn at its drop
+   * rarity, and each can be given up only `uses` times in all.
+   *
+   * `random` is passed in so the sim stays deterministic: the client hands
+   * it Math.random, a server would hand it a seeded generator.
+   */
+  harvestProp(propId: number, random: () => number): string | undefined {
+    const prop = this.props.get(propId);
+    if (prop === undefined) return undefined;
+    const resources = OBJECT_SHEET[prop.kind].resources;
+    if (resources === undefined) return undefined;
+
+    let uses = this.propUses.get(propId);
+    if (uses === undefined) {
+      uses = resources.map((entry) => entry.uses);
+      this.propUses.set(propId, uses);
+    }
+    for (let i = 0; i < resources.length; i++) {
+      const entry = resources[i];
+      if (entry === undefined || (uses[i] ?? 0) <= 0) continue;
+      if (random() >= DROP_CHANCE[entry.rarity]) continue;
+      uses[i] = (uses[i] ?? 0) - 1;
+      return entry.item;
+    }
+    return undefined;
+  }
+
+  /** Whether anything is left to harvest from a prop, for the crosshair readout. */
+  propHasResources(propId: number): boolean {
+    const prop = this.props.get(propId);
+    const resources = prop === undefined ? undefined : OBJECT_SHEET[prop.kind].resources;
+    if (resources === undefined) return false;
+    const uses = this.propUses.get(propId);
+    return resources.some((entry, i) => (uses?.[i] ?? entry.uses) > 0);
+  }
+
+  /**
    * Cleared before each cast. A method rather than an assignment at the
    * call site so the compiler does not narrow the field to undefined for
    * the rest of the cast -- it cannot see that the DDA calls back into
@@ -695,6 +831,29 @@ export class World {
    */
   private clearRayHit(): void {
     this.rayHitTree = undefined;
+    this.rayHitProp = undefined;
+  }
+
+  /**
+   * Whether a prop's aiming cylinder covers a world voxel. Props are not
+   * solid to the player; this exists so the crosshair can find them.
+   */
+  private propSolidAt(vx: number, vy: number, vz: number): boolean {
+    if (this.rayProps.length === 0) return false;
+    const px = (vx + 0.5) * VOXEL_SIZE;
+    const py = (vy + 0.5) * VOXEL_SIZE;
+    const pz = (vz + 0.5) * VOXEL_SIZE;
+    for (const prop of this.rayProps) {
+      const dy = py - prop.y;
+      if (dy < 0 || dy > prop.height) continue;
+      const dx = px - prop.x;
+      const dz = pz - prop.z;
+      if (dx * dx + dz * dz <= prop.radius * prop.radius) {
+        this.rayHitProp = prop;
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -779,6 +938,15 @@ export class World {
       const oz = tree.z - originZ;
       if (ox * ox + oz * oz <= reachSq) this.rayTrees.push(tree);
     }
+    // Props are metre-scale and a cylinder is their whole shape, so the
+    // same slack covers them. Graves are not aimable at all (height 0).
+    this.rayProps.length = 0;
+    for (const prop of this.props.values()) {
+      if (prop.height <= 0) continue;
+      const ox = prop.x - originX;
+      const oz = prop.z - originZ;
+      if (ox * ox + oz * oz <= reachSq) this.rayProps.push(prop);
+    }
     this.clearRayHit();
 
     const hit = raycastVoxel(
@@ -798,11 +966,14 @@ export class World {
       return out;
     }
 
-    // The DDA stops on the voxel treeSolidAt last answered for, so the
-    // tree and part it recorded are that voxel's -- no second lookup.
+    // The DDA stops on the voxel the solid query last answered for, so the
+    // tree or prop and part it recorded are that voxel's -- no second lookup.
     const tree = this.rayHitTree;
-    out.kind = tree === undefined ? HitKind.Terrain : HitKind.Tree;
+    const prop = this.rayHitProp;
+    out.kind =
+      tree !== undefined ? HitKind.Tree : prop !== undefined ? HitKind.Prop : HitKind.Terrain;
     out.treeId = tree?.id ?? 0;
+    out.propId = prop?.id ?? 0;
     out.treePart = tree === undefined ? TREE_PART_TRUNK : this.rayHitPart;
     out.voxelX = hit.x;
     out.voxelY = hit.y;

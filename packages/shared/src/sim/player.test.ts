@@ -44,7 +44,10 @@ class TraceQuery implements SolidQuery {
   private readonly chunks = new Map<string, VoxelGrid>();
 
   constructor(seed: number) {
-    this.generator = new TerrainGenerator(seed);
+    // The reference world has no biomes, and with them on the heights are
+    // no longer the C++'s -- so this must be the biome-free generator, as
+    // terrain.test.ts uses.
+    this.generator = new TerrainGenerator(seed, false);
   }
 
   surfaceHeightVoxels(x: number, z: number): number {

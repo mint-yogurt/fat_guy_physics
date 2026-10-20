@@ -10,7 +10,10 @@ import {
 } from "three/webgpu";
 
 import type { Tree } from "@fgp/shared/sim/world";
+import { Biome } from "@fgp/shared/voxel/biomeTint";
 import { Material, MATERIAL_COLORS } from "@fgp/shared/voxel/voxel";
+import { AUTUMN_FOLIAGE_COLOR } from "@fgp/shared/worldgen/generationSheet";
+import { TreeSpecies } from "@fgp/shared/worldgen/trees";
 
 import { sliceAtY } from "./sliceGeometry.ts";
 import { horizontalRadius, type TreeAssets } from "./treeAssets.ts";
@@ -48,6 +51,8 @@ interface Instance {
   readonly group: Group;
   readonly trunk: Mesh;
   readonly foliage: Map<number, Mesh>;
+  /** Green, or autumn for the living tree among the dead ones. */
+  readonly foliageMaterial: MeshLambertMaterial;
   /** Set once a cut has given this tree its own trunk geometry. */
   ownedTrunk: BufferGeometry | undefined;
 }
@@ -64,6 +69,7 @@ export class TreeRenderer {
   private readonly instances = new Map<number, Instance>();
   private readonly trunkMaterial: MeshLambertMaterial;
   private readonly foliageMaterial: MeshLambertMaterial;
+  private readonly autumnMaterial: MeshLambertMaterial;
 
   /**
    * Where cut pieces go. Set by main once the physics layer has finished
@@ -86,6 +92,9 @@ export class TreeRenderer {
       side: DoubleSide,
     });
     this.foliageMaterial = new MeshLambertMaterial({ map, color: tint(Material.Leaf) });
+    // The same leaves, recoloured: the texture is a placeholder, so the
+    // autumn look is the tint alone.
+    this.autumnMaterial = new MeshLambertMaterial({ map, color: AUTUMN_FOLIAGE_COLOR });
   }
 
   get count(): number {
@@ -105,13 +114,23 @@ export class TreeRenderer {
     const trunk = new Mesh(asset.trunk, this.trunkMaterial);
     group.add(trunk);
 
-    const instance: Instance = { group, trunk, foliage: new Map(), ownedTrunk: undefined };
+    const foliageMaterial =
+      tree.biome === Biome.Halloween && tree.species === TreeSpecies.Broadleaf
+        ? this.autumnMaterial
+        : this.foliageMaterial;
+    const instance: Instance = {
+      group,
+      trunk,
+      foliage: new Map(),
+      foliageMaterial,
+      ownedTrunk: undefined,
+    };
 
     for (let i = 0; i < asset.foliage.length; i++) {
       if ((tree.foliageMask & (1 << i)) === 0) continue;
       const geometry = asset.foliage[i];
       if (geometry === undefined) continue;
-      const mesh = new Mesh(geometry, this.foliageMaterial);
+      const mesh = new Mesh(geometry, foliageMaterial);
       group.add(mesh);
       instance.foliage.set(i, mesh);
     }
@@ -212,7 +231,7 @@ export class TreeRenderer {
       instance.group.remove(mesh);
       const geometry = asset?.foliage[cluster];
       if (geometry === undefined) continue;
-      inner.add(new Mesh(geometry, this.foliageMaterial));
+      inner.add(new Mesh(geometry, instance.foliageMaterial));
       hasGeometry = true;
     }
 
@@ -249,5 +268,6 @@ export class TreeRenderer {
     this.instances.clear();
     this.trunkMaterial.dispose();
     this.foliageMaterial.dispose();
+    this.autumnMaterial.dispose();
   }
 }

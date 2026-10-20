@@ -9,16 +9,18 @@ import {
 
 import type { ChunkKey } from "@fgp/shared/sim/chunkKey";
 import type { ChunkResult } from "@fgp/shared/sim/chunkSource";
-import { CHUNK_METERS, type ChunkSink, type Tree } from "@fgp/shared/sim/world";
+import { CHUNK_METERS, type ChunkSink, type Prop, type Tree } from "@fgp/shared/sim/world";
 import { FLOATS_PER_VERTEX } from "@fgp/shared/voxel/vertexLayout";
 
 import { applyMeshData, createChunkGeometry, disposeChunkGeometry } from "./chunkGeometry.ts";
+import type { PropRenderer } from "./propRenderer.ts";
 import type { TreeRenderer } from "./treeRenderer.ts";
 
 /**
  * The client's half of streaming: turns World's chunk lifecycle events into
- * scene objects. Trees are forwarded to the TreeRenderer, which owns the
- * authored meshes; what is left here is chunk geometry and bush sprites. Replaces the GL-owning parts of src/voxel/World.cpp
+ * scene objects. Trees and props are forwarded to their own renderers, which
+ * own the authored meshes; what is left here is chunk geometry and bush
+ * sprites. Replaces the GL-owning parts of src/voxel/World.cpp
  * (ChunkMesh construction, World::draw).
  *
  * There is no per-frame work here at all. three.js walks the scene graph and
@@ -37,6 +39,8 @@ export class WorldRenderer implements ChunkSink {
     private readonly material: Material,
     /** Trees are meshes rather than chunk geometry, and own their own half. */
     private readonly trees: TreeRenderer,
+    /** So are props, and they likewise draw themselves. */
+    private readonly props: PropRenderer,
     private readonly bushTexture?: Texture,
   ) {}
 
@@ -120,6 +124,14 @@ export class WorldRenderer implements ChunkSink {
     this.trees.onTreeFoliageRemoved(tree, cluster);
   }
 
+  onPropPlaced(prop: Prop): void {
+    this.props.onPropPlaced(prop);
+  }
+
+  onPropUnloaded(propId: number): void {
+    this.props.onPropUnloaded(propId);
+  }
+
   onTreeCut(
     tree: Tree,
     cutHeightMeters: number,
@@ -175,6 +187,7 @@ export class WorldRenderer implements ChunkSink {
     }
     this.meshes.clear();
     this.trees.clear();
+    this.props.clear();
     for (const sprite of this.bushes.values()) this.scene.remove(sprite);
     this.bushes.clear();
     this.bushMaterial?.dispose();
