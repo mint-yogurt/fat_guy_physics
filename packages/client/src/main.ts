@@ -35,6 +35,7 @@ import {
 
 import { Atmosphere } from "./render/atmosphere.ts";
 import { InputState } from "./input/inputState.ts";
+import { Leaves } from "./render/leaves.ts";
 import { LogSystem } from "./physics/logSystem.ts";
 import { PhysicsWorld } from "./physics/physicsWorld.ts";
 import { CameraPerspective, PlayerCamera } from "./render/playerCamera.ts";
@@ -42,6 +43,7 @@ import { PickupRenderer } from "./render/pickupRenderer.ts";
 import { loadPropAssets } from "./render/propAssets.ts";
 import { PropRenderer } from "./render/propRenderer.ts";
 import { PlayerModel } from "./render/playerModel.ts";
+import { ArmViewmodel } from "./render/armViewmodel.ts";
 import { createRenderer, installResizeHandler, isRenderable } from "./render/renderer.ts";
 import { Snow } from "./render/snow.ts";
 import { loadTreeAssets } from "./render/treeAssets.ts";
@@ -171,6 +173,14 @@ async function start(): Promise<void> {
 
   const atmosphere = new Atmosphere(scene, voxelMaterial, hemisphere, sun, radius);
   const snow = new Snow(scene);
+  const leafSheet = await loadTexture("/textures/falling_leaf_1_32x32.png");
+  const leaves = new Leaves(
+    scene,
+    leafSheet,
+    (x, z) =>
+      (world.surfaceHeightVoxels(Math.floor(x / VOXEL_SIZE), Math.floor(z / VOXEL_SIZE)) + 1) *
+      VOXEL_SIZE,
+  );
 
   // Everything that collides goes through this rather than the World
   // directly: terrain plus whatever settled rigid bodies the player is
@@ -181,6 +191,7 @@ async function start(): Promise<void> {
   const player = new Player(0, spawnY, 0);
   const playerCamera = new PlayerCamera();
   const playerModel = await PlayerModel.load(scene, appearance);
+  const arm = await ArmViewmodel.load(appearance.skin);
   hud.set("NAME", appearance.name);
 
   // Jolt's WASM is fetched and compiled asynchronously. The game does not
@@ -540,6 +551,19 @@ async function start(): Promise<void> {
     playerModel.update(player, rawDt, renderX, renderY, renderZ);
     // Hidden in first person: inside the head is all you would see.
     playerModel.visible = playerCamera.perspective !== CameraPerspective.FirstPerson;
+    // The arm is the first-person stand-in for it: only while walking, since
+    // a ragball has no hand to show.
+    arm.visible =
+      playerCamera.perspective === CameraPerspective.FirstPerson &&
+      player.mode === PlayerMode.Walking;
+    arm.update(rawDt, {
+      scooping: canDig,
+      chopping: canChup,
+      scoopPeriod: DIG_TICK_SECONDS,
+      chopPeriod: CHUP_TICK_SECONDS * 2,
+      walk: Math.min(1, Math.hypot(player.vx, player.vz) / player.walkSpeed),
+      grounded: player.grounded,
+    });
 
     playerCamera.sync(camera, player, sceneQuery, renderX, renderY, renderZ);
 
@@ -548,6 +572,7 @@ async function start(): Promise<void> {
     world.biomeAtMeters(player.x, player.z, atmosphere.weightsBuffer);
     atmosphere.update(atmosphere.weightsBuffer, now);
     snow.update(camera, now, atmosphere.snowIntensity, atmosphere.blizzard);
+    leaves.update(camera, now, rawDt, atmosphere.weightsBuffer.halloween);
 
     hud.set("POS", `${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}`);
     hud.set("MODE", player.mode === PlayerMode.Walking ? "walking" : "ragball");
@@ -587,6 +612,7 @@ async function start(): Promise<void> {
     crosshair.hidden = !input.locked;
 
     renderer.render(scene, camera);
+    arm.render(renderer, camera);
     input.endFrame();
   });
 
@@ -598,6 +624,7 @@ async function start(): Promise<void> {
     void renderer.setAnimationLoop(null);
     input.dispose();
     playerModel.dispose();
+    arm.dispose();
     pickupRenderer.clear();
     logs?.clear();
     treeRenderer.clear();

@@ -6,7 +6,7 @@ import { Biome } from "../voxel/biomeTint.ts";
 import { Material, floorDiv } from "../voxel/voxel.ts";
 import { createChunkGrid } from "../voxel/voxelGrid.ts";
 import { BIOME_SHEET, GRAVE_SHEET, SPAWN_CHANCE } from "./generationSheet.ts";
-import { GRAVE_BOX } from "./props.ts";
+import { GRAVE_BOX, PROP_METRICS } from "./props.ts";
 import { placeCell, type Placement, type PropPlacement } from "./spawns.ts";
 import { TerrainGenerator } from "./terrainGenerator.ts";
 
@@ -92,13 +92,30 @@ describe("placement", () => {
     }
     for (const biome of [Biome.Christmas, Biome.Halloween]) {
       for (const entry of BIOME_SHEET[biome].spawns) {
-        if (entry.kind === "bush" || !entry.kind.match(/snowman|present|tombstone|grave/)) continue;
+        if (entry.kind === "bush" || !entry.kind.match(/snowman|present|tombstone|grave|leafpile/)) continue;
         expect(seen.get(entry.kind)?.has(biome), `${entry.kind} in ${BIOME_SHEET[biome].label}`).toBe(true);
       }
     }
     // And nothing the sheet does not list for the region.
     expect(seen.get("snowman_small")?.has(Biome.Halloween) ?? false).toBe(false);
     expect(seen.get("grave")?.has(Biome.Christmas) ?? false).toBe(false);
+  });
+
+  it("lays leaf piles flat, within 10% of authored size, and leaves them walk-through", () => {
+    const piles = props.filter((p) => p.kind === "leafpile");
+    expect(piles.length).toBeGreaterThan(50);
+    expect(piles.every((p) => p.biome === Biome.Halloween)).toBe(true);
+    const scales = piles.map((p) => p.scale);
+    expect(Math.min(...scales)).toBeGreaterThanOrEqual(PROP_METRICS.leafpile.scale * 0.9);
+    expect(Math.max(...scales)).toBeLessThanOrEqual(PROP_METRICS.leafpile.scale * 1.1);
+    // Spread across the range, not pinned to one end.
+    expect(Math.max(...scales) - Math.min(...scales)).toBeGreaterThan(0.15);
+    for (const p of piles) {
+      expect(p.tiltX).toBe(0);
+      expect(p.tiltZ).toBe(0);
+    }
+    // Zero height is how the sim keeps a prop out of the crosshair's way.
+    expect(PROP_METRICS.leafpile.height).toBe(0);
   });
 
   it("dresses graves as the sheet says", () => {

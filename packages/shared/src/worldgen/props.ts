@@ -23,6 +23,7 @@ export const PROP_KINDS: readonly PropKind[] = [
   "tombstone_1",
   "tombstone_2",
   "grave",
+  "leafpile",
 ];
 
 export function isPropKind(kind: string): kind is PropKind {
@@ -47,7 +48,16 @@ export interface PropMetrics {
    * (the grave).
    */
   readonly anchor: "bottom" | "origin";
-  /** Aiming cylinder, authored units; zero height means not aimable. */
+  /**
+   * Slide the mesh sideways so the middle of its footprint is on the origin,
+   * for a file whose origin is off to one side (the leaf pile).
+   */
+  readonly centre?: boolean;
+  /**
+   * Aiming cylinder, authored units; zero height means not aimable. The radius
+   * also sizes the footprint checked for level ground, so a flat prop sets one
+   * with a height of zero.
+   */
   readonly radius: number;
   readonly height: number;
 }
@@ -114,6 +124,19 @@ export const PROP_METRICS: Readonly<Record<PropKind, PropMetrics>> = {
     sizeJitter: 0.05,
     anchor: "origin",
     radius: 0,
+    height: 0,
+  },
+  // Read off leafpile.glb: a Z-up mound 4.0 x 3.7 wide and 0.78 high, with
+  // its origin 0.73 left of centre. Left at authored size on purpose; it is
+  // not aimable and not solid.
+  leafpile: {
+    asset: "/meshes/leafpile.glb",
+    up: "z",
+    scale: 1,
+    sizeJitter: 0.1,
+    anchor: "bottom",
+    centre: true,
+    radius: 2,
     height: 0,
   },
 };

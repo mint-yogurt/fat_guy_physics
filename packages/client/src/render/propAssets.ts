@@ -40,6 +40,8 @@ interface Look {
   readonly map?: string;
   /** Multiplied into the map; the whole look when there is no map. */
   readonly color: number;
+  /** Keep the texture the GLB itself carries, filtered as authored. */
+  readonly embedded?: boolean;
 }
 
 /** By glTF material name. */
@@ -54,6 +56,9 @@ const LOOKS: Readonly<Record<string, Look>> = {
   // Both present files misspell this ("wrappinpape"); which paper it is
   // comes from the file, below.
   wrappinpape: { color: 0xffffff },
+  // leafpile.glb embeds leaves1.jpg, a painted photo-style texture that
+  // would only smear under the nearest filtering the pixel-art maps get.
+  leafpile: { color: 0xffffff, embedded: true },
 };
 
 /** By node name, overriding the material's: the grave's topsoil shares its box's material. */
@@ -105,12 +110,16 @@ async function loadTemplate(
     if (look === undefined) console.warn(`${metrics.asset}: no look for material "${materialName}"`);
 
     const file = materialName === "wrappinpape" ? PAPER[kind] : look?.map;
-    const key = `${file ?? ""}|${(look?.color ?? 0xffffff).toString(16)}`;
+    const embedded = look?.embedded === true ? ((source as { map?: Texture | null }).map ?? null) : null;
+    if (look?.embedded === true && embedded === null) {
+      console.warn(`${metrics.asset}: material "${materialName}" has no embedded texture`);
+    }
+    const key = `${embedded === null ? (file ?? "") : `embedded:${kind}`}|${(look?.color ?? 0xffffff).toString(16)}`;
     let material = materials.get(key);
     if (material === undefined) {
       material = new MeshLambertMaterial({
         color: new Color(look?.color ?? 0xffffff),
-        map: file === undefined ? null : await loadMap(file, textures),
+        map: embedded ?? (file === undefined ? null : await loadMap(file, textures)),
         // Some of these files come out of Blender inside out, and a doubled
         // face costs nothing on a mesh this small.
         side: DoubleSide,
@@ -126,8 +135,13 @@ async function loadTemplate(
   upright.add(gltf.scene);
   upright.updateMatrixWorld(true);
 
+  const bounds = new Box3().setFromObject(upright);
+  if (metrics.centre === true) {
+    gltf.scene.position.x = -(bounds.min.x + bounds.max.x) / 2;
+    gltf.scene.position.z = -(bounds.min.z + bounds.max.z) / 2;
+  }
   if (metrics.anchor === "bottom") {
-    gltf.scene.position.y = -new Box3().setFromObject(upright).min.y;
+    gltf.scene.position.y = -bounds.min.y;
   }
   return upright;
 }

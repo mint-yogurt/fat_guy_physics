@@ -60,7 +60,8 @@ export type PropKindName =
   | "present_big"
   | "tombstone_1"
   | "tombstone_2"
-  | "grave";
+  | "grave"
+  | "leafpile";
 export type SpawnKind = TreeKind | "bush" | PropKindName;
 
 export interface SpawnEntry {
@@ -205,6 +206,8 @@ export const BIOME_SHEET: Readonly<Record<Biome, BiomeSection>> = {
       { kind: "tombstone_1", rarity: "common" },
       { kind: "tombstone_2", rarity: "uncommon" },
       { kind: "grave", rarity: "common" },
+      // Scatter decor: lies flat, walk-through, nothing to get from it.
+      { kind: "leafpile", rarity: "common" },
     ],
     containerLoot: [],
   },
@@ -237,6 +240,9 @@ export const OBJECT_SHEET: Readonly<Record<PropKindName, ObjectSection>> = {
   tombstone_1: { maxSlope: 8 },
   tombstone_2: { maxSlope: 8 },
   grave: { container: true, loot: [], maxSlope: 3 },
+  // Four metres across and laid flat, so it needs level ground or an edge
+  // hangs in the air.
+  leafpile: { maxSlope: 3 },
 };
 
 /**

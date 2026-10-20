@@ -47,7 +47,8 @@ Done: chunked terrain streamed through a worker pool, player controller and
 collision, Jolt rigid bodies, trees you can fell, items and hotbar, player
 rig and character create, biome field with ground colour, sky, light and
 snow, per-region terrain height (rolling hills, cliffs, tiered bluffs), and
-scattered props: snowmen, presents, tombstones and graves.
+scattered props: snowmen, presents, tombstones and graves, and a
+first-person arm that scoops and chops.
 
 Next: pre-made generative structures (flat ground, with resources clustered
 round them), the grave-topsoil tool, post-processing, multiplayer.
@@ -97,6 +98,10 @@ under topsoil. Removing the topsoil needs a tool the player does not have yet.
   The pit is cut when the topsoil comes off, which does not exist yet.
 - Prop sizes and which way a mesh faces are first guesses (see the `scale`
   and `up` fields in `props.ts`).
+- The first-person arm (`render/armViewmodel.ts`) is a single right arm with
+  fixed lighting, not tied to the biome. Which face of the palm is the inside is
+  unrecorded in the mesh: if the fingers curl backwards on the scoop, flip
+  `PALM_SIGN`.
 - The load cap is now five vertical chunks, for the cliffs and bluffs.
 
 - Terrain voxels are not checked for support, so cut-away ground can float.
