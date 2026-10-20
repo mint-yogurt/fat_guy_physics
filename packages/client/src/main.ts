@@ -22,21 +22,30 @@ import {
   VOXEL_SIZE,
 } from "@fgp/shared/sim/constants";
 import { createPlayerInput, Player, PlayerMode } from "@fgp/shared/sim/player";
-import { HOTBAR_SLOTS, Inventory, ItemType, itemTypeFromName } from "@fgp/shared/items/inventory";
-import { PickupField } from "@fgp/shared/items/pickupField";
-import { SceneSolidQuery } from "@fgp/shared/sim/sceneQuery";
+import {
+  HOTBAR_SLOTS,
+  Inventory,
+  ITEM_NAMES,
+  ItemType,
+  itemTypeFromName,
+} from "@fgp/shared/items/inventory";
+import { PickupField, type Pickup } from "@fgp/shared/items/pickupField";
+import { SceneSolidQuery, type OrientedBody } from "@fgp/shared/sim/sceneQuery";
 import {
   createSceneHit,
   DEFAULT_LOAD_RADIUS_CHUNKS,
   HitKind,
   TREE_PART_TRUNK,
   World,
+  type Tree,
 } from "@fgp/shared/sim/world";
 
 import { Atmosphere } from "./render/atmosphere.ts";
 import { InputState } from "./input/inputState.ts";
 import { Leaves } from "./render/leaves.ts";
-import { LogSystem } from "./physics/logSystem.ts";
+import { createPieceHit, LogSystem } from "./physics/logSystem.ts";
+import { ThrownSticks } from "./physics/thrownSticks.ts";
+import { loadItemAssets } from "./render/itemAssets.ts";
 import { PhysicsWorld } from "./physics/physicsWorld.ts";
 import { CameraPerspective, PlayerCamera } from "./render/playerCamera.ts";
 import { PickupRenderer } from "./render/pickupRenderer.ts";
@@ -75,11 +84,25 @@ const DIG_RADIUS_METERS = 0.35;
 const DIG_REANCHOR_POSITION = 0.05;
 const DIG_REANCHOR_DIRECTION = 0.995;
 
-/** Chance a clearing tick drops something. Rolled once per tick, as in the C++. */
-const LEAF_DROP_CHANCE = 0.35;
-const STICK_DROP_CHANCE = 0.4;
-
 const CHUP_TICK_SECONDS = 0.25;
+
+/**
+ * Sticks splashed out of a trunk by each chup that lands on it: one, and a
+ * chance of a second, flung out towards the swinger's side of the tree.
+ */
+const STICK_SPLASH_EXTRA_CHANCE = 0.3;
+const STICK_SPLASH_SPREAD = 1.2;
+
+/** Spear throw: hold to charge for up to this long; speed runs min..max with the charge. */
+const THROW_CHARGE_SECONDS = 1.2;
+const THROW_MIN_SPEED = 9;
+const THROW_MAX_SPEED = 24;
+
+/** Seconds between pickups while E is held, so a leaf pile can be hoovered up. */
+const PICKUP_REPEAT_SECONDS = 0.12;
+
+/** Trees within this of the player are solid to walk into. */
+const TRUNK_COLLIDE_RADIUS = 3;
 
 /**
  * Leaves a harvested canopy bursts into, and how far they scatter. A
@@ -159,7 +182,7 @@ async function start(): Promise<void> {
   const material = voxelMaterial.material;
   const bushTexture = await loadTexture("/billboard/bush.png");
   const leafIcon = await loadTexture("/icons/leaf.png");
-  const stickIcon = await loadTexture("/icons/stick.png");
+  const itemAssets = await loadItemAssets();
   const treeAssets = await loadTreeAssets();
   const propAssets = await loadPropAssets();
 
@@ -191,8 +214,52 @@ async function start(): Promise<void> {
   const player = new Player(0, spawnY, 0);
   const playerCamera = new PlayerCamera();
   const playerModel = await PlayerModel.load(scene, appearance);
-  const arm = await ArmViewmodel.load(appearance.skin);
+  const arm = await ArmViewmodel.load(appearance.skin, itemAssets);
   hud.set("NAME", appearance.name);
+
+  const inventory = new Inventory();
+  const hotbar = new Hotbar(requireElement<HTMLDivElement>("#hotbar"));
+  const pickups = new PickupField();
+  const pickupRenderer = new PickupRenderer(scene, itemAssets, { [ItemType.Leaf]: leafIcon });
+  const thrown = new ThrownSticks(scene, itemAssets, world, pickups);
+
+  const groundAt = (x: number, z: number): number =>
+    world.surfaceHeightVoxels(Math.floor(x / VOXEL_SIZE), Math.floor(z / VOXEL_SIZE)) * VOXEL_SIZE;
+
+  /** Drops an item at a point, optionally thrown out, to land on the terrain. */
+  const dropItem = (
+    type: ItemType,
+    x: number,
+    y: number,
+    z: number,
+    vx = 0,
+    vy = 0,
+    vz = 0,
+  ): void => {
+    pickups.spawn(type, x, y, z, groundAt(x, z), performance.now() / 1000, vx, vy, vz);
+  };
+
+  /**
+   * Sticks flung out of a trunk by a chup landing at (x, y, z), towards the
+   * side the swing came from.
+   */
+  const splashSticks = (x: number, y: number, z: number): void => {
+    const count = 1 + (Math.random() < STICK_SPLASH_EXTRA_CHANCE ? 1 : 0);
+    const base = Math.atan2(player.z - z, player.x - x);
+    for (let i = 0; i < count; i++) {
+      const angle = base + (Math.random() - 0.5) * 2 * STICK_SPLASH_SPREAD;
+      const speed = 1.5 + Math.random() * 1.5;
+      dropItem(
+        ItemType.Stick,
+        x,
+        y,
+        z,
+        Math.cos(angle) * speed,
+        2.5 + Math.random(),
+        Math.sin(angle) * speed,
+      );
+    }
+  };
 
   // Jolt's WASM is fetched and compiled asynchronously. The game does not
   // wait for it: terrain, movement and digging have nothing to do with
@@ -204,39 +271,23 @@ async function start(): Promise<void> {
   void PhysicsWorld.create()
     .then((created) => {
       physics = created;
-      logs = new LogSystem(created, world, sceneQuery, scene);
+      logs = new LogSystem(created, world, sceneQuery, scene, dropItem);
       treeRenderer.onFelled = (piece) => {
-        logs?.spawn(
-          piece.object,
-          piece.owned,
-          piece.x,
-          piece.y,
-          piece.z,
-          piece.radius,
-          piece.halfHeight,
-        );
+        // Falls away from whoever cut it: spinning about the horizontal
+        // axis at right angles to the line from the player to the tree.
+        let awayX = piece.x - player.x;
+        let awayZ = piece.z - player.z;
+        if (Math.hypot(awayX, awayZ) < 1e-3) awayX = 1;
+        const length = Math.hypot(awayX, awayZ);
+        awayX /= length;
+        awayZ /= length;
+        logs?.spawnFelled(piece, awayZ, -awayX);
       };
       hud.set("PHYSICS", "jolt");
     })
     .catch((err: unknown) => {
       hud.set("PHYSICS", `unavailable: ${String(err)}`);
     });
-
-  const inventory = new Inventory();
-  const hotbar = new Hotbar(requireElement<HTMLDivElement>("#hotbar"));
-  const pickups = new PickupField();
-  const pickupRenderer = new PickupRenderer(scene, {
-    [ItemType.Leaf]: leafIcon,
-    [ItemType.Stick]: stickIcon,
-  });
-
-  /** Drops an item at a clearing point, to fall onto the terrain below. */
-  const dropItem = (type: ItemType, x: number, y: number, z: number): void => {
-    const groundY =
-      world.surfaceHeightVoxels(Math.floor(x / VOXEL_SIZE), Math.floor(z / VOXEL_SIZE)) *
-      VOXEL_SIZE;
-    pickups.spawn(type, x, y, z, groundY, performance.now() / 1000);
-  };
 
   const input = new InputState(canvas);
   input.attach();
@@ -283,7 +334,13 @@ async function start(): Promise<void> {
   // Scoop/chup state. `hit` doubles as the crosshair readout's source, so
   // it is refreshed once a frame whether or not the player is acting.
   const hit = createSceneHit();
+  const pieceHit = createPieceHit();
   let chupCooldown = 0;
+  let throwCharge = 0;
+  let throwSlot = -1;
+  let pickupCooldown = 0;
+  const prompt = requireElement<HTMLDivElement>("#prompt");
+  const nearTrees: Tree[] = [];
   let digCooldown = 0;
   let digAnchored = false;
   let anchorOriginX = 0;
@@ -315,6 +372,8 @@ async function start(): Promise<void> {
       propRenderer,
       pickups,
       inventory,
+      thrown,
+      itemAssets,
       scene,
       camera,
       atmosphere,
@@ -371,6 +430,26 @@ async function start(): Promise<void> {
 
     if (!spawned && world.hasChunkAt(player.x, player.y, player.z)) spawned = true;
 
+    // Standing trunks and stumps near the player are solid. Rebuilt per
+    // frame rather than per substep: the player moves centimetres a frame,
+    // and the radius has metres of slack.
+    sceneQuery.statics.length = 0;
+    for (const tree of world.treesNear(player.x, player.z, TRUNK_COLLIDE_RADIUS, nearTrees)) {
+      if (tree.trunkTopMeters <= 0) continue;
+      const trunk: OrientedBody = {
+        radius: tree.trunkRadiusMeters,
+        halfHeight: tree.trunkTopMeters / 2,
+        x: tree.x,
+        y: tree.y + tree.trunkTopMeters / 2,
+        z: tree.z,
+        qx: 0,
+        qy: 0,
+        qz: 0,
+        qw: 1,
+      };
+      sceneQuery.statics.push(trunk);
+    }
+
     let substeps = 0;
     while (spawned && accumulator >= FIXED_TIMESTEP && substeps < MAX_SUBSTEPS) {
       prevX = player.x;
@@ -418,7 +497,21 @@ async function start(): Promise<void> {
       DIG_REACH_METERS,
       hit,
     );
-    const aimed = hit.kind !== HitKind.None;
+    logs?.raycast(
+      eyeX,
+      eyeY,
+      eyeZ,
+      player.frontX,
+      player.frontY,
+      player.frontZ,
+      hit.kind === HitKind.None ? DIG_REACH_METERS : hit.distance,
+      pieceHit,
+    );
+    // A felled piece in front of whatever the scene ray found is what the
+    // crosshair is on.
+    const onPiece = logs !== undefined && pieceHit.piece !== undefined;
+    const aimed = hit.kind !== HitKind.None && !onPiece;
+    const heldType = inventory.selectedItem()?.type;
 
     // Walking only: there is no hand free to swing while tucked into a ball.
     // Scoop and chup are the Unarmed slot's actions: holding an item means
@@ -460,7 +553,7 @@ async function start(): Promise<void> {
           }
         }
 
-        if (digAnchored && !anchorOnProp) {
+        if (digAnchored && !anchorOnProp && !onPiece) {
           if (anchorTreeId >= 0) {
             // Foliage only: a trunk is chup-only, as it was when leaves
             // were scoopable voxels and wood was not.
@@ -499,16 +592,22 @@ async function start(): Promise<void> {
 
     // Chup is right mouse, and unlike the scoop it re-raycasts every tick:
     // the cut is a thin shear that has to follow the trunk as it is eaten
-    // away, so anchoring it would make repeat swings miss.
+    // away, so anchoring it would make repeat swings miss. A stick swung
+    // like a sword (left mouse) is a chup too, and does everything one does.
+    const walking = input.locked && player.mode === PlayerMode.Walking;
+    const holdingStick = heldType === ItemType.Stick;
     const canChup =
-      input.locked &&
-      player.mode === PlayerMode.Walking &&
-      inventory.isUnarmedSelected &&
-      input.isMouseDown(2);
+      walking &&
+      ((inventory.isUnarmedSelected && input.isMouseDown(2)) ||
+        (holdingStick && input.isMouseDown(0) && throwCharge === 0));
     if (canChup) {
       chupCooldown -= rawDt;
       if (chupCooldown <= 0) {
-        if (hit.kind === HitKind.Prop) {
+        if (onPiece && pieceHit.piece !== undefined) {
+          if (logs?.chup(pieceHit.piece, pieceHit.x, pieceHit.y, pieceHit.z) === true) {
+            splashSticks(pieceHit.x, pieceHit.y, pieceHit.z);
+          }
+        } else if (hit.kind === HitKind.Prop) {
           // Resources come out of props the way sticks come off trees: a
           // swing that lands has a chance of knocking one loose. What and
           // how often is the generation sheet's call, not ours.
@@ -528,12 +627,16 @@ async function start(): Promise<void> {
           const chopZ = tree?.z ?? hit.centerZ;
           const chop = world.chopTree(hit.treeId, hit.centerY, worldRenderer);
           if (chop.landed) {
-            const roll = Math.random();
-            if (roll < STICK_DROP_CHANCE) {
-              dropItem(ItemType.Stick, chopX, hit.centerY, chopZ);
-            } else if (roll < STICK_DROP_CHANCE + LEAF_DROP_CHANCE) {
-              dropItem(ItemType.Leaf, chopX, hit.centerY, chopZ);
-            }
+            // Out of the bark on the swinger's side, not the trunk's middle.
+            const radius = tree?.trunkRadiusMeters ?? 0;
+            const sideX = eyeX - chopX;
+            const sideZ = eyeZ - chopZ;
+            const side = Math.max(1e-3, Math.hypot(sideX, sideZ));
+            splashSticks(
+              chopX + (sideX / side) * radius,
+              hit.centerY,
+              chopZ + (sideZ / side) * radius,
+            );
           }
         }
         chupCooldown = CHUP_TICK_SECONDS;
@@ -542,8 +645,71 @@ async function start(): Promise<void> {
       chupCooldown = 0;
     }
 
-    pickups.update(rawDt, now, player.x, player.y, player.z, inventory);
-    pickupRenderer.sync(pickups);
+    // --- spear throw: hold right mouse with a stick, release to throw ---
+    if (throwCharge > 0 && (!holdingStick || inventory.selectedSlot !== throwSlot || !walking)) {
+      // Switching away mid-charge, or tucking into a ball, cancels it.
+      throwCharge = 0;
+    }
+    let threw = false;
+    if (walking && holdingStick && input.isMouseDown(2)) {
+      if (throwCharge === 0) throwSlot = inventory.selectedSlot;
+      // Never exactly zero once started, so a click shorter than a frame
+      // still throws (weakly) on release.
+      throwCharge = Math.max(1e-3, Math.min(1, throwCharge + rawDt / THROW_CHARGE_SECONDS));
+    } else if (throwCharge > 0) {
+      if (inventory.tryConsumeSelected()) {
+        const speed = THROW_MIN_SPEED + (THROW_MAX_SPEED - THROW_MIN_SPEED) * throwCharge;
+        const flat = Math.max(1e-3, Math.hypot(player.frontX, player.frontZ));
+        const rightX = -player.frontZ / flat;
+        const rightZ = player.frontX / flat;
+        thrown.throw(
+          eyeX,
+          eyeY,
+          eyeZ,
+          eyeX + player.frontX * 0.9 + rightX * 0.12,
+          eyeY + player.frontY * 0.9 - 0.05,
+          eyeZ + player.frontZ * 0.9 + rightZ * 0.12,
+          player.frontX * speed + player.vx,
+          player.frontY * speed + player.vy,
+          player.frontZ * speed + player.vz,
+          logs,
+          now,
+        );
+        threw = true;
+      }
+      throwCharge = 0;
+    }
+    thrown.update(rawDt, logs, now);
+
+    pickups.update(rawDt, now, groundAt);
+
+    // --- pick up: E, on whatever is under the crosshair or at your feet ---
+    const target: Pickup | undefined = input.locked
+      ? pickups.target(
+          eyeX,
+          eyeY,
+          eyeZ,
+          player.frontX,
+          player.frontY,
+          player.frontZ,
+          player.x,
+          player.y,
+          player.z,
+        )
+      : undefined;
+    pickupCooldown -= rawDt;
+    if (
+      target !== undefined &&
+      (input.wasPressed("KeyE") || (input.isDown("KeyE") && pickupCooldown <= 0))
+    ) {
+      pickups.collect(target, inventory);
+      pickupCooldown = PICKUP_REPEAT_SECONDS;
+    }
+    const promptText = target === undefined ? "" : `E  pick up ${ITEM_NAMES[target.type]}`;
+    if (prompt.textContent !== promptText) prompt.textContent = promptText;
+    prompt.hidden = target === undefined;
+
+    pickupRenderer.sync(pickups, now);
     hotbar.sync(inventory);
 
     logs?.update(player.x, player.y, player.z);
@@ -559,6 +725,9 @@ async function start(): Promise<void> {
     arm.update(rawDt, {
       scooping: canDig,
       chopping: canChup,
+      held: heldType === ItemType.Stick ? "stick" : heldType === ItemType.Log ? "log" : undefined,
+      charge: throwCharge,
+      threw,
       scoopPeriod: DIG_TICK_SECONDS,
       chopPeriod: CHUP_TICK_SECONDS * 2,
       walk: Math.min(1, Math.hypot(player.vx, player.vz) / player.walkSpeed),
@@ -580,8 +749,8 @@ async function start(): Promise<void> {
     hud.set("VIEW", playerCamera.perspective === CameraPerspective.FirstPerson ? "1st" : "3rd");
     hud.set("FOV", playerCamera.fovDegrees.toFixed(0));
     hud.set("CHUNKS", `${world.loadedCount} (r${radius}, ${worldRenderer.meshCount} drawn)`);
-    hud.set("ITEMS", String(pickups.items.length));
-    hud.set("TREES", `${world.treeCount} (${String(logs?.count ?? 0)} logs)`);
+    hud.set("ITEMS", `${pickups.items.length} (${thrown.count} flying)`);
+    hud.set("TREES", `${world.treeCount} (${String(logs?.count ?? 0)} felled)`);
     hud.set("PROPS", String(world.propCount));
     hud.set("QUEUE", String(world.pendingCount));
     hud.set(
@@ -591,7 +760,9 @@ async function start(): Promise<void> {
     hud.set("UPLOAD", `${worstDrainMs.toFixed(1)}ms worst`);
     hud.set(
       "AIM",
-      aimed
+      onPiece
+        ? `${pieceHit.distance.toFixed(2)}m felled piece`
+        : aimed
         ? `${hit.distance.toFixed(2)}m ${
             hit.kind === HitKind.Tree
               ? hit.treePart === TREE_PART_TRUNK
@@ -626,6 +797,7 @@ async function start(): Promise<void> {
     playerModel.dispose();
     arm.dispose();
     pickupRenderer.clear();
+    thrown.clear();
     logs?.clear();
     treeRenderer.clear();
     physics?.dispose();

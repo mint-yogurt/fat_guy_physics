@@ -20,9 +20,14 @@ npm run build       # static bundle into packages/client/dist
 
 ### Controls
 
-Click to capture the mouse. WASD walk, Space jump, left mouse scoops terrain,
-right mouse chops, R toggles Ragball, V first/third person, `-`/`=` FOV,
-1-9 hotbar.
+Click to capture the mouse. WASD walk, Space jump, left mouse scoops, right
+mouse **chups** (not "chops" -- chup is the game's word for it), E picks up
+the item under the crosshair (hold it to hoover up a pile), R toggles
+Ragball, V first/third person, `-`/`=` FOV, 1-8 hotbar.
+
+With a stick equipped: left mouse swings it like a sword (a swing is a chup,
+so it fells trees too), hold right mouse to charge a spear throw and release
+to throw.
 
 ### URL flags
 
@@ -44,7 +49,9 @@ npm workspaces under `packages/`:
 ## Status
 
 Done: chunked terrain streamed through a worker pool, player controller and
-collision, Jolt rigid bodies, trees you can fell, items and hotbar, player
+collision, Jolt rigid bodies, trees you can fell and chup down into logs,
+sticks and leaves, item pickups with E, a held stick you can swing or
+throw, items and hotbar, player
 rig and character create, biome field with ground colour, sky, light and
 snow, per-region terrain height (rolling hills, cliffs, tiered bluffs), and
 scattered props: snowmen, presents, tombstones and graves, and a
@@ -52,6 +59,48 @@ first-person arm that scoops and chops.
 
 Next: pre-made generative structures (flat ground, with resources clustered
 round them), the grave-topsoil tool, post-processing, multiplayer.
+
+### Trees, wood and items
+
+Trees are where the first materials come from: **logs, sticks and leaves**.
+All three go into the inventory (hotbar slots 2-8, then a 16-slot backpack
+with no UI yet).
+
+- **Chupping a tree** takes three swings at about one height to cut through
+  it. The piece above the cut falls as a Jolt rigid body built from the
+  tree's own sliced mesh, onto the stump it came from and away from you.
+  Stumps and standing trunks near a falling piece are static cylinders in
+  Jolt, and trunks near the player are solid to walk into.
+- **Chupping a felled piece** (two swings) cuts it in two at the swing, the
+  same slice the tree got. Any piece 1.3m or shorter is not a body at all:
+  it breaks into **logs** -- one per 0.12m^3 of wood, at most six -- and any
+  foliage it was carrying puffs into leaves. So a tree comes apart into four
+  or five logs. Numbers are at the top of
+  [`logSystem.ts`](packages/client/src/physics/logSystem.ts).
+- **Sticks** splash out of the bark on every chup that lands on a tree or a
+  piece: one, 30% chance of two, flung towards your side.
+- **Leaves** come from scooping foliage (left mouse on a canopy) and from
+  pieces breaking down.
+
+Dropped items are their own meshes (`log.glb`, `stick.glb`), hovering above
+the ground, bobbing and slowly turning about the vertical so they are easy
+to spot. Leaves are still a billboard of their icon until they get a mesh.
+Nothing is collected by walking over it any more: aim at it and press **E**
+(anything right at your feet also counts). A prompt under the crosshair
+says what E would pick up.
+
+**Equipping** is selecting the slot. The first-person hand holds what is in
+it ([`armViewmodel.ts`](packages/client/src/render/armViewmodel.ts)):
+
+- **Stick**: gripped in a fist near the plain end, the forked business end
+  up and forward. Left mouse swings it like a sword -- the chop animation,
+  and a chup on whatever it hits. Hold right mouse to charge a throw (up to
+  1.2s, 9 to 24 m/s); the arm draws back and the stick swings round to point
+  ahead, and release throws it fork first
+  ([`thrownSticks.ts`](packages/client/src/physics/thrownSticks.ts)). It
+  sticks into ground or trunks at the angle it hit (pick it back up with E),
+  shoves a felled piece it hits, and bounces off props.
+- **Log**: carried on the upturned palm. Does nothing yet.
 
 ### The generation sheet
 
@@ -108,8 +157,16 @@ under topsoil. Removing the topsoil needs a tool the player does not have yet.
 - Debris particles are not in yet.
 - Face textures exist but character create's face option does nothing.
 - The walking collider is an AABB, not a swept capsule.
-- A felled tree collides as a trunk-width capsule, so its canopy is walked
-  through. Standing trees are solid to the aiming raycast only, not the player.
+- A felled piece collides as a trunk-width capsule, so its canopy and the
+  dead tree's branches are walked through. A piece is only walkable once it
+  has settled; a moving one passes through the player.
+- A stick stuck in a tree stays floating where it was if the tree is felled.
+- The held-item grip (`STICK_GRIP`, `LOG_REST` in `armViewmodel.ts`) was
+  placed from the arm mesh's measurements, not by eye; if the stick floats
+  beside the fist, move `STICK_GRIP`. Held items are not drawn on the
+  third-person player model.
+- A thrown or swung stick has nothing to hurt yet: there are no creatures.
+- The backpack (slots 9-24) has no UI, and items cannot be dropped.
 - The default load radius is unmeasured on real hardware; check FPS before
   trusting it.
 

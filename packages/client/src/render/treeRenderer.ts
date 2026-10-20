@@ -4,7 +4,6 @@ import {
   Group,
   Mesh,
   MeshLambertMaterial,
-  type Object3D,
   type Scene,
   type Texture,
 } from "three/webgpu";
@@ -13,10 +12,10 @@ import type { Tree } from "@fgp/shared/sim/world";
 import { Biome } from "@fgp/shared/voxel/biomeTint";
 import { Material, MATERIAL_COLORS } from "@fgp/shared/voxel/voxel";
 import { AUTUMN_FOLIAGE_COLOR } from "@fgp/shared/worldgen/generationSheet";
-import { TreeSpecies } from "@fgp/shared/worldgen/trees";
+import { metricsFor, TreeSpecies } from "@fgp/shared/worldgen/trees";
 
 import { sliceAtY } from "./sliceGeometry.ts";
-import { horizontalRadius, type TreeAssets } from "./treeAssets.ts";
+import type { TreeAssets } from "./treeAssets.ts";
 
 /**
  * Standing trees, as instances of the authored meshes.
@@ -34,17 +33,35 @@ import { horizontalRadius, type TreeAssets } from "./treeAssets.ts";
  * mesh has neither.
  */
 
+/**
+ * A length of tree off the ground: a felled top, or any part of one cut
+ * again. Everything is in the species asset's own units (tree-base space,
+ * see treeAssets.ts), so cutting it again is the same `sliceAtY` that cut
+ * it off the stump.
+ */
+export interface PieceShape {
+  /** The wood, owned outright by the piece; undefined for a bare tuft of foliage. */
+  readonly trunk: BufferGeometry | undefined;
+  /** Foliage riding on the piece: shared geometry, and the cluster's centre height. */
+  readonly foliage: readonly { readonly geometry: BufferGeometry; readonly y: number }[];
+  /** Asset-space heights the piece spans. */
+  readonly bottom: number;
+  readonly top: number;
+  readonly scale: number;
+  readonly yaw: number;
+  /** The standing trunk's radius in metres; a piece is never fatter than this. */
+  readonly trunkRadiusMeters: number;
+  readonly trunkMaterial: MeshLambertMaterial;
+  readonly foliageMaterial: MeshLambertMaterial;
+}
+
 /** A cut piece, ready to be handed to the rigid-body layer. */
 export interface FellingPiece {
-  /** Origin is the piece's centre, which is what a body's transform is. */
-  readonly object: Object3D;
-  readonly radius: number;
-  readonly halfHeight: number;
+  readonly shape: PieceShape;
+  /** World position of the piece's middle, which is where its body goes. */
   readonly x: number;
   readonly y: number;
   readonly z: number;
-  /** Geometry owned outright by this piece, to dispose when it is culled. */
-  readonly owned: readonly BufferGeometry[];
 }
 
 interface Instance {
@@ -176,7 +193,7 @@ export class TreeRenderer {
 
     if (piece === undefined) return;
     if (this.onFelled === undefined) {
-      for (const geometry of piece.owned) geometry.dispose();
+      piece.shape.trunk?.dispose();
       return;
     }
     this.onFelled(piece);
@@ -205,50 +222,37 @@ export class TreeRenderer {
     pieceLengthMeters: number,
     carriedFoliage: number,
   ): FellingPiece | undefined {
-    const owned: BufferGeometry[] = [];
-    // Nested: the outer object is driven by the body's transform, so the
-    // inner one carries the tree's own scale and yaw and the shift that
-    // puts the piece's centre of length at the origin.
-    const object = new Group();
-    const inner = new Group();
-    inner.rotation.y = tree.yaw;
-    inner.scale.setScalar(tree.scale);
-    inner.position.y = -(cutHeightMeters + pieceLengthMeters / 2);
-    object.add(inner);
-
-    let hasGeometry = false;
-    if (above !== undefined) {
-      above.computeBoundingSphere();
-      owned.push(above);
-      inner.add(new Mesh(above, this.trunkMaterial));
-      hasGeometry = true;
-    }
-
     const asset = this.assets.get(tree.species);
+    const metrics = metricsFor(tree.species);
+    const foliage: { geometry: BufferGeometry; y: number }[] = [];
     for (const [cluster, mesh] of instance.foliage) {
       if ((carriedFoliage & (1 << cluster)) === 0) continue;
       instance.foliage.delete(cluster);
       instance.group.remove(mesh);
       const geometry = asset?.foliage[cluster];
       if (geometry === undefined) continue;
-      inner.add(new Mesh(geometry, instance.foliageMaterial));
-      hasGeometry = true;
+      foliage.push({ geometry, y: metrics?.foliage[cluster]?.y ?? 0 });
     }
 
-    if (!hasGeometry) return undefined;
+    if (above === undefined && foliage.length === 0) return undefined;
 
-    const radius = Math.max(
-      0.05,
-      above === undefined ? tree.trunkRadiusMeters : horizontalRadius(above) * tree.scale,
-    );
+    const bottom = cutHeightMeters / tree.scale;
+    const top = (cutHeightMeters + pieceLengthMeters) / tree.scale;
     return {
-      object,
-      radius,
-      halfHeight: Math.max(0.05, pieceLengthMeters / 2 - radius),
+      shape: {
+        trunk: above,
+        foliage,
+        bottom,
+        top,
+        scale: tree.scale,
+        yaw: tree.yaw,
+        trunkRadiusMeters: tree.trunkRadiusMeters,
+        trunkMaterial: this.trunkMaterial,
+        foliageMaterial: instance.foliageMaterial,
+      },
       x: tree.x,
       y: tree.y + cutHeightMeters + pieceLengthMeters / 2,
       z: tree.z,
-      owned,
     };
   }
 

@@ -9,11 +9,13 @@ import {
   Scene,
   Vector3,
   Euler,
+  type Object3D,
   PerspectiveCamera,
   type WebGPURenderer,
 } from "three/webgpu";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
+import type { ItemAssets } from "./itemAssets.ts";
 import { faceOutward } from "./meshOrientation.ts";
 
 /**
@@ -31,6 +33,13 @@ import { faceOutward } from "./meshOrientation.ts";
  * Rest pose is the chop: hand upright, thumb folded up alongside the fingers
  * (the file's own pose has it stuck out sideways, which is what the thumb
  * group undoes). Everything else is a few rotations about named pivots.
+ *
+ * The hand can hold the equipped item. A stick is gripped in a fist near its
+ * plain end, fork up and forward like a sword, and turns to point straight
+ * ahead while a throw is charged; a log rides on the upturned palm. The grip
+ * numbers below were placed from the file's measurements, not by eye -- if
+ * the stick floats beside the fist rather than through it, `STICK_GRIP` is
+ * the one to move.
  */
 
 const MODEL_URL = "/meshes/player_arm_fpv.glb";
@@ -54,7 +63,21 @@ const THUMB_ROOT = new Vector3(1.15, 18.11, 0);
 /** How far the thumb slides inboard-to-outboard when it folds up. */
 const THUMB_FOLD_SHIFT = 0.55;
 
+/**
+ * Where a held item sits, in hand space (file units, origin at the wrist):
+ * in front of the palm, at the height the curled fingers close.
+ */
+const STICK_GRIP = new Vector3(0, 2.1, 2.1 * PALM_SIGN);
+const LOG_REST = new Vector3(0, 1.6, 5.2 * PALM_SIGN);
+/** The stick tilts this far from the thumb's line towards the arm's (forward), at rest. */
+const STICK_SWORD_TILT = 0.6;
+/** A held log is drawn smaller than one on the ground, so it fits the hand. */
+const HELD_LOG_SCALE = 0.65;
+/** Seconds the throw's follow-through lasts. */
+const THROW_KICK_SECONDS = 0.28;
+
 const TAU = Math.PI * 2;
+const STICK_AXIS = new Vector3(0, 0, 1);
 
 const squash = (name: string): string => name.replace(/[^a-z0-9]/gi, "");
 
@@ -79,6 +102,12 @@ export interface ArmState {
   /** Horizontal speed over walk speed, 0..1, for the walking sway. */
   walk: number;
   grounded: boolean;
+  /** What is in the hand, if anything. */
+  held: "stick" | "log" | undefined;
+  /** Spear throw being charged, 0..1; 0 when not charging. */
+  charge: number;
+  /** True on the frame a throw is released. */
+  threw: boolean;
 }
 
 export class ArmViewmodel {
@@ -91,6 +120,12 @@ export class ArmViewmodel {
   private readonly fingerBase = new Group();
   private readonly fingerTips = new Group();
   private readonly thumb = new Group();
+  /** In metres, at the grip point: whatever the hand is holding. */
+  private readonly holder = new Group();
+  private readonly heldStick: Object3D;
+  private readonly heldLog: Object3D;
+  private readonly swordQuat = new Quaternion();
+  private readonly spearQuat = new Quaternion();
 
   private readonly baseQuat = new Quaternion();
   private readonly poseQuat = new Quaternion();
@@ -102,11 +137,15 @@ export class ArmViewmodel {
   private scoopPhase = 0;
   private walkPhase = 0;
   private walkAmount = 0;
+  private gripWeight = 0;
+  private carryWeight = 0;
+  private chargeWeight = 0;
+  private kick = 0;
 
   /** Hidden in third person and while tucked into a ball. */
   visible = true;
 
-  private constructor(parts: Map<string, Mesh>, skin: string) {
+  private constructor(parts: Map<string, Mesh>, skin: string, items: ItemAssets) {
     const light = new HemisphereLight(0xcfe4f5, 0x4a3a2a, 2.4);
     const sun = new DirectionalLight(0xfff4e0, 1.6);
     sun.position.set(0.4, 1, 0.6);
@@ -152,6 +191,30 @@ export class ArmViewmodel {
     hold(this.thumb, part("thumb.base"), THUMB_ROOT);
     hold(this.thumb, part("thumb.tips"), THUMB_ROOT);
 
+    // The holder undoes the arm's scale, so what it holds is in metres.
+    this.holder.scale.setScalar(1 / ARM_SCALE);
+    this.hand.add(this.holder);
+    this.heldStick = items.stick.clone();
+    this.heldLog = items.log.clone();
+    this.heldLog.scale.multiplyScalar(HELD_LOG_SCALE);
+    // Lying across the palm: log +Y along the thumb's line.
+    this.heldLog.rotation.z = -Math.PI / 2;
+    for (const held of [this.heldStick, this.heldLog]) {
+      held.visible = false;
+      held.traverse((object) => {
+        object.frustumCulled = false;
+      });
+      this.holder.add(held);
+    }
+    // Sword: fork along the thumb (up, at rest), leaning forward. Spear:
+    // fork straight down the arm, which is straight ahead.
+    this.swordQuat.setFromUnitVectors(
+      STICK_AXIS,
+      new Vector3(Math.cos(STICK_SWORD_TILT), Math.sin(STICK_SWORD_TILT), 0),
+    );
+    this.spearQuat.setFromUnitVectors(STICK_AXIS, new Vector3(0.15, 1, 0).normalize());
+    this.stickGrip = items.stickGrip;
+
     this.shoulder.scale.setScalar(ARM_SCALE);
     this.shoulder.position.copy(SHOULDER);
     this.scene.add(this.shoulder);
@@ -162,7 +225,9 @@ export class ArmViewmodel {
     );
   }
 
-  static async load(skin: string): Promise<ArmViewmodel> {
+  private readonly stickGrip: number;
+
+  static async load(skin: string, items: ItemAssets): Promise<ArmViewmodel> {
     const gltf = await new GLTFLoader().loadAsync(MODEL_URL);
     const parts = new Map<string, Mesh>();
     gltf.scene.traverse((object) => {
@@ -172,7 +237,7 @@ export class ArmViewmodel {
       // single Mesh -- minus the punctuation it strips ("hand/palm").
       parts.set(squash(object.name), object);
     });
-    return new ArmViewmodel(parts, skin);
+    return new ArmViewmodel(parts, skin, items);
   }
 
   update(dt: number, s: ArmState): void {
@@ -183,6 +248,17 @@ export class ArmViewmodel {
     else this.chopPhase = 0;
     if (this.scoopWeight > 0.01) this.scoopPhase = (this.scoopPhase + dt / s.scoopPeriod) % 1;
     else this.scoopPhase = 0;
+
+    this.gripWeight += rate * ((s.held === undefined ? 0 : 1) - this.gripWeight);
+    this.carryWeight += rate * ((s.held === "log" ? 1 : 0) - this.carryWeight);
+    this.chargeWeight += Math.min(1, dt * 8) * (s.charge - this.chargeWeight);
+    if (s.threw) {
+      this.kick = 1;
+      this.chargeWeight = 0;
+    }
+    this.kick = Math.max(0, this.kick - dt / THROW_KICK_SECONDS);
+    // Follow-through: a fast lunge forward, easing back.
+    const lunge = Math.sin(this.kick * Math.PI) * (this.kick > 0 ? 1 : 0);
 
     const walking = s.grounded ? s.walk : 0;
     this.walkAmount += rate * (walking - this.walkAmount);
@@ -197,28 +273,55 @@ export class ArmViewmodel {
     // Pose: aim in camera space, then swing, dip and bob on top.
     const bobX = Math.cos(this.walkPhase * 0.5) * 0.012 * this.walkAmount;
     const bobY = Math.abs(Math.sin(this.walkPhase)) * 0.015 * this.walkAmount;
+    // Charging a throw draws the arm back and up; releasing it lunges.
+    const draw = this.chargeWeight;
     this.shoulder.position.set(
-      SHOULDER.x + bobX - 0.05 * dip,
-      SHOULDER.y + bobY - 0.06 * dip + 0.02 * lift,
-      SHOULDER.z - 0.06 * dip,
+      SHOULDER.x + bobX - 0.05 * dip - 0.04 * draw,
+      SHOULDER.y + bobY - 0.06 * dip + 0.02 * lift + 0.12 * draw + 0.04 * lunge - 0.04 * this.carryWeight,
+      SHOULDER.z - 0.06 * dip + 0.16 * draw - 0.22 * lunge,
     );
     this.euler.set(
-      REST_PITCH + 0.55 * chop - 0.7 * dip + 0.35 * lift - 0.35 * this.chopWeight * (1 - chop),
-      REST_YAW - 0.15 * this.scoopWeight,
+      REST_PITCH +
+        0.55 * chop -
+        0.7 * dip +
+        0.35 * lift -
+        0.35 * this.chopWeight * (1 - chop) +
+        0.2 * draw -
+        0.15 * lunge -
+        0.25 * this.carryWeight,
+      REST_YAW - 0.15 * this.scoopWeight - 0.12 * draw,
       0,
     );
     this.poseQuat.setFromEuler(this.euler).multiply(this.baseQuat);
     this.shoulder.quaternion.copy(this.poseQuat);
 
     // Forearm roll turns the palm to the sky for the scoop.
-    this.roll.rotation.y = (Math.PI / 2) * 0.9 * dip * PALM_SIGN;
+    // A log is carried the same way, palm up under it.
+    this.roll.rotation.y = (Math.PI / 2) * 0.9 * Math.max(dip, this.carryWeight) * PALM_SIGN;
 
     // Chop keeps the hand flat; scoop cups it. Rotation about X curls the
     // fingers towards +Z, so the sign carries the palm side.
     const cup = (0.2 + 0.8 * dip) * this.scoopWeight;
+    // Holding a stick closes the hand into a fist round it; a log only
+    // curls the fingers enough to cradle it.
+    const fist = this.gripWeight * (1 - this.carryWeight);
+    const cradle = this.carryWeight * 0.4;
     this.hand.rotation.x = PALM_SIGN * (-0.2 * chop + 0.3 * dip);
-    this.fingerBase.rotation.x = PALM_SIGN * 0.8 * cup;
-    this.fingerTips.rotation.x = PALM_SIGN * 0.9 * cup;
+    this.fingerBase.rotation.x = PALM_SIGN * Math.max(0.8 * cup, 1.5 * fist, cradle);
+    this.fingerTips.rotation.x = PALM_SIGN * Math.max(0.9 * cup, 1.4 * fist, cradle);
+
+    this.heldStick.visible = s.held === "stick" && this.kick <= 0.35;
+    this.heldLog.visible = s.held === "log";
+    if (s.held === "log") {
+      this.holder.position.copy(LOG_REST);
+      this.holder.quaternion.identity();
+    } else {
+      this.holder.position.copy(STICK_GRIP);
+      this.holder.quaternion.copy(this.swordQuat).slerp(this.spearQuat, draw);
+      // The grip is a little way up from the butt, so the holder's origin
+      // is that point on the shaft.
+      this.heldStick.position.set(0, 0, -this.stickGrip);
+    }
 
     // Thumb folds up along the fingers (the chop) unless scooping, where it
     // opens back out a little as if to hold the scoop.

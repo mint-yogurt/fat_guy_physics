@@ -679,6 +679,18 @@ export class World {
     return this.trees.get(treeId);
   }
 
+  /** Standing trees whose base is within `radius` metres of (x, z), into `out`. */
+  treesNear(x: number, z: number, radius: number, out: Tree[]): Tree[] {
+    out.length = 0;
+    const radiusSq = radius * radius;
+    for (const tree of this.trees.values()) {
+      const dx = tree.x - x;
+      const dz = tree.z - z;
+      if (dx * dx + dz * dz <= radiusSq) out.push(tree);
+    }
+    return out;
+  }
+
   get treeCount(): number {
     return this.trees.size;
   }

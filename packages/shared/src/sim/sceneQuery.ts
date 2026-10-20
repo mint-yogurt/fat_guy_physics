@@ -41,45 +41,53 @@ export interface OrientedBody {
 export class SceneSolidQuery implements SolidQuery {
   /** Mutated in place by whoever owns the bodies; never reallocated. */
   readonly bodies: OrientedBody[] = [];
+  /**
+   * Standing trunks and stumps near the player. Kept apart from `bodies`
+   * because the two lists have different owners rebuilding them each
+   * frame: the log system owns `bodies`, main owns this.
+   */
+  readonly statics: OrientedBody[] = [];
 
   constructor(private readonly terrain: SolidQuery) {}
 
   isSolid(vx: number, vy: number, vz: number): boolean {
     if (this.terrain.isSolid(vx, vy, vz)) return true;
-    if (this.bodies.length === 0) return false;
+    if (this.bodies.length === 0 && this.statics.length === 0) return false;
 
     // The voxel's centre is the sample point. Using the corner would bias
     // every body half a voxel in -X/-Y/-Z.
     const px = (vx + 0.5) * VOXEL_SIZE;
     const py = (vy + 0.5) * VOXEL_SIZE;
     const pz = (vz + 0.5) * VOXEL_SIZE;
-
-    for (const body of this.bodies) {
-      const dx = px - body.x;
-      const dy = py - body.y;
-      const dz = pz - body.z;
-
-      // Rotate by the conjugate: world -> body local. Written out rather
-      // than via a quaternion class because this runs a few hundred times
-      // per substep and the allocation would dominate it.
-      const qx = -body.qx;
-      const qy = -body.qy;
-      const qz = -body.qz;
-      const qw = body.qw;
-
-      const tx = 2 * (qy * dz - qz * dy);
-      const ty = 2 * (qz * dx - qx * dz);
-      const tz = 2 * (qx * dy - qy * dx);
-
-      const lx = dx + qw * tx + (qy * tz - qz * ty);
-      const ly = dy + qw * ty + (qz * tx - qx * tz);
-      const lz = dz + qw * tz + (qx * ty - qy * tx);
-
-      if (Math.abs(ly) <= body.halfHeight && lx * lx + lz * lz <= body.radius * body.radius) {
-        return true;
-      }
-    }
-
-    return false;
+    return insideAny(this.bodies, px, py, pz) || insideAny(this.statics, px, py, pz);
   }
+}
+
+function insideAny(bodies: readonly OrientedBody[], px: number, py: number, pz: number): boolean {
+  for (const body of bodies) {
+    const dx = px - body.x;
+    const dy = py - body.y;
+    const dz = pz - body.z;
+
+    // Rotate by the conjugate: world -> body local. Written out rather
+    // than via a quaternion class because this runs a few hundred times
+    // per substep and the allocation would dominate it.
+    const qx = -body.qx;
+    const qy = -body.qy;
+    const qz = -body.qz;
+    const qw = body.qw;
+
+    const tx = 2 * (qy * dz - qz * dy);
+    const ty = 2 * (qz * dx - qx * dz);
+    const tz = 2 * (qx * dy - qy * dx);
+
+    const lx = dx + qw * tx + (qy * tz - qz * ty);
+    const ly = dy + qw * ty + (qz * tx - qx * tz);
+    const lz = dz + qw * tz + (qx * ty - qy * tx);
+
+    if (Math.abs(ly) <= body.halfHeight && lx * lx + lz * lz <= body.radius * body.radius) {
+      return true;
+    }
+  }
+  return false;
 }

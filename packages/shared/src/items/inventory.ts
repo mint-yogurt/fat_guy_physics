@@ -2,8 +2,9 @@
  * Hotbar plus backpack. Ports src/Inventory.{hpp,cpp}.
  *
  * Slot 0 is always Unarmed: it holds nothing, cannot be filled, and is what
- * scoop and chup require to be selected. That is the whole tool system for
- * now -- selecting an item slot simply means your hands are full.
+ * scoop and chup require to be selected. Selecting another slot equips what
+ * is in it: a stick is a weapon (swung with left mouse, thrown with right),
+ * a log is carried and does nothing yet, and a leaf is just held.
  */
 
 export const ItemType = {

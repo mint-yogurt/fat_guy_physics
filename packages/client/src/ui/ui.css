@@ -84,6 +84,23 @@ body {
   margin-top: -1px;
 }
 
+/* What E would pick up, just under the crosshair. */
+#prompt {
+  position: absolute;
+  left: 50%;
+  top: calc(50% + 22px);
+  transform: translateX(-50%);
+  padding: 2px 8px;
+  background: rgba(10, 14, 20, 0.42);
+  border-radius: 3px;
+  font-size: 12px;
+  white-space: pre;
+}
+
+#prompt[hidden] {
+  display: none;
+}
+
 #controls {
   position: absolute;
   top: 10px;

@@ -36,11 +36,13 @@ const LAYER_COUNT = 2;
 const WOOD_DENSITY = 600;
 
 /**
- * A piece cut from a standing trunk rests on a flat, perfectly level cut
- * face, which is a real (if unstable) equilibrium Jolt is happy to leave it
- * balanced in. A small angular nudge makes it topple like it should.
+ * How fast a felled piece starts to tip, rad/s. A piece cut from a standing
+ * trunk rests on the flat top of its own stump, which is a real (if
+ * unstable) equilibrium Jolt is happy to leave it balanced in. An angular
+ * *impulse* is the wrong tool for the nudge: the same impulse that tips a
+ * branch does nothing to a 400kg trunk. A velocity tips both alike.
  */
-const TOPPLE_IMPULSE = 2.5;
+const TOPPLE_SPIN = 0.9;
 
 export type BodyHandle = number;
 
@@ -50,6 +52,8 @@ export class PhysicsWorld {
   private readonly bodyInterface: Jolt.BodyInterface;
   private readonly bodies = new Map<BodyHandle, Jolt.BodyID>();
   private readonly terrainBodies = new Map<number, Jolt.BodyID>();
+  /** Static trunk cylinders, keyed by tree id, with the height each was built at. */
+  private readonly trunkBodies = new Map<number, { id: Jolt.BodyID; height: number }>();
 
   /** Scratch, so reading a transform per frame allocates nothing. */
   private readonly scratchVec: Jolt.Vec3;
@@ -180,8 +184,53 @@ export class PhysicsWorld {
   }
 
   /**
-   * A dynamic capsule standing on its Y axis -- the shape a felled log gets,
-   * matching PhysicsWorld::spawnCapsuleBody.
+   * A static upright cylinder for a standing trunk or stump, so a falling
+   * piece lands on the stump it was cut from rather than through it.
+   * Rebuilt when the trunk has been cut shorter since.
+   */
+  setTrunkBody(treeId: number, x: number, baseY: number, z: number, radius: number, height: number): void {
+    const existing = this.trunkBodies.get(treeId);
+    if (existing !== undefined) {
+      if (existing.height === height) return;
+      this.removeTrunkBody(treeId);
+    }
+    if (height <= 0.02) return;
+
+    const J = this.jolt;
+    const half = height / 2;
+    const shape = new J.CylinderShapeSettings(half, radius, Math.min(0.05, radius * 0.5, half)).Create();
+    if (shape.HasError()) return;
+    const creation = new J.BodyCreationSettings(
+      shape.Get(),
+      new J.RVec3(x, baseY + half, z),
+      new J.Quat(0, 0, 0, 1),
+      J.EMotionType_Static,
+      LAYER_STATIC,
+    );
+    const body = this.bodyInterface.CreateBody(creation);
+    J.destroy(creation);
+    this.bodyInterface.AddBody(body.GetID(), J.EActivation_DontActivate);
+    this.trunkBodies.set(treeId, { id: body.GetID(), height });
+  }
+
+  /** Snapshot, so the caller may remove bodies while iterating. */
+  trunkBodyIds(): number[] {
+    return [...this.trunkBodies.keys()];
+  }
+
+  removeTrunkBody(treeId: number): void {
+    const entry = this.trunkBodies.get(treeId);
+    if (entry === undefined) return;
+    this.trunkBodies.delete(treeId);
+    this.bodyInterface.RemoveBody(entry.id);
+    this.bodyInterface.DestroyBody(entry.id);
+  }
+
+  /**
+   * A dynamic capsule along its own Y axis, in the given rotation -- the
+   * shape a felled piece gets, matching PhysicsWorld::spawnCapsuleBody.
+   * `toppleX/Z` is a horizontal axis to start it spinning about, or zero
+   * for none.
    */
   spawnCapsule(
     x: number,
@@ -189,7 +238,9 @@ export class PhysicsWorld {
     z: number,
     radius: number,
     halfHeight: number,
-    topple: boolean,
+    rotation: readonly [number, number, number, number] = [0, 0, 0, 1],
+    toppleX = 0,
+    toppleZ = 0,
   ): BodyHandle | undefined {
     const J = this.jolt;
     const shape = new J.CapsuleShapeSettings(Math.max(halfHeight, 0.01), radius).Create();
@@ -198,7 +249,7 @@ export class PhysicsWorld {
     const creation = new J.BodyCreationSettings(
       shape.Get(),
       new J.RVec3(x, y, z),
-      new J.Quat(0, 0, 0, 1),
+      new J.Quat(rotation[0], rotation[1], rotation[2], rotation[3]),
       J.EMotionType_Dynamic,
       LAYER_DYNAMIC,
     );
@@ -211,14 +262,23 @@ export class PhysicsWorld {
     const id = body.GetID();
     this.bodyInterface.AddBody(id, J.EActivation_Activate);
 
-    if (topple) {
-      this.scratchVec.Set(TOPPLE_IMPULSE, 0, TOPPLE_IMPULSE * 0.6);
-      this.bodyInterface.AddAngularImpulse(id, this.scratchVec);
+    if (toppleX !== 0 || toppleZ !== 0) {
+      const length = Math.hypot(toppleX, toppleZ);
+      this.scratchVec.Set((toppleX / length) * TOPPLE_SPIN, 0, (toppleZ / length) * TOPPLE_SPIN);
+      this.bodyInterface.SetAngularVelocity(id, this.scratchVec);
     }
 
     const handle = id.GetIndexAndSequenceNumber();
     this.bodies.set(handle, id);
     return handle;
+  }
+
+  /** A shove at the body's centre, N*s -- what a thrown stick does to a log it hits. */
+  addImpulse(handle: BodyHandle, ix: number, iy: number, iz: number): void {
+    const id = this.bodies.get(handle);
+    if (id === undefined) return;
+    this.scratchVec.Set(ix, iy, iz);
+    this.bodyInterface.AddImpulse(id, this.scratchVec);
   }
 
   removeBody(handle: BodyHandle): void {
@@ -254,6 +314,7 @@ export class PhysicsWorld {
   dispose(): void {
     for (const handle of [...this.bodies.keys()]) this.removeBody(handle);
     for (const key of [...this.terrainBodies.keys()]) this.removeTerrainBody(key);
+    for (const treeId of [...this.trunkBodies.keys()]) this.removeTrunkBody(treeId);
     this.jolt.destroy(this.scratchVec);
     this.jolt.destroy(this.scratchQuat);
     this.jolt.destroy(this.joltInterface);
