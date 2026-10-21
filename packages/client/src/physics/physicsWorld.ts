@@ -55,8 +55,12 @@ export class PhysicsWorld {
   /** Static trunk cylinders, keyed by tree id, with the height each was built at. */
   private readonly trunkBodies = new Map<number, { id: Jolt.BodyID; height: number }>();
 
+  /** Static placed cylinders (trampolines), keyed by the caller's id. */
+  private readonly placedBodies = new Map<number, Jolt.BodyID>();
+
   /** Scratch, so reading a transform per frame allocates nothing. */
   private readonly scratchVec: Jolt.Vec3;
+  private readonly scratchPoint: Jolt.RVec3;
   private readonly scratchQuat: Jolt.Quat;
 
   private constructor(joltModule: unknown) {
@@ -89,6 +93,7 @@ export class PhysicsWorld {
 
     this.bodyInterface = this.joltInterface.GetPhysicsSystem().GetBodyInterface();
     this.scratchVec = new J.Vec3(0, 0, 0);
+    this.scratchPoint = new J.RVec3(0, 0, 0);
     this.scratchQuat = new J.Quat(0, 0, 0, 1);
   }
 
@@ -213,6 +218,58 @@ export class PhysicsWorld {
     this.trunkBodies.set(treeId, { id: body.GetID(), height });
   }
 
+  /**
+   * A static upright cylinder that things bounce off, for a placed
+   * trampoline. Jolt combines the two bodies' restitutions by taking the
+   * larger, so a log (which has none) rebounds at this body's value: the
+   * same fraction of its landing speed the player and dropped items get.
+   * Jolt itself skips the bounce below about a metre a second, which is how
+   * a log set down gently stays put.
+   */
+  setPlacedCylinder(
+    id: number,
+    x: number,
+    y: number,
+    z: number,
+    radius: number,
+    halfHeight: number,
+    restitution: number,
+  ): void {
+    if (this.placedBodies.has(id)) return;
+    const J = this.jolt;
+    const shape = new J.CylinderShapeSettings(
+      halfHeight,
+      radius,
+      Math.min(0.05, radius * 0.5, halfHeight),
+    ).Create();
+    if (shape.HasError()) return;
+    const creation = new J.BodyCreationSettings(
+      shape.Get(),
+      new J.RVec3(x, y, z),
+      new J.Quat(0, 0, 0, 1),
+      J.EMotionType_Static,
+      LAYER_STATIC,
+    );
+    creation.mRestitution = restitution;
+    creation.mFriction = 0.8;
+    const body = this.bodyInterface.CreateBody(creation);
+    J.destroy(creation);
+    this.bodyInterface.AddBody(body.GetID(), J.EActivation_DontActivate);
+    this.placedBodies.set(id, body.GetID());
+  }
+
+  hasPlacedCylinder(id: number): boolean {
+    return this.placedBodies.has(id);
+  }
+
+  removePlacedCylinder(id: number): void {
+    const body = this.placedBodies.get(id);
+    if (body === undefined) return;
+    this.placedBodies.delete(id);
+    this.bodyInterface.RemoveBody(body);
+    this.bodyInterface.DestroyBody(body);
+  }
+
   /** Snapshot, so the caller may remove bodies while iterating. */
   trunkBodyIds(): number[] {
     return [...this.trunkBodies.keys()];
@@ -281,6 +338,97 @@ export class PhysicsWorld {
     this.bodyInterface.AddImpulse(id, this.scratchVec);
   }
 
+  /** A shove at a world point on the body, so it spins as well as moves: a rope pulling on a log. */
+  addImpulseAt(
+    handle: BodyHandle,
+    ix: number,
+    iy: number,
+    iz: number,
+    px: number,
+    py: number,
+    pz: number,
+  ): void {
+    const id = this.bodies.get(handle);
+    if (id === undefined) return;
+    this.scratchVec.Set(ix, iy, iz);
+    this.scratchPoint.Set(px, py, pz);
+    this.bodyInterface.AddImpulse(id, this.scratchVec, this.scratchPoint);
+  }
+
+  /**
+   * A thrown log: a cylinder along local Y, not a capsule. The game's log
+   * is short and fat, and as a capsule it is nearly a ball -- it rolls off
+   * in any direction and never stops. A cylinder only rolls across its axis
+   * and lands on its flat ends as a log does.
+   */
+  spawnLog(
+    x: number,
+    y: number,
+    z: number,
+    radius: number,
+    halfHeight: number,
+    rotation: readonly [number, number, number, number],
+  ): BodyHandle | undefined {
+    const J = this.jolt;
+    const shape = new J.CylinderShapeSettings(
+      halfHeight,
+      radius,
+      Math.min(0.05, radius * 0.5, halfHeight),
+    ).Create();
+    if (shape.HasError()) return undefined;
+    const creation = new J.BodyCreationSettings(
+      shape.Get(),
+      new J.RVec3(x, y, z),
+      new J.Quat(rotation[0], rotation[1], rotation[2], rotation[3]),
+      J.EMotionType_Dynamic,
+      LAYER_DYNAMIC,
+    );
+    creation.mOverrideMassProperties = J.EOverrideMassProperties_CalculateInertia;
+    creation.mMassPropertiesOverride.mMass = Math.PI * radius * radius * halfHeight * 2 * WOOD_DENSITY;
+    creation.mFriction = 0.6;
+    const body = this.bodyInterface.CreateBody(creation);
+    J.destroy(creation);
+    const id = body.GetID();
+    this.bodyInterface.AddBody(id, J.EActivation_Activate);
+    const handle = id.GetIndexAndSequenceNumber();
+    this.bodies.set(handle, id);
+    return handle;
+  }
+
+  /** Writes a body's velocity into the caller's array as [vx,vy,vz, wx,wy,wz]. */
+  readVelocity(handle: BodyHandle, out: Float32Array): boolean {
+    const id = this.bodies.get(handle);
+    if (id === undefined) return false;
+    const linear = this.bodyInterface.GetLinearVelocity(id);
+    out[0] = linear.GetX();
+    out[1] = linear.GetY();
+    out[2] = linear.GetZ();
+    const angular = this.bodyInterface.GetAngularVelocity(id);
+    out[3] = angular.GetX();
+    out[4] = angular.GetY();
+    out[5] = angular.GetZ();
+    return true;
+  }
+
+  /** Sets a body moving, m/s and rad/s: how a thrown log leaves the hand. */
+  setVelocity(
+    handle: BodyHandle,
+    vx: number,
+    vy: number,
+    vz: number,
+    wx: number,
+    wy: number,
+    wz: number,
+  ): void {
+    const id = this.bodies.get(handle);
+    if (id === undefined) return;
+    const linear = new this.jolt.Vec3(vx, vy, vz);
+    const angular = new this.jolt.Vec3(wx, wy, wz);
+    this.bodyInterface.SetLinearAndAngularVelocity(id, linear, angular);
+    this.jolt.destroy(linear);
+    this.jolt.destroy(angular);
+  }
+
   removeBody(handle: BodyHandle): void {
     const id = this.bodies.get(handle);
     if (id === undefined) return;
@@ -315,7 +463,9 @@ export class PhysicsWorld {
     for (const handle of [...this.bodies.keys()]) this.removeBody(handle);
     for (const key of [...this.terrainBodies.keys()]) this.removeTerrainBody(key);
     for (const treeId of [...this.trunkBodies.keys()]) this.removeTrunkBody(treeId);
+    for (const id of [...this.placedBodies.keys()]) this.removePlacedCylinder(id);
     this.jolt.destroy(this.scratchVec);
+    this.jolt.destroy(this.scratchPoint);
     this.jolt.destroy(this.scratchQuat);
     this.jolt.destroy(this.joltInterface);
   }

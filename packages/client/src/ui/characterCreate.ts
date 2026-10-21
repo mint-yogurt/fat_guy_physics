@@ -22,7 +22,7 @@ export function loadAppearance(): Appearance | undefined {
 }
 
 /** Resolves once the player presses Play. */
-export function askAppearance(root: HTMLElement): Promise<Appearance> {
+export function askAppearance(root: HTMLElement, onAccept?: () => void): Promise<Appearance> {
   const chosen: Appearance = { ...(loadAppearance() ?? DEFAULT_APPEARANCE) };
 
   root.innerHTML = `
@@ -51,6 +51,7 @@ export function askAppearance(root: HTMLElement): Promise<Appearance> {
       else button.textContent = value;
       button.classList.toggle("on", index === selected);
       button.addEventListener("click", () => {
+        onAccept?.();
         for (const sibling of host.children) sibling.classList.remove("on");
         button.classList.add("on");
         onPick(index);
@@ -69,6 +70,7 @@ export function askAppearance(root: HTMLElement): Promise<Appearance> {
 
   return new Promise<Appearance>((resolve) => {
     const play = (): void => {
+      onAccept?.();
       const input = root.querySelector<HTMLInputElement>("#cc-name");
       chosen.name = (input?.value ?? "").trim() || DEFAULT_APPEARANCE.name;
       try {

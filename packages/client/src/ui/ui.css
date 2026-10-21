@@ -101,6 +101,64 @@ body {
   display: none;
 }
 
+#stats[hidden],
+#controls[hidden],
+#hint[hidden] {
+  display: none;
+}
+
+/* Shown while the mouse is free, since the debug readout that used to say so is hidden. */
+#hint {
+  position: absolute;
+  left: 50%;
+  top: 16px;
+  transform: translateX(-50%);
+  padding: 3px 10px;
+  background: rgba(10, 14, 20, 0.5);
+  border-radius: 3px;
+  font-size: 12px;
+  white-space: pre;
+}
+
+/* What the item in the hand does: a keycap per input, its action under it. */
+#item-controls {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 56px;
+}
+
+.keycap {
+  padding: 3px 9px;
+  min-width: 44px;
+  text-align: center;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  background: rgba(10, 14, 20, 0.62);
+  border: 1px solid rgba(232, 240, 247, 0.75);
+  border-bottom-width: 3px;
+  border-radius: 4px;
+}
+
+.hint-action {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.hint-hold {
+  opacity: 0.55;
+}
+
 #controls {
   position: absolute;
   top: 10px;
@@ -126,18 +184,15 @@ body {
 
 .slot {
   position: relative;
-  width: 76px;
-  height: 40px;
-  display: flex;
-  align-items: flex-end;
-  padding: 4px 6px;
-  background: rgba(10, 14, 20, 0.42);
+  width: 56px;
+  height: 56px;
+  /* No background: the canvas sits beneath the DOM, so the translucent
+     backdrop is drawn there with the item (see render/hotbarItems.ts). */
   border: 1px solid rgba(232, 240, 247, 0.22);
   border-radius: 3px;
 }
 
 .slot.selected {
-  background: rgba(10, 14, 20, 0.66);
   border-color: rgba(232, 240, 247, 0.85);
 }
 
@@ -149,10 +204,21 @@ body {
   font-size: 11px;
 }
 
-.slot-label {
+.slot-icon {
+  position: absolute;
+  inset: 8px;
+  width: 38px;
+  height: 38px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+.slot-count {
+  position: absolute;
+  right: 5px;
+  bottom: 3px;
   font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
 }
 
 #charcreate {
@@ -232,4 +298,167 @@ body {
 
 #charcreate[hidden] {
   display: none;
+}
+
+/* The map: a square panel over the middle of the screen. */
+#map {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(86vh, 90vw);
+  height: min(86vh, 90vw);
+  transform: translate(-50%, -50%);
+  border: 3px solid #2b2418;
+  box-shadow: 0 0 0 2px #7a6a45, 0 8px 40px rgba(0, 0, 0, 0.7);
+  background: #0b0e13;
+}
+
+#map canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* The inventory screen. Fills are drawn in the canvas (see ui/inventoryScreen.ts),
+   so these are borders, text and layout only. */
+#inventory {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  user-select: none;
+  cursor: default;
+  --slot: 46px;
+}
+
+#inventory[hidden],
+.inv-panel[hidden],
+.inv-slot[hidden],
+.craft-sign[hidden],
+.inv-tip[hidden] {
+  display: none;
+}
+
+.inv-row {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+  max-width: 98vw;
+}
+
+.inv-panel {
+  padding: 10px 12px 12px;
+  border: 1px solid rgba(232, 240, 247, 0.4);
+  border-radius: 4px;
+}
+
+/* A third for crafting, two thirds for the grid. */
+.inv-main {
+  display: grid;
+  grid-template-rows: 1fr 2fr;
+  gap: 8px;
+  height: min(404px, 94vh);
+}
+
+.inv-container {
+  align-self: center;
+}
+
+.inv-button {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 5px 0;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: inherit;
+  background: rgba(232, 240, 247, 0.12);
+  border: 1px solid rgba(232, 240, 247, 0.4);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.inv-button:hover {
+  background: rgba(232, 240, 247, 0.28);
+}
+
+.inv-title {
+  margin-bottom: 6px;
+  font-size: 12px;
+  opacity: 0.6;
+  letter-spacing: 0.06em;
+}
+
+.inv-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--columns, 8), var(--slot));
+  gap: 4px;
+}
+
+.inv-gap {
+  grid-column: 1 / -1;
+  height: 6px;
+}
+
+.inv-slot {
+  width: var(--slot);
+  height: var(--slot);
+}
+
+.inv-slot:hover {
+  border-color: rgba(232, 240, 247, 0.85);
+}
+
+.inv-slot.locked {
+  opacity: 0.85;
+}
+
+.inv-slot .slot-icon {
+  inset: 6px;
+  width: calc(var(--slot) - 12px);
+  height: calc(var(--slot) - 12px);
+}
+
+.craft-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.craft-sign {
+  font-size: 20px;
+  opacity: 0.7;
+}
+
+.craft-equals {
+  margin-left: 4px;
+}
+
+.inv-slot.result {
+  border-color: rgba(232, 240, 247, 0.55);
+}
+
+.inv-cursor-count {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.inv-tip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 2px 8px;
+  background: rgba(10, 14, 20, 0.85);
+  border: 1px solid rgba(232, 240, 247, 0.35);
+  border-radius: 3px;
+  pointer-events: none;
+  font-size: 12px;
+  white-space: nowrap;
 }

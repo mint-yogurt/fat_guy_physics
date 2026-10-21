@@ -10,5 +10,5 @@
   // the browser, and Vite compiles it itself. It is typechecked by
   // tsconfig.node.json instead.
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../shared" }]
+  "references": [{ "path": "../shared" }, { "path": "../synth" }]
 }

@@ -18,10 +18,12 @@ export class InputState {
   private readonly keys = new Set<string>();
   private readonly buttons = new Set<number>();
   private readonly pressedThisFrame = new Set<string>();
+  private readonly mousePressedThisFrame = new Set<number>();
 
   /** Accumulated pointer-lock motion since the last consumeMouse(). */
   private pendingDx = 0;
   private pendingDy = 0;
+  private pendingWheel = 0;
 
   /** Set when pointer lock was refused, so the HUD can say why. */
   lockError: string | undefined;
@@ -43,28 +45,49 @@ export class InputState {
     return this.buttons.has(button);
   }
 
+  /** True once per mouse click, cleared by {@link endFrame}: for actions that must not repeat while held. */
+  wasMousePressed(button: number): boolean {
+    return this.mousePressedThisFrame.has(button);
+  }
+
   /** True once per physical keypress, cleared by {@link endFrame}. */
   wasPressed(code: string): boolean {
     return this.pressedThisFrame.has(code);
   }
 
+  /**
+   * Takes the mouse. requestPointerLock returns a promise that genuinely
+   * rejects: in a cross-origin iframe without allow="pointer-lock", and when
+   * the user clicks again during the browser's cooldown after an Esc. An
+   * uncaught rejection spams the console on every click, so it is recorded for
+   * the HUD instead -- "the game will not capture my mouse" needs to show up
+   * somewhere the player can see it. `quiet` is for a retake the player did not
+   * click for (closing a menu): if the browser refuses, a click will do, and
+   * there is nothing to report.
+   */
+  capture(quiet = false): void {
+    if (this.locked) return;
+    void this.canvas.requestPointerLock()?.catch((err: unknown) => {
+      if (!quiet) this.lockError = err instanceof Error ? err.message : String(err);
+    });
+  }
+
+  /** Lets go of the mouse, for a menu that needs the cursor. */
+  release(): void {
+    if (this.locked) document.exitPointerLock();
+  }
+
   attach(): void {
     const onClick = (): void => {
-      if (this.locked) return;
-      // requestPointerLock returns a promise that genuinely rejects: in a
-      // cross-origin iframe without allow="pointer-lock", and when the user
-      // clicks again during the browser's cooldown after an Esc. An uncaught
-      // rejection spams the console on every click, so it is recorded for
-      // the HUD instead -- "the game will not capture my mouse" needs to
-      // show up somewhere the player can see it.
-      void this.canvas.requestPointerLock()?.catch((err: unknown) => {
-        this.lockError = err instanceof Error ? err.message : String(err);
-      });
+      this.capture();
     };
     const onMouseDown = (event: MouseEvent): void => {
       // Only while captured. The click that *takes* the lock must not also
       // count as a dig -- it was aimed at the window, not at terrain.
-      if (this.locked) this.buttons.add(event.button);
+      if (this.locked) {
+        this.buttons.add(event.button);
+        this.mousePressedThisFrame.add(event.button);
+      }
     };
     const onMouseUp = (event: MouseEvent): void => {
       this.buttons.delete(event.button);
@@ -80,6 +103,9 @@ export class InputState {
       // before accumulating, so the sign is handled here to match.
       this.pendingDy -= event.movementY;
     };
+    const onWheel = (event: WheelEvent): void => {
+      this.pendingWheel += event.deltaY;
+    };
     const onKeyDown = (event: KeyboardEvent): void => {
       // Ignore auto-repeat: a held key must not re-fire edge-triggered
       // actions at the OS repeat rate.
@@ -88,6 +114,8 @@ export class InputState {
       // Space scrolls the page by default, which is visible even with a
       // full-viewport canvas and no scrollbar.
       if (event.code === "Space") event.preventDefault();
+      // Tab toggles the debug readout; it must not move browser focus too.
+      if (event.code === "Tab") event.preventDefault();
     };
     const onKeyUp = (event: KeyboardEvent): void => {
       this.keys.delete(event.code);
@@ -113,6 +141,7 @@ export class InputState {
     window.addEventListener("mouseup", onMouseUp);
     window.addEventListener("contextmenu", onContextMenu);
     window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("wheel", onWheel, { passive: true });
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
@@ -124,6 +153,7 @@ export class InputState {
       () => window.removeEventListener("mouseup", onMouseUp),
       () => window.removeEventListener("contextmenu", onContextMenu),
       () => window.removeEventListener("mousemove", onMouseMove),
+      () => window.removeEventListener("wheel", onWheel),
       () => window.removeEventListener("keydown", onKeyDown),
       () => window.removeEventListener("keyup", onKeyUp),
       () => window.removeEventListener("blur", onBlur),
@@ -150,8 +180,16 @@ export class InputState {
     return dy;
   }
 
+  /** Returns accumulated wheel scroll (positive = towards the user) and clears it. */
+  consumeWheel(): number {
+    const dy = this.pendingWheel;
+    this.pendingWheel = 0;
+    return dy;
+  }
+
   /** Call at the end of every rendered frame. */
   endFrame(): void {
     this.pressedThisFrame.clear();
+    this.mousePressedThisFrame.clear();
   }
 }

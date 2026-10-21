@@ -123,11 +123,13 @@ describe("World streaming", () => {
     }
     onTreePlaced(): void {}
     onTreeFoliageRemoved(): void {}
+    onTreeLightsRemoved(): void {}
     onTreeCut(): void {}
     onBushPlaced(): void {}
     onTreeUnloaded(): void {}
     onPropPlaced(): void {}
     onPropUnloaded(): void {}
+    onRockPlaced(): void {}
     reset(): void {
       this.loaded.length = 0;
       this.unloaded.length = 0;

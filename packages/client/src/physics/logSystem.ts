@@ -3,8 +3,10 @@ import { Group, Mesh, Quaternion, Vector3, type Object3D, type Scene } from "thr
 import { ItemType } from "@fgp/shared/items/inventory";
 import { chunkKey, keyX, keyY, keyZ } from "@fgp/shared/sim/chunkKey";
 import type { OrientedBody, SceneSolidQuery } from "@fgp/shared/sim/sceneQuery";
+import { VOXEL_SIZE } from "@fgp/shared/sim/constants";
 import { CHUNK_METERS, type Tree, type World } from "@fgp/shared/sim/world";
 
+import type { ItemAssets } from "../render/itemAssets.ts";
 import { sliceAtY } from "../render/sliceGeometry.ts";
 import { horizontalRadius } from "../render/treeAssets.ts";
 import type { FellingPiece, PieceShape } from "../render/treeRenderer.ts";
@@ -25,6 +27,11 @@ import type { BodyHandle, PhysicsWorld } from "./physicsWorld.ts";
  * moment no piece is near them. Standing trunks and stumps get the same
  * treatment, as static cylinders: without them a piece drops straight
  * through the stump it was cut from.
+ *
+ * Thrown logs live here too: a log bowled or lobbed out of the hand is a
+ * small Jolt capsule with the log mesh on it, rolling and bouncing over the
+ * same terrain bodies, until it comes to rest and turns back into a log
+ * pickup where it stopped.
  */
 
 /** Chunks either side of a piece's own that get a collision body. */
@@ -49,6 +56,22 @@ const CHOPS_TO_CUT = 2;
 const CHOP_REANCHOR_METERS = 0.4;
 const MIN_PART_METERS = 0.35;
 
+/**
+ * Rolling resistance on a thrown log touching the ground, as a steady
+ * deceleration in m/s^2. Jolt has none of its own, so without this a rolled
+ * log coasts forever on the flat and runs away down any slope. Being a
+ * constant rather than a fraction of the speed, it brings a slow roll to a
+ * proper stop, and holds a log still on a slope gentler than about 15
+ * degrees. Range on the flat is v^2 / 2a.
+ */
+const ROLL_RESISTANCE = 1.6;
+/** How close to the ground a log's centre counts as rolling on it, beyond its radius. */
+const ROLL_CONTACT_SLACK = 0.12;
+/** A thrown log goes back to being a pickup once it rests, or after this long regardless. */
+const THROWN_LOG_MAX_SECONDS = 15;
+/** It is never "at rest" sooner than this, while Jolt is still waking it. */
+const THROWN_LOG_MIN_SECONDS = 0.4;
+
 export type DropFn = (
   type: ItemType,
   x: number,
@@ -71,9 +94,20 @@ export interface Piece {
    */
   readonly body: OrientedBody;
   settled: boolean;
+  /** Speed at the last update (m/s), to notice a sudden stop. */
+  lastSpeed: number;
   /** Chop progress, as on a standing tree: a body-local height and a hit count. */
   chopLocalY: number;
   chopHits: number;
+}
+
+interface ThrownLog {
+  readonly handle: BodyHandle;
+  readonly object: Object3D;
+  /** performance.now() at the throw, ms. */
+  readonly born: number;
+  /** Speed at the last update (m/s), to notice a sudden stop. */
+  lastSpeed: number;
 }
 
 export interface PieceHit {
@@ -120,8 +154,16 @@ export function createPieceHit(): PieceHit {
   return { piece: undefined, distance: Infinity, x: 0, y: 0, z: 0 };
 }
 
+/** A body that loses this much speed (m/s) between two updates has hit something. */
+const IMPACT_MIN_DROP = 2.5;
+
 export class LogSystem {
+  /** Called when a piece or thrown log hits something hard: where, and how hard (m/s of speed lost). */
+  onImpact: ((x: number, y: number, z: number, strength: number) => void) | undefined = undefined;
   private readonly pieces: Piece[] = [];
+  private readonly thrown: ThrownLog[] = [];
+  private readonly velocity = new Float32Array(6);
+  private lastThrownUpdate = 0;
   private readonly transform = new Float32Array(7);
   private readonly wantedChunks = new Set<number>();
   private readonly wantedTrunks = new Set<number>();
@@ -133,10 +175,46 @@ export class LogSystem {
     private readonly query: SceneSolidQuery,
     private readonly scene: Scene,
     private readonly drop: DropFn,
+    private readonly items: ItemAssets,
   ) {}
 
   get count(): number {
     return this.pieces.length;
+  }
+
+  get thrownCount(): number {
+    return this.thrown.length;
+  }
+
+  /**
+   * A log leaving the hand at a position, rotation (body Y along the log)
+   * and velocity. False if there was no body to make, so the caller can
+   * drop it as a plain pickup instead.
+   */
+  throwLog(
+    x: number,
+    y: number,
+    z: number,
+    rotation: readonly [number, number, number, number],
+    vx: number,
+    vy: number,
+    vz: number,
+    wx: number,
+    wy: number,
+    wz: number,
+  ): boolean {
+    const radius = Math.max(0.03, this.items.logRadius);
+    this.markWanted(x, y, z, this.items.logLength / 2);
+    this.syncStaticBodies();
+    const handle = this.physics.spawnLog(x, y, z, radius, this.items.logLength / 2, rotation);
+    if (handle === undefined) return false;
+    this.physics.setVelocity(handle, vx, vy, vz, wx, wy, wz);
+    const object = this.items.log.clone();
+    object.position.set(x, y, z);
+    object.quaternion.set(rotation[0], rotation[1], rotation[2], rotation[3]);
+    this.scene.add(object);
+    this.thrown.push({ handle, object, born: performance.now(), lastSpeed: 0 });
+    return true;
   }
 
   /**
@@ -207,6 +285,7 @@ export class LogSystem {
         qw: rotation[3],
       },
       settled: false,
+      lastSpeed: 0,
       chopLocalY: 0,
       chopHits: 0,
     });
@@ -226,7 +305,7 @@ export class LogSystem {
     object.add(inner);
     if (shape.trunk !== undefined) {
       shape.trunk.computeBoundingSphere();
-      inner.add(new Mesh(shape.trunk, shape.trunkMaterial));
+      inner.add(new Mesh(shape.trunk, shape.trunkMaterials));
     }
     for (const cluster of shape.foliage) inner.add(new Mesh(cluster.geometry, shape.foliageMaterial));
     return object;
@@ -404,6 +483,7 @@ export class LogSystem {
       // A sleeping piece needs nothing under it, so its static bodies are
       // allowed to go away until something wakes it.
       piece.settled = !this.physics.isActive(piece.handle);
+      piece.lastSpeed = this.noticeImpact(piece.handle, piece.lastSpeed, x, y, z);
       if (piece.settled) {
         // Only settled pieces are walkable. A tumbling one would mean the
         // player's feet chasing a moving surface the physics system does
@@ -414,7 +494,83 @@ export class LogSystem {
       }
     }
 
+    this.updateThrown(playerX, playerY, playerZ);
     this.syncStaticBodies();
+  }
+
+  /** Moves thrown logs, and lands the ones that have stopped as pickups. */
+  private updateThrown(playerX: number, playerY: number, playerZ: number): void {
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - this.lastThrownUpdate) / 1000);
+    this.lastThrownUpdate = now;
+    for (let i = this.thrown.length - 1; i >= 0; i--) {
+      const log = this.thrown[i];
+      if (log === undefined) continue;
+      if (!this.physics.readTransform(log.handle, this.transform)) continue;
+      const x = this.transform[0] ?? 0;
+      const y = this.transform[1] ?? 0;
+      const z = this.transform[2] ?? 0;
+      log.object.position.set(x, y, z);
+      log.object.quaternion.set(
+        this.transform[3] ?? 0,
+        this.transform[4] ?? 0,
+        this.transform[5] ?? 0,
+        this.transform[6] ?? 1,
+      );
+
+      log.lastSpeed = this.noticeImpact(log.handle, log.lastSpeed, x, y, z);
+      const age = (now - log.born) / 1000;
+      const resting = age > THROWN_LOG_MIN_SECONDS && !this.physics.isActive(log.handle);
+      const far = Math.hypot(x - playerX, y - playerY, z - playerZ) > LOG_CULL_METERS;
+      if (resting || far || age > THROWN_LOG_MAX_SECONDS) {
+        this.removeThrown(log);
+        this.thrown.splice(i, 1);
+        this.drop(ItemType.Log, x, y, z, 0, 0, 0);
+        continue;
+      }
+      this.markWanted(x, y, z, this.items.logLength / 2);
+      this.resistRolling(log, x, y, z, dt);
+    }
+  }
+
+  /** Reports a sudden loss of speed as an impact; returns the body's speed now. */
+  private noticeImpact(handle: BodyHandle, lastSpeed: number, x: number, y: number, z: number): number {
+    if (this.onImpact === undefined) return 0;
+    if (!this.physics.readVelocity(handle, this.velocity)) return lastSpeed;
+    const v = this.velocity;
+    const speed = Math.hypot(v[0] ?? 0, v[1] ?? 0, v[2] ?? 0);
+    if (lastSpeed - speed >= IMPACT_MIN_DROP) this.onImpact(x, y, z, lastSpeed - speed);
+    return speed;
+  }
+
+  /** Slows a thrown log that is on the ground; see ROLL_RESISTANCE. */
+  private resistRolling(log: ThrownLog, x: number, y: number, z: number, dt: number): void {
+    const ground =
+      this.world.surfaceHeightVoxels(Math.floor(x / VOXEL_SIZE), Math.floor(z / VOXEL_SIZE)) * VOXEL_SIZE;
+    const radius = this.items.logRadius;
+    if (y - ground > radius + ROLL_CONTACT_SLACK) return;
+    if (!this.physics.readVelocity(log.handle, this.velocity)) return;
+    const v = this.velocity;
+    const lose = ROLL_RESISTANCE * dt;
+    // Speed and rim speed lose the same amount, so the roll stays a roll.
+    const speed = Math.hypot(v[0] ?? 0, v[2] ?? 0);
+    const rim = Math.hypot(v[3] ?? 0, v[4] ?? 0, v[5] ?? 0) * radius;
+    const keep = speed > lose ? (speed - lose) / speed : 0;
+    const keepSpin = rim > lose ? (rim - lose) / rim : 0;
+    this.physics.setVelocity(
+      log.handle,
+      (v[0] ?? 0) * keep,
+      v[1] ?? 0,
+      (v[2] ?? 0) * keep,
+      (v[3] ?? 0) * keepSpin,
+      (v[4] ?? 0) * keepSpin,
+      (v[5] ?? 0) * keepSpin,
+    );
+  }
+
+  private removeThrown(log: ThrownLog): void {
+    this.physics.removeBody(log.handle);
+    this.scene.remove(log.object);
   }
 
   /** Marks the chunks and trunks around a point as needing a collision body. */
@@ -479,5 +635,7 @@ export class LogSystem {
   clear(): void {
     for (const piece of this.pieces) this.remove(piece);
     this.pieces.length = 0;
+    for (const log of this.thrown) this.removeThrown(log);
+    this.thrown.length = 0;
   }
 }

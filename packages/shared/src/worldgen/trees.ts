@@ -144,6 +144,21 @@ export function treeShape(treeHash: number, species: TreeSpecies): TreeShape | u
   };
 }
 
+/** Chance a Christmas conifer is strung with xmas lights. */
+export const TREE_LIGHTS_CHANCE = 0.25;
+/** Most strings of lights on one tree. */
+export const TREE_LIGHTS_MAX = 3;
+
+/**
+ * How many strings of xmas lights a Christmas conifer is hung with: none for
+ * three trees in four, otherwise one to three. Decided from the tree's id
+ * alone, so it is the same every time the tree streams back in.
+ */
+export function treeLightCount(treeHash: number): number {
+  if (hashFloat(treeHash, 0x11c7, 0, 0) >= TREE_LIGHTS_CHANCE) return 0;
+  return 1 + Math.min(TREE_LIGHTS_MAX - 1, Math.floor(hashFloat(treeHash, 0x11c8, 0, 0) * TREE_LIGHTS_MAX));
+}
+
 export function treeHashAt(worldVoxelX: number, worldVoxelZ: number, seed: number): number {
   // Unsigned, so an id is never negative and `>= 0` stays a valid test.
   return hash32(worldVoxelX, worldVoxelZ, seed, 3) >>> 0;

@@ -2,6 +2,7 @@ import { Quaternion, Vector3, type Object3D, type Scene } from "three/webgpu";
 
 import { ItemType } from "@fgp/shared/items/inventory";
 import type { PickupField } from "@fgp/shared/items/pickupField";
+import { TRAMPOLINE_RADIUS, TRAMPOLINE_RESTITUTION, type TrampolineField } from "@fgp/shared/items/trampoline";
 import { VOXEL_SIZE } from "@fgp/shared/sim/constants";
 import { createSceneHit, HitKind, type World } from "@fgp/shared/sim/world";
 
@@ -19,7 +20,8 @@ import { createPieceHit, type LogSystem } from "./logSystem.ts";
  *  - ground or a standing tree: it goes in, and stays there at the angle it
  *    hit, as a stuck pickup -- walk up and press E to pull it out;
  *  - a felled piece: it shoves the piece and falls off as a loose pickup;
- *  - a prop: it bounces off and falls.
+ *  - a prop: it bounces off and falls;
+ *  - a trampoline mat: it springs back up off it, losing only what the mat does.
  *
  * A stick that flies for too long without hitting anything drops where it is.
  */
@@ -43,7 +45,14 @@ const Z_AXIS = new Vector3(0, 0, 1);
 const dir = new Vector3();
 const rotation = new Quaternion();
 
+export type StickHit = "log" | "mat" | "prop" | "ground";
+
 export class ThrownSticks {
+  /**
+   * Called where a stick hits something and stops: a point, and what it hit
+   * (and which prop, when it was a prop).
+   */
+  onHit: ((x: number, y: number, z: number, hit: StickHit, propId: number) => void) | undefined = undefined;
   private readonly flying: Flying[] = [];
   private readonly sceneHit = createSceneHit();
   private readonly pieceHit = createPieceHit();
@@ -53,6 +62,7 @@ export class ThrownSticks {
     private readonly assets: ItemAssets,
     private readonly world: World,
     private readonly pickups: PickupField,
+    private readonly trampolines: TrampolineField,
   ) {}
 
   get count(): number {
@@ -138,18 +148,38 @@ export class ThrownSticks {
       const v = stick.velocity;
       logs.shove(piece.piece, v.x * SHOVE, v.y * SHOVE, v.z * SHOVE);
       tip.set(piece.x - ux * 0.1, piece.y - uy * 0.1, piece.z - uz * 0.1);
+      this.onHit?.(tip.x, tip.y, tip.z, "log", -1);
       this.dropLoose(tip, now, -v.x * 0.15, 1, -v.z * 0.15);
       return true;
+    }
+
+    // A mat is not in the world's voxels or the log system, so it is its own
+    // test: where the segment crosses the mat's plane, if that is on the mat.
+    if (uy < 0) {
+      for (const mat of this.trampolines.items) {
+        const along = (mat.topY - tip.y) / uy;
+        if (along < 0 || along > length || along >= sceneDistance) continue;
+        const hitX = tip.x + ux * along;
+        const hitZ = tip.z + uz * along;
+        if (Math.hypot(hitX - mat.x, hitZ - mat.z) > TRAMPOLINE_RADIUS) continue;
+        const v = stick.velocity;
+        tip.set(hitX, mat.topY, hitZ);
+        this.onHit?.(hitX, mat.topY, hitZ, "mat", -1);
+        this.dropLoose(tip, now, v.x * 0.5, -v.y * TRAMPOLINE_RESTITUTION, v.z * 0.5);
+        return true;
+      }
     }
 
     if (sceneDistance <= length) {
       tip.set(tip.x + ux * sceneDistance, tip.y + uy * sceneDistance, tip.z + uz * sceneDistance);
       if (scene.kind === HitKind.Prop) {
+        this.onHit?.(tip.x, tip.y, tip.z, "prop", scene.propId);
         const v = stick.velocity;
         this.dropLoose(tip, now, -v.x * 0.15, 1, -v.z * 0.15);
         return true;
       }
       // Terrain and trunks: in it goes, along the line it was flying.
+      this.onHit?.(tip.x, tip.y, tip.z, "ground", -1);
       const embed = EMBED_DEPTH + VOXEL_SIZE * 0.5;
       const buttX = tip.x + ux * embed - ux * STICK_LENGTH;
       const buttY = tip.y + uy * embed - uy * STICK_LENGTH;
@@ -163,9 +193,11 @@ export class ThrownSticks {
   }
 
   private dropLoose(at: Vector3, now: number, vx: number, vy: number, vz: number): void {
-    const groundY =
+    const groundY = Math.max(
       this.world.surfaceHeightVoxels(Math.floor(at.x / VOXEL_SIZE), Math.floor(at.z / VOXEL_SIZE)) *
-      VOXEL_SIZE;
+        VOXEL_SIZE,
+      this.trampolines.topAt(at.x, at.z) ?? -Infinity,
+    );
     this.pickups.spawn(ItemType.Stick, at.x, at.y, at.z, groundY, now, vx, vy, vz);
   }
 

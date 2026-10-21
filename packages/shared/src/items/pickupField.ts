@@ -29,11 +29,17 @@ const AIM_SLACK = 0.45;
 /** Anything this close to the player's middle is pickable without aiming at it. */
 const NEAR_RADIUS = 1.1;
 
+/** Landing slower than this (m/s) settles instead of bouncing, even on a springy surface. */
+const MIN_BOUNCE_SPEED = 1;
+
 /** Given up on after this long, so a drop into a hole is not forever. */
 const MAX_LIFETIME_SECONDS = 600;
 
 /** Terrain height under a point, metres. */
 export type GroundSampler = (x: number, z: number) => number;
+
+/** How much of its landing speed the surface under a point gives back; 0 for dead ground. */
+export type RestitutionSampler = (x: number, z: number) => number;
 
 export interface Pickup {
   readonly id: number;
@@ -118,7 +124,7 @@ export class PickupField {
   }
 
   /** Flies, lands, bobs and expires. Call once per frame, not per substep. */
-  update(dt: number, now: number, ground: GroundSampler): void {
+  update(dt: number, now: number, ground: GroundSampler, restitution?: RestitutionSampler): void {
     this.removed.length = 0;
 
     for (let i = this.items.length - 1; i >= 0; i--) {
@@ -138,10 +144,17 @@ export class PickupField {
         if (item.vx !== 0 || item.vz !== 0) item.groundY = ground(item.x, item.z);
         if (item.y <= item.groundY + HOVER_HEIGHT && item.vy <= 0) {
           item.y = item.groundY + HOVER_HEIGHT;
-          item.vx = 0;
-          item.vy = 0;
-          item.vz = 0;
-          item.landed = true;
+          const bounce = restitution?.(item.x, item.z) ?? 0;
+          if (bounce > 0 && -item.vy > MIN_BOUNCE_SPEED) {
+            // A springy surface: back up with what it was given, sideways
+            // motion untouched.
+            item.vy = -item.vy * bounce;
+          } else {
+            item.vx = 0;
+            item.vy = 0;
+            item.vz = 0;
+            item.landed = true;
+          }
         }
       } else {
         item.y =
@@ -212,6 +225,15 @@ export class PickupField {
     this.items.splice(index, 1);
     this.removed.push(item.id);
     return true;
+  }
+
+  /** Lets landed items near a point fall again, for when whatever they rested on has gone. */
+  dropNear(x: number, z: number, radius: number): void {
+    for (const item of this.items) {
+      if (item.stuck === undefined && item.landed && Math.hypot(item.x - x, item.z - z) <= radius) {
+        item.landed = false;
+      }
+    }
   }
 
   clear(): void {

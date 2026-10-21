@@ -3,7 +3,7 @@ import {
   DoubleSide,
   Group,
   Mesh,
-  MeshLambertMaterial,
+  MeshLambertNodeMaterial,
   type Scene,
   type Texture,
 } from "three/webgpu";
@@ -16,6 +16,8 @@ import { metricsFor, TreeSpecies } from "@fgp/shared/worldgen/trees";
 
 import { sliceAtY } from "./sliceGeometry.ts";
 import type { TreeAssets } from "./treeAssets.ts";
+import { litByBulbs } from "./bulbLights.ts";
+import type { TreeLightsView } from "./treeLights.ts";
 
 /**
  * Standing trees, as instances of the authored meshes.
@@ -43,7 +45,10 @@ export interface PieceShape {
   /** The wood, owned outright by the piece; undefined for a bare tuft of foliage. */
   readonly trunk: BufferGeometry | undefined;
   /** Foliage riding on the piece: shared geometry, and the cluster's centre height. */
-  readonly foliage: readonly { readonly geometry: BufferGeometry; readonly y: number }[];
+  readonly foliage: readonly {
+    readonly geometry: BufferGeometry;
+    readonly y: number;
+  }[];
   /** Asset-space heights the piece spans. */
   readonly bottom: number;
   readonly top: number;
@@ -51,8 +56,9 @@ export interface PieceShape {
   readonly yaw: number;
   /** The standing trunk's radius in metres; a piece is never fatter than this. */
   readonly trunkRadiusMeters: number;
-  readonly trunkMaterial: MeshLambertMaterial;
-  readonly foliageMaterial: MeshLambertMaterial;
+  /** Bark, then the cut face (geometry group CAP_GROUP). */
+  readonly trunkMaterials: MeshLambertNodeMaterial[];
+  readonly foliageMaterial: MeshLambertNodeMaterial;
 }
 
 /** A cut piece, ready to be handed to the rigid-body layer. */
@@ -69,7 +75,7 @@ interface Instance {
   readonly trunk: Mesh;
   readonly foliage: Map<number, Mesh>;
   /** Green, or autumn for the living tree among the dead ones. */
-  readonly foliageMaterial: MeshLambertMaterial;
+  readonly foliageMaterial: MeshLambertNodeMaterial;
   /** Set once a cut has given this tree its own trunk geometry. */
   ownedTrunk: BufferGeometry | undefined;
 }
@@ -79,14 +85,21 @@ function tint(material: Material): number {
   const r = MATERIAL_COLORS[base] ?? 1;
   const g = MATERIAL_COLORS[base + 1] ?? 1;
   const b = MATERIAL_COLORS[base + 2] ?? 1;
-  return (Math.round(r * 255) << 16) | (Math.round(g * 255) << 8) | Math.round(b * 255);
+  return (
+    (Math.round(r * 255) << 16) |
+    (Math.round(g * 255) << 8) |
+    Math.round(b * 255)
+  );
 }
 
 export class TreeRenderer {
   private readonly instances = new Map<number, Instance>();
-  private readonly trunkMaterial: MeshLambertMaterial;
-  private readonly foliageMaterial: MeshLambertMaterial;
-  private readonly autumnMaterial: MeshLambertMaterial;
+  private readonly trunkMaterial: MeshLambertNodeMaterial;
+  /** The cut face of a stump or piece: treestump.png, untinted. */
+  private readonly stumpMaterial: MeshLambertNodeMaterial;
+  private readonly trunkMaterials: MeshLambertNodeMaterial[];
+  private readonly foliageMaterial: MeshLambertNodeMaterial;
+  private readonly autumnMaterial: MeshLambertNodeMaterial;
 
   /**
    * Where cut pieces go. Set by main once the physics layer has finished
@@ -94,24 +107,36 @@ export class TreeRenderer {
    * the behaviour the voxel trees had.
    */
   onFelled: ((piece: FellingPiece) => void) | undefined;
+  /** Where Christmas trees' strings of lights are drawn, when there is one. */
+  lights: TreeLightsView | undefined;
 
   constructor(
     private readonly scene: Scene,
     private readonly assets: TreeAssets,
     map: Texture,
+    stumpMap: Texture,
   ) {
-    this.trunkMaterial = new MeshLambertMaterial({
-      map,
-      color: tint(Material.Wood),
-      // The cut face is left open by the slicer, so the inside of the
-      // trunk has to be drawn or a felled tree looks like it has a hole
-      // punched through it.
-      side: DoubleSide,
-    });
-    this.foliageMaterial = new MeshLambertMaterial({ map, color: tint(Material.Leaf) });
+    this.trunkMaterial = litByBulbs(
+      new MeshLambertNodeMaterial({
+        map,
+        color: tint(Material.Wood),
+        // The slicer caps a cut, but the authored trunks are not all closed
+        // meshes (branch ends, the base), so the inside stays drawn.
+        side: DoubleSide,
+      }),
+    );
+    this.stumpMaterial = litByBulbs(
+      new MeshLambertNodeMaterial({ map: stumpMap }),
+    );
+    this.trunkMaterials = [this.trunkMaterial, this.stumpMaterial];
+    this.foliageMaterial = litByBulbs(
+      new MeshLambertNodeMaterial({ map, color: tint(Material.Leaf) }),
+    );
     // The same leaves, recoloured: the texture is a placeholder, so the
     // autumn look is the tint alone.
-    this.autumnMaterial = new MeshLambertMaterial({ map, color: AUTUMN_FOLIAGE_COLOR });
+    this.autumnMaterial = litByBulbs(
+      new MeshLambertNodeMaterial({ map, color: AUTUMN_FOLIAGE_COLOR }),
+    );
   }
 
   get count(): number {
@@ -128,7 +153,7 @@ export class TreeRenderer {
     group.rotation.y = tree.yaw;
     group.scale.setScalar(tree.scale);
 
-    const trunk = new Mesh(asset.trunk, this.trunkMaterial);
+    const trunk = new Mesh(asset.trunk, this.trunkMaterials);
     group.add(trunk);
 
     const foliageMaterial =
@@ -154,12 +179,20 @@ export class TreeRenderer {
 
     // A tree that streams back in already cut comes back as its stump.
     if (tree.severed) {
-      this.applyStump(instance, sliceAtY(asset.trunk, tree.trunkTopMeters / tree.scale).below);
+      this.applyStump(
+        instance,
+        sliceAtY(asset.trunk, tree.trunkTopMeters / tree.scale).below,
+      );
     }
 
     group.updateMatrix();
     this.scene.add(group);
     this.instances.set(tree.id, instance);
+    this.lights?.add(tree);
+  }
+
+  onTreeLightsRemoved(tree: Tree): void {
+    this.lights?.remove(tree.id);
   }
 
   onTreeFoliageRemoved(tree: Tree, cluster: number): void {
@@ -188,7 +221,14 @@ export class TreeRenderer {
 
     const source = instance.ownedTrunk ?? asset.trunk;
     const sliced = sliceAtY(source, cutHeightMeters / tree.scale);
-    const piece = this.buildPiece(tree, instance, sliced.above, cutHeightMeters, pieceLengthMeters, carriedFoliage);
+    const piece = this.buildPiece(
+      tree,
+      instance,
+      sliced.above,
+      cutHeightMeters,
+      pieceLengthMeters,
+      carriedFoliage,
+    );
     this.applyStump(instance, sliced.below);
 
     if (piece === undefined) return;
@@ -200,7 +240,10 @@ export class TreeRenderer {
   }
 
   /** Replaces the standing trunk with what is left below the cut. */
-  private applyStump(instance: Instance, below: BufferGeometry | undefined): void {
+  private applyStump(
+    instance: Instance,
+    below: BufferGeometry | undefined,
+  ): void {
     const previous = instance.ownedTrunk;
     if (below === undefined) {
       instance.trunk.visible = false;
@@ -247,7 +290,7 @@ export class TreeRenderer {
         scale: tree.scale,
         yaw: tree.yaw,
         trunkRadiusMeters: tree.trunkRadiusMeters,
-        trunkMaterial: this.trunkMaterial,
+        trunkMaterials: this.trunkMaterials,
         foliageMaterial: instance.foliageMaterial,
       },
       x: tree.x,
@@ -257,6 +300,7 @@ export class TreeRenderer {
   }
 
   onTreeUnloaded(treeId: number): void {
+    this.lights?.remove(treeId);
     const instance = this.instances.get(treeId);
     if (instance === undefined) return;
     this.instances.delete(treeId);
@@ -265,12 +309,14 @@ export class TreeRenderer {
   }
 
   clear(): void {
+    this.lights?.clear();
     for (const instance of this.instances.values()) {
       this.scene.remove(instance.group);
       instance.ownedTrunk?.dispose();
     }
     this.instances.clear();
     this.trunkMaterial.dispose();
+    this.stumpMaterial.dispose();
     this.foliageMaterial.dispose();
     this.autumnMaterial.dispose();
   }

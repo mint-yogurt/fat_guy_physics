@@ -9,7 +9,7 @@ import {
 
 import type { ChunkKey } from "@fgp/shared/sim/chunkKey";
 import type { ChunkResult } from "@fgp/shared/sim/chunkSource";
-import { CHUNK_METERS, type ChunkSink, type Prop, type Tree } from "@fgp/shared/sim/world";
+import { CHUNK_METERS, type ChunkSink, type PlacedRock, type Prop, type Tree } from "@fgp/shared/sim/world";
 import { FLOATS_PER_VERTEX } from "@fgp/shared/voxel/vertexLayout";
 
 import { applyMeshData, createChunkGeometry, disposeChunkGeometry } from "./chunkGeometry.ts";
@@ -124,12 +124,27 @@ export class WorldRenderer implements ChunkSink {
     this.trees.onTreeFoliageRemoved(tree, cluster);
   }
 
+  onTreeLightsRemoved(tree: Tree): void {
+    this.trees.onTreeLightsRemoved(tree);
+  }
+
   onPropPlaced(prop: Prop): void {
     this.props.onPropPlaced(prop);
   }
 
   onPropUnloaded(propId: number): void {
     this.props.onPropUnloaded(propId);
+  }
+
+  onPropChanged(prop: Prop): void {
+    this.props.onPropChanged(prop);
+  }
+
+  /** Where a rock the world has just placed goes: the game, which owns it from then on. */
+  onRock: ((rock: PlacedRock) => void) | undefined = undefined;
+
+  onRockPlaced(rock: PlacedRock): void {
+    this.onRock?.(rock);
   }
 
   onTreeCut(

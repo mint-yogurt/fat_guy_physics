@@ -149,11 +149,37 @@ function relief(generator: TerrainGenerator, x: number, z: number, radiusVoxels:
 function rollLoot(kind: PropKind, biome: Biome, id: number): string[] {
   const section = OBJECT_SHEET[kind];
   if (section.container !== true) return [];
-  const entries: readonly LootEntry[] = [...BIOME_SHEET[biome].containerLoot, ...(section.loot ?? [])];
+  const entries: readonly LootEntry[] = [...BIOME_SHEET[biome].lootTable, ...(section.loot ?? [])];
   const found: string[] = [];
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i] as LootEntry;
     if (hashFloat(id, 0x1007, i, 0) < DROP_CHANCE[entry.rarity]) found.push(entry.item);
+  }
+  return found;
+}
+
+/**
+ * What is inside a structure: `OBJECT_SHEET[kind].interior.items` items, each
+ * drawn from the region's loot table with the odds its rarity gives it
+ * (common three times as likely as uncommon, uncommon three times rare).
+ * Empty if the region has no table. Deterministic in `id`.
+ */
+export function rollInterior(kind: PropKind, biome: Biome, id: number): string[] {
+  const count = OBJECT_SHEET[kind].interior?.items ?? 0;
+  const table = BIOME_SHEET[biome].lootTable;
+  let total = 0;
+  for (const entry of table) total += DROP_CHANCE[entry.rarity];
+  const found: string[] = [];
+  if (total <= 0) return found;
+  for (let n = 0; n < count; n++) {
+    let roll = hashFloat(id, 0x1008, n, 0) * total;
+    for (const entry of table) {
+      roll -= DROP_CHANCE[entry.rarity];
+      if (roll < 0) {
+        found.push(entry.item);
+        break;
+      }
+    }
   }
   return found;
 }
@@ -164,6 +190,135 @@ function propShape(kind: PropKind, id: number): { scale: number; yaw: number } {
   return { scale: metrics.scale * jitter, yaw: hashFloat(id, 0x7a3, 0, 0) * Math.PI * 2 };
 }
 
+/** How much room a tree or bush takes, metres from its trunk, for a structure to keep clear of. */
+const TREE_CLEARANCE = 0.9;
+const BUSH_CLEARANCE = 0.5;
+
+const neighbourScratch: Placement[] = [];
+
+/**
+ * Whether nothing in the eight cells around (cx, cz) comes within `reach` of
+ * (x, z). A cell's candidate point is jittered anywhere in it, so a neighbour's
+ * conifer can land against a house; the house is the rare thing, so it is the
+ * one that gives way. The neighbours are looked up without this check, or two
+ * houses beside each other would each ask the other forever.
+ */
+function clearOfNeighbours(
+  generator: TerrainGenerator,
+  cx: number,
+  cz: number,
+  seed: number,
+  x: number,
+  z: number,
+  reach: number,
+): boolean {
+  for (let dz = -1; dz <= 1; dz++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dz === 0) continue;
+      neighbourScratch.length = 0;
+      placeCell(generator, cx + dx, cz + dz, seed, neighbourScratch, false);
+      for (const other of neighbourScratch) {
+        let ox: number;
+        let oz: number;
+        let room: number;
+        if (other.type === "prop") {
+          ox = other.x;
+          oz = other.z;
+          room = PROP_METRICS[other.kind].radius * other.scale;
+        } else {
+          ox = (other.rootVoxelX + 0.5) * VOXEL_SIZE;
+          oz = (other.rootVoxelZ + 0.5) * VOXEL_SIZE;
+          room = other.type === "tree" ? TREE_CLEARANCE : BUSH_CLEARANCE;
+        }
+        if (Math.hypot(ox - x, oz - z) < reach + room) return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * A structure (a gingerbread house): the building, with its one item in
+ * `loot`, and now and then a container standing inside it. Both come out of
+ * the region's loot table; see {@link rollInterior} and {@link rollLoot}.
+ */
+function placeStructure(
+  generator: TerrainGenerator,
+  kind: PropKind,
+  biome: Biome,
+  id: number,
+  voxelX: number,
+  voxelZ: number,
+  surface: number,
+  seed: number,
+  checkClearance: boolean,
+  out: Placement[],
+): void {
+  const interior = OBJECT_SHEET[kind].interior;
+  const metrics = PROP_METRICS[kind];
+  const shape = propShape(kind, id);
+  const x = (voxelX + 0.5) * VOXEL_SIZE;
+  const z = (voxelZ + 0.5) * VOXEL_SIZE;
+  const y = surface * VOXEL_SIZE;
+
+  const maxSlope = OBJECT_SHEET[kind].maxSlope;
+  const radiusVoxels = Math.max(1, Math.ceil((metrics.radius * shape.scale) / VOXEL_SIZE));
+  if (maxSlope !== undefined && relief(generator, voxelX, voxelZ, radiusVoxels) > maxSlope) return;
+  if (
+    checkClearance &&
+    !clearOfNeighbours(
+      generator,
+      floorDiv(voxelX, CHUNK_SIZE),
+      floorDiv(voxelZ, CHUNK_SIZE),
+      seed,
+      x,
+      z,
+      metrics.radius * shape.scale,
+    )
+  ) {
+    return;
+  }
+
+  out.push({
+    type: "prop",
+    id,
+    kind,
+    biome,
+    x,
+    y,
+    z,
+    scale: shape.scale,
+    yaw: shape.yaw,
+    tiltX: 0,
+    tiltZ: 0,
+    topsoil: false,
+    loot: rollInterior(kind, biome, id),
+  });
+
+  const containers = interior?.containers ?? [];
+  if (interior === undefined || containers.length === 0) return;
+  if (hashFloat(id, 0xc0a7, 0, 0) >= interior.containerChance) return;
+  const containerKind = containers[Math.floor(hashFloat(id, 0xc0a8, 0, 0) * containers.length)];
+  if (containerKind === undefined || !isPropKind(containerKind)) return;
+  const containerId = (id ^ 0x1c0ffee5) >>> 0;
+  const containerShape = propShape(containerKind, containerId);
+  out.push({
+    type: "prop",
+    id: containerId,
+    kind: containerKind,
+    biome,
+    x,
+    y,
+    z,
+    scale: containerShape.scale,
+    yaw: containerShape.yaw,
+    tiltX: 0,
+    tiltZ: 0,
+    topsoil: false,
+    loot: rollLoot(containerKind, biome, containerId),
+  });
+}
+
 function placeProp(
   generator: TerrainGenerator,
   kind: PropKind,
@@ -172,8 +327,14 @@ function placeProp(
   voxelX: number,
   voxelZ: number,
   surface: number,
+  seed: number,
+  checkClearance: boolean,
   out: Placement[],
 ): void {
+  if (OBJECT_SHEET[kind].interior !== undefined) {
+    placeStructure(generator, kind, biome, id, voxelX, voxelZ, surface, seed, checkClearance, out);
+    return;
+  }
   const maxSlope = OBJECT_SHEET[kind].maxSlope;
   const metrics = PROP_METRICS[kind];
   const x = (voxelX + 0.5) * VOXEL_SIZE;
@@ -289,6 +450,8 @@ export function placeCell(
   cz: number,
   seed: number,
   out: Placement[],
+  /** Structures keep clear of their neighbours; off when a structure is asking about them. */
+  checkClearance = true,
 ): number {
   const cellX = cx * CHUNK_SIZE;
   const cellZ = cz * CHUNK_SIZE;
@@ -322,7 +485,7 @@ export function placeCell(
       sizeMeters: (4 + hashFloat(worldX, worldZ, seed, 5) * 4) * 0.1,
     });
   } else if (isPropKind(kind)) {
-    placeProp(generator, kind, biome, id, worldX, worldZ, surface, out);
+    placeProp(generator, kind, biome, id, worldX, worldZ, surface, seed, checkClearance, out);
   } else {
     out.push({
       type: "tree",

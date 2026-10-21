@@ -8,15 +8,21 @@
   <body>
     <canvas id="viewport"></canvas>
     <div id="overlay">
-      <div id="stats"></div>
+      <div id="stats" hidden></div>
+      <div id="hint" hidden></div>
       <div id="crosshair" hidden></div>
       <div id="prompt" hidden></div>
-      <div id="controls">
+      <!-- The full legend. Hidden for now; it moves to menu > controls. -->
+      <div id="controls" hidden>
         <b>move</b> WASD · <b>jump</b> Space · <b>scoop</b> LMB · <b>chup</b> RMB<br />
         <b>pick up</b> E · <b>stick</b> LMB swing, hold RMB throw<br />
-        <b>ragball</b> R · <b>view</b> V · <b>fov</b> -/= · <b>slots</b> 1-8
+        <b>log</b> hold LMB bowl, hold RMB lob<br />
+        <b>map</b> M · <b>ragball</b> R · <b>view</b> V · <b>fov</b> -/= · <b>slots</b> 1-8
       </div>
       <div id="hotbar"></div>
+      <div id="item-controls"></div>
+      <div id="map" hidden><canvas></canvas></div>
+      <div id="inventory" hidden></div>
     </div>
     <div id="charcreate" hidden>
     </div>

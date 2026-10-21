@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BoxGeometry, CylinderGeometry } from "three/webgpu";
 
-import { sliceAtY } from "./sliceGeometry.ts";
+import { CAP_GROUP, sliceAtY } from "./sliceGeometry.ts";
 
 /**
  * The slicer is the one piece of real geometry code in the tree work, and
@@ -84,5 +84,46 @@ describe("sliceAtY", () => {
     // true radius, hence the tolerance rather than an exact 1.
     expect(maxRadiusAtCut).toBeGreaterThan(0.9);
     expect(maxRadiusAtCut).toBeLessThanOrEqual(1.001);
+  });
+
+  it("caps the cut on both halves, facing out of each", () => {
+    const trunk = new CylinderGeometry(1, 1, 4, 16, 1, true).toNonIndexed();
+    const { below, above } = sliceAtY(trunk, 0.5);
+    if (below === undefined || above === undefined) throw new Error("expected both halves");
+
+    for (const [half, facing] of [[below, 1], [above, -1]] as const) {
+      const cap = half.groups.find((group) => group.materialIndex === CAP_GROUP);
+      // One fan triangle per side triangle the plane crosses: two per quad.
+      expect(cap?.count).toBe(16 * 2 * 3);
+      if (cap === undefined) continue;
+      const position = half.getAttribute("position");
+      let area = 0;
+      for (let t = cap.start; t < cap.start + cap.count; t += 3) {
+        const ax = position.getX(t);
+        const az = position.getZ(t);
+        const bx = position.getX(t + 1) - ax;
+        const bz = position.getZ(t + 1) - az;
+        const cx = position.getX(t + 2) - ax;
+        const cz = position.getZ(t + 2) - az;
+        expect(position.getY(t)).toBeCloseTo(0.5);
+        // y of (b - a) x (c - a): positive faces +Y.
+        area += (bz * cx - bx * cz) / 2;
+      }
+      // A 16-gon inscribed in the unit circle, wound to face out of the half.
+      expect(area * facing).toBeCloseTo(8 * Math.sin((2 * Math.PI) / 16), 3);
+    }
+
+    // Cut again through the capped half: the old cap stays a cap.
+    const again = sliceAtY(below, -1);
+    const capHeights = (half: typeof below | undefined): Set<string> => {
+      const heights = new Set<string>();
+      const cap = half?.groups.find((group) => group.materialIndex === CAP_GROUP);
+      const position = half?.getAttribute("position");
+      if (cap === undefined || position === undefined) return heights;
+      for (let v = cap.start; v < cap.start + cap.count; v++) heights.add(position.getY(v).toFixed(3));
+      return heights;
+    };
+    expect([...capHeights(again.below)]).toEqual(["-1.000"]);
+    expect([...capHeights(again.above)].sort()).toEqual(["-1.000", "0.500"]);
   });
 });

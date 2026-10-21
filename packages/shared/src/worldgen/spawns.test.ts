@@ -5,9 +5,9 @@ import { VERTICAL_CHUNK_MAX } from "../sim/world.ts";
 import { Biome } from "../voxel/biomeTint.ts";
 import { Material, floorDiv } from "../voxel/voxel.ts";
 import { createChunkGrid } from "../voxel/voxelGrid.ts";
-import { BIOME_SHEET, GRAVE_SHEET, SPAWN_CHANCE } from "./generationSheet.ts";
+import { BIOME_SHEET, GRAVE_SHEET, OBJECT_SHEET, SPAWN_CHANCE } from "./generationSheet.ts";
 import { GRAVE_BOX, PROP_METRICS } from "./props.ts";
-import { placeCell, type Placement, type PropPlacement } from "./spawns.ts";
+import { placeCell, rollInterior, type Placement, type PropPlacement } from "./spawns.ts";
 import { TerrainGenerator } from "./terrainGenerator.ts";
 
 const SEED = 1337;
@@ -92,7 +92,7 @@ describe("placement", () => {
     }
     for (const biome of [Biome.Christmas, Biome.Halloween]) {
       for (const entry of BIOME_SHEET[biome].spawns) {
-        if (entry.kind === "bush" || !entry.kind.match(/snowman|present|tombstone|grave|leafpile/)) continue;
+        if (entry.kind === "bush" || !entry.kind.match(/snowman|present|bucket|tombstone|grave|leafpile|snowbank|gbreadhouse/)) continue;
         expect(seen.get(entry.kind)?.has(biome), `${entry.kind} in ${BIOME_SHEET[biome].label}`).toBe(true);
       }
     }
@@ -116,6 +116,22 @@ describe("placement", () => {
     }
     // Zero height is how the sim keeps a prop out of the crosshair's way.
     expect(PROP_METRICS.leafpile.height).toBe(0);
+  });
+
+  it("scatters snowbanks over the snow, 20% either way in size, ready to be hit for snow", () => {
+    const banks = props.filter((p) => p.kind === "snowbank");
+    expect(banks.length).toBeGreaterThan(50);
+    expect(banks.every((p) => p.biome === Biome.Christmas)).toBe(true);
+    const scales = banks.map((p) => p.scale);
+    expect(Math.min(...scales)).toBeGreaterThanOrEqual(PROP_METRICS.snowbank.scale * 0.8);
+    expect(Math.max(...scales)).toBeLessThanOrEqual(PROP_METRICS.snowbank.scale * 1.2);
+    expect(Math.max(...scales) - Math.min(...scales)).toBeGreaterThan(0.12);
+    // Aimable (the leaf pile is not), and the sheet gives snowballs out of it, several a hit.
+    expect(PROP_METRICS.snowbank.height).toBeGreaterThan(0);
+    expect(PROP_METRICS.snowbank.scoopable).toBe(true);
+    const resource = OBJECT_SHEET.snowbank.resources?.[0];
+    expect(resource?.item).toBe("snowball");
+    expect(resource?.amount ?? 1).toBeGreaterThan(1);
   });
 
   it("dresses graves as the sheet says", () => {
@@ -207,5 +223,135 @@ describe("open graves", () => {
       const z = g.z + side * Math.cos(g.yaw);
       expect(voxelAt(x, g.y - 0.5, z)).not.toBe(Material.Air);
     }
+  });
+});
+
+describe("gingerbread houses", () => {
+  /** About 3 km square of cells: enough Christmas ground for a few dozen houses. */
+  const HOUSE_SCAN = 500;
+  const christmasItems = BIOME_SHEET[Biome.Christmas].lootTable.map((e) => e.item);
+
+  // A house brings its container with it, so keep them by cell.
+  const houseCells: PropPlacement[][] = [];
+  const everything: Placement[][] = [];
+  const out: Placement[] = [];
+  for (let cz = -HOUSE_SCAN; cz <= HOUSE_SCAN; cz++) {
+    for (let cx = -HOUSE_SCAN; cx <= HOUSE_SCAN; cx++) {
+      out.length = 0;
+      placeCell(gen, cx, cz, SEED, out);
+      const placed = out.filter((p): p is PropPlacement => p.type === "prop");
+      if (placed.some((p) => p.kind === "gbreadhouse_1")) {
+        houseCells.push(placed);
+        everything.push([...out]);
+      }
+    }
+  }
+  const houses = houseCells.map((cell) => cell.find((p) => p.kind === "gbreadhouse_1") as PropPlacement);
+
+  it("are rare, and only in the Christmas region", () => {
+    expect(houses.length).toBeGreaterThan(20);
+    expect(houses.every((h) => h.biome === Biome.Christmas)).toBe(true);
+    // 1000 x 1000 cells = 10.2 km2; Christmas is about a fifth of the ground,
+    // so ~one per 20,000 m2 of it is ~10 a km2 overall.
+    const perKm2 = houses.length / (((2 * HOUSE_SCAN + 1) * CHUNK_SIZE * VOXEL_SIZE) ** 2 / 1e6);
+    expect(perKm2).toBeLessThan(60);
+    expect(perKm2).toBeGreaterThan(6);
+  });
+
+  it("hold exactly one item each, from the Christmas loot table", () => {
+    for (const house of houses) {
+      expect(house.loot).toHaveLength(1);
+      expect(christmasItems).toContain(house.loot[0]);
+    }
+    // And they vary: not the same thing every time.
+    expect(new Set(houses.map((h) => h.loot[0])).size).toBeGreaterThan(2);
+  });
+
+  it("have a present or gift standing in them about a fifth of the time", () => {
+    const withContainer = houseCells.filter((cell) => cell.length > 1);
+    const chance = OBJECT_SHEET.gbreadhouse_1.interior?.containerChance ?? 0;
+    expect(chance).toBeCloseTo(0.2);
+    expect(withContainer.length / houses.length).toBeGreaterThan(chance - 0.12);
+    expect(withContainer.length / houses.length).toBeLessThan(chance + 0.12);
+    for (const cell of withContainer) {
+      const house = cell.find((p) => p.kind === "gbreadhouse_1") as PropPlacement;
+      const container = cell.find((p) => p.kind !== "gbreadhouse_1") as PropPlacement;
+      expect(["present_small", "present_big"]).toContain(container.kind);
+      expect(container.x).toBe(house.x);
+      expect(container.z).toBe(house.z);
+      expect(container.y).toBe(house.y);
+      expect(container.id).not.toBe(house.id);
+      for (const item of container.loot) expect(christmasItems).toContain(item);
+    }
+  });
+
+  it("keep clear of whatever the cells around them hold", () => {
+    expect(everything.length).toBe(houses.length);
+    const scratch: Placement[] = [];
+    for (const house of houses) {
+      const reach = PROP_METRICS.gbreadhouse_1.radius * house.scale;
+      const cx = floorDiv(Math.floor(house.x / VOXEL_SIZE), CHUNK_SIZE);
+      const cz = floorDiv(Math.floor(house.z / VOXEL_SIZE), CHUNK_SIZE);
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dz === 0) continue;
+          scratch.length = 0;
+          placeCell(gen, cx + dx, cz + dz, SEED, scratch, false);
+          for (const other of scratch) {
+            const ox = other.type === "prop" ? other.x : (other.rootVoxelX + 0.5) * VOXEL_SIZE;
+            const oz = other.type === "prop" ? other.z : (other.rootVoxelZ + 0.5) * VOXEL_SIZE;
+            expect(Math.hypot(ox - house.x, oz - house.z)).toBeGreaterThanOrEqual(reach);
+          }
+        }
+      }
+    }
+  });
+
+  it("only go on level ground", () => {
+    for (const h of houses) {
+      const vx = Math.floor(h.x / VOXEL_SIZE);
+      const vz = Math.floor(h.z / VOXEL_SIZE);
+      const centre = gen.surfaceHeight(vx, vz);
+      const reach = Math.ceil((PROP_METRICS.gbreadhouse_1.radius * h.scale) / VOXEL_SIZE);
+      for (const [dx, dz] of [[reach, 0], [-reach, 0], [0, reach], [0, -reach]] as const) {
+        expect(Math.abs(gen.surfaceHeight(vx + dx, vz + dz) - centre)).toBeLessThanOrEqual(
+          OBJECT_SHEET.gbreadhouse_1.maxSlope ?? 0,
+        );
+      }
+    }
+  });
+
+  it("draw their item by rarity: common three times uncommon, uncommon three times rare", () => {
+    const counts = new Map<string, number>();
+    const N = 30000;
+    for (let id = 1; id <= N; id++) {
+      const [item] = rollInterior("gbreadhouse_1", Biome.Christmas, id * 2654435761 >>> 0);
+      counts.set(item ?? "", (counts.get(item ?? "") ?? 0) + 1);
+    }
+    // common 0.6, 4 x uncommon 0.3, 4 x rare 0.1 in weight, out of 0.6 + 1.2 + 0.4 = 2.2.
+    expect((counts.get("mountain_lightning") ?? 0) / N).toBeGreaterThan(0.25);
+    expect((counts.get("mountain_lightning") ?? 0) / N).toBeLessThan(0.3);
+    for (const item of ["xmas_lights", "snowball", "log", "stick"]) {
+      expect((counts.get(item) ?? 0) / N, item).toBeGreaterThan(0.12);
+      expect((counts.get(item) ?? 0) / N, item).toBeLessThan(0.15);
+    }
+    for (const item of ["eggnog", "coal", "metal", "candy"]) {
+      expect((counts.get(item) ?? 0) / N, item).toBeGreaterThan(0.03);
+      expect((counts.get(item) ?? 0) / N, item).toBeLessThan(0.06);
+    }
+  });
+
+  it("have nothing inside where the region has no loot table", () => {
+    expect(rollInterior("gbreadhouse_1", Biome.Halloween, 12345)).toEqual([]);
+  });
+});
+
+describe("Christmas presents", () => {
+  it("are stocked from the Christmas loot table", () => {
+    const table = BIOME_SHEET[Biome.Christmas].lootTable.map((e) => e.item);
+    const presents = props.filter((p) => p.kind === "present_small" || p.kind === "present_big");
+    expect(presents.length).toBeGreaterThan(10);
+    expect(presents.some((p) => p.loot.length > 0)).toBe(true);
+    for (const present of presents) for (const item of present.loot) expect(table).toContain(item);
   });
 });

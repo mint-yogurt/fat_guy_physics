@@ -54,6 +54,8 @@ export class PlayerCamera {
   /** Matches the C++ Camera::fovDegrees. */
   fovDegrees = 90;
   thirdPersonDistance = 2.2;
+  /** Extra field of view on top of fovDegrees, for a sense of speed. */
+  fovBoost = 0;
 
   togglePerspective(): void {
     this.perspective =
@@ -81,8 +83,9 @@ export class PlayerCamera {
     const eyeY = renderY + player.eyeHeight;
     const eyeZ = renderZ;
 
-    if (camera.fov !== this.fovDegrees) {
-      camera.fov = this.fovDegrees;
+    const fov = this.fovDegrees + this.fovBoost;
+    if (camera.fov !== fov) {
+      camera.fov = fov;
       camera.updateProjectionMatrix();
     }
 

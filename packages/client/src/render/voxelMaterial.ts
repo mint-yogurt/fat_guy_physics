@@ -1,4 +1,9 @@
-import { Color, MeshBasicNodeMaterial, RepeatWrapping, type Texture } from "three/webgpu";
+import {
+  Color,
+  MeshBasicNodeMaterial,
+  RepeatWrapping,
+  type Texture,
+} from "three/webgpu";
 import {
   attribute,
   dot,
@@ -8,12 +13,15 @@ import {
   normalGeometry,
   normalize,
   positionView,
+  positionWorld,
   smoothstep,
   texture,
   uniform,
   uv,
   vec3,
 } from "three/tsl";
+
+import { bulbGlow } from "./bulbLights.ts";
 
 /**
  * The one custom material, ported from assets/shaders/basic.{vert,frag}.
@@ -84,8 +92,12 @@ export function createVoxelMaterial(map: Texture): VoxelMaterial {
   // placed with a translation only, so this equals the world normal; using
   // the geometry normal keeps this correct without pulling in the normal
   // matrix machinery a Standard material would.
-  const ndotl = max(dot(normalize(normalGeometry), SUN_DIRECTION), float(0));
-  const lighting = ambient.add(sun.mul(ndotl));
+  const normal = normalize(normalGeometry);
+  const ndotl = max(dot(normal, SUN_DIRECTION), float(0));
+  // Sun and ambient, plus the coloured pools under any xmas lights nearby.
+  const lighting = vec3(ambient.add(sun.mul(ndotl))).add(
+    bulbGlow(positionWorld, normal),
+  );
 
   // Vertex colour carries materialColor * biomeTint * faceTint, baked by the
   // mesher. At M3 this splits into faceId + materialId attributes resolved

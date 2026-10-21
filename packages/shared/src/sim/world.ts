@@ -2,18 +2,18 @@ import { chunkKey, keyX, keyY, keyZ, type ChunkKey } from "./chunkKey.ts";
 import type { ChunkResult, ChunkSource } from "./chunkSource.ts";
 import { CHUNK_SIZE, VOXEL_SIZE } from "./constants.ts";
 import { nowMs } from "./time.ts";
+import { sectionAtHeight, sectionsOf, standingSections } from "./propDamage.ts";
 import { Mesher, type MeshData } from "../voxel/greedyMesher.ts";
 import { floorDiv, floorMod, isHandDiggable, isSolid, Material } from "../voxel/voxel.ts";
 import { gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
 import { createVoxelHit, raycastVoxel } from "../voxel/voxelRaycast.ts";
-import type { Biome } from "../voxel/biomeTint.ts";
-import type { BiomeWeights } from "../worldgen/biome.ts";
-import { DROP_CHANCE, OBJECT_SHEET } from "../worldgen/generationSheet.ts";
-import { PROP_METRICS, type PropKind } from "../worldgen/props.ts";
+import { Biome } from "../voxel/biomeTint.ts";
+import { createBiomeWeights, type BiomeWeights } from "../worldgen/biome.ts";
+import { DROP_CHANCE, OBJECT_SHEET, type DropRow } from "../worldgen/generationSheet.ts";
+import { PROP_METRICS, type PropKind, type PropSection } from "../worldgen/props.ts";
 import { placeVegetation, type Placement } from "../worldgen/spawns.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
-import { metricsFor, treeShape } from "../worldgen/trees.ts";
-import type { TreeSpecies } from "../worldgen/trees.ts";
+import { metricsFor, TreeSpecies, treeLightCount, treeShape } from "../worldgen/trees.ts";
 
 /**
  * Chunk streaming and voxel storage. Ports the data half of
@@ -116,8 +116,20 @@ export interface ChunkSink {
    */
   onPropPlaced(prop: Prop): void;
   onPropUnloaded(propId: number): void;
+  /**
+   * A prop already placed changed: a snowbank shrank, or a snowman lost a
+   * part (`prop.scale`, `prop.broken`). Optional so a sink that draws nothing can skip it.
+   */
+  onPropChanged?(prop: Prop): void;
+  /**
+   * A rock came into range for the first time. Once told, the world never
+   * places it again: from here it is the game's to move, carry or lose.
+   */
+  onRockPlaced(rock: PlacedRock): void;
   /** One foliage cluster was knocked off. The tree keeps standing. */
   onTreeFoliageRemoved(tree: Tree, cluster: number): void;
+  /** The strings of lights hung on a tree were knocked off it (`tree.lights` is already 0). */
+  onTreeLightsRemoved(tree: Tree): void;
   /**
    * A scattered plant. These are billboards, not voxel objects: they are
    * decorative, there are a lot of them, and nothing interacts with them.
@@ -179,6 +191,18 @@ export interface Tree {
    */
   chopHeightMeters: number;
   chopHits: number;
+  /** Strings of xmas lights still hung on it. A first strike knocks them all off. */
+  lights: number;
+}
+
+/** A rock as the world generated it: lying on the ground at (x, y, z), `scale` times a standard rock. */
+export interface PlacedRock {
+  readonly id: number;
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly yaw: number;
+  readonly scale: number;
 }
 
 /**
@@ -194,7 +218,10 @@ export interface Prop {
   readonly x: number;
   readonly y: number;
   readonly z: number;
-  readonly scale: number;
+  /** Authored units to metres. Shrinks as a snowbank is used up. */
+  scale: number;
+  /** What `scale` was when it was placed. */
+  readonly fullScale: number;
   readonly yaw: number;
   /** Lean about its own X and Z, radians; at most one is non-zero. */
   readonly tiltX: number;
@@ -203,9 +230,48 @@ export interface Prop {
   readonly topsoil: boolean;
   /** Item names inside, for a container. */
   readonly loot: readonly string[];
-  /** Aiming cylinder, metres. Zero height means it cannot be aimed at. */
+  /** Aiming cylinder, metres. Zero height means it cannot be aimed at. Follows `scale` and the parts still standing. */
+  radius: number;
+  height: number;
+  /**
+   * Parts that have come off (a snowman), one bit per `PROP_SECTIONS` entry
+   * from the bottom. 1 on a breakable prop (a house) in the moment it explodes.
+   */
+  broken: number;
+}
+
+/** A part of a prop that came off, where its middle was. */
+export interface BrokenSection {
+  readonly index: number;
+  readonly section: PropSection;
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
   readonly radius: number;
-  readonly height: number;
+}
+
+/** What a blow on a prop did. */
+export interface PropHit {
+  /** The part it landed on. */
+  readonly section: number;
+  /** Parts that came off, the one hit first and then each above it. Empty if it only hurt. */
+  readonly broken: readonly BrokenSection[];
+  /** What the prop released (item name, how many), if the part with the drops came off. */
+  readonly drops: readonly DropRow[];
+  /** Nothing is left: the prop has been removed. */
+  readonly gone: boolean;
+}
+
+/** A depleting prop (a snowbank) never shrinks below this fraction of its size until it is gone. */
+const DEPLETED_MIN_SCALE = 0.3;
+
+/** The topmost solid voxel of a column; see {@link World.topSolid}. */
+export interface ColumnTop {
+  material: Material;
+  /** World voxel Y of that voxel. */
+  voxelY: number;
+  /** Packed biome tint of the column (voxel/biomeTint.ts). */
+  tint: number;
 }
 
 /** Swings to cut through a trunk, and how far a cut may wander. */
@@ -241,9 +307,11 @@ export interface ChopResult {
   readonly landed: boolean;
   /** This swing cut through, so a piece is on its way down. */
   readonly felled: boolean;
+  /** Strings of xmas lights this swing knocked off the tree. */
+  readonly lightsDropped: number;
 }
 
-const NO_CHOP: ChopResult = { landed: false, felled: false };
+const NO_CHOP: ChopResult = { landed: false, felled: false, lightsDropped: 0 };
 
 export interface SceneHit {
   kind: HitKind;
@@ -317,6 +385,10 @@ export function desiredChunkSet(
   return out;
 }
 
+function columnKey(cx: number, cz: number): string {
+  return `${String(cx)},${String(cz)}`;
+}
+
 export class World {
   private readonly generator: TerrainGenerator;
   private readonly chunks = new Map<ChunkKey, VoxelGrid>();
@@ -352,15 +424,33 @@ export class World {
    */
   private readonly severedTrees = new Map<number, number>();
   private readonly strippedFoliage = new Map<number, number>();
+  /** Trees whose lights have been knocked off. Never pruned, like the above. */
+  private readonly strippedLights = new Set<number>();
   private readonly placementScratch: Placement[] = [];
 
   private readonly props = new Map<number, Prop>();
+  /** Generated props the player picked up. Never regenerated; never pruned, like severedTrees. */
+  private readonly removedProps = new Set<number>();
+  /**
+   * Props the player placed, by chunk column ("cx,cz"): they come back whenever
+   * any chunk of the column streams in. Their ids start above every generated
+   * (32-bit) id, so the two never collide.
+   */
+  private readonly placedProps = new Map<string, Prop[]>();
+  private nextPlacedPropId = 0x1_0000_0000;
+  private readonly biomeScratch: BiomeWeights = createBiomeWeights();
+  /** Rocks already handed to the game, so reloading their chunk does not place them twice. */
+  private readonly rocksPlaced = new Set<number>();
   /**
    * Uses left on each prop's resources, by entry, for props that have been
    * harvested at least once. Like severedTrees, never pruned: a few numbers
    * per thing the player has actually touched.
    */
   private readonly propUses = new Map<number, number[]>();
+  /** Damage taken by each part of a prop that has been hit, by prop id. Kept like `propUses`. */
+  private readonly propDamage = new Map<number, number[]>();
+  /** Which parts of a prop have come off, by prop id, so a regenerated chunk brings it back as it was. */
+  private readonly propBroken = new Map<number, number>();
 
   /** Trees the in-flight raycast might hit. Refilled per raycast. */
   private readonly rayTrees: Tree[] = [];
@@ -458,6 +548,7 @@ export class World {
             sink.onPropUnloaded(id);
             continue;
           }
+          if (this.removedProps.has(id)) continue;
           this.trees.delete(id);
           sink.onTreeUnloaded(id);
         }
@@ -691,6 +782,43 @@ export class World {
     return out;
   }
 
+  /** Props whose base is within `radius` metres of (x, z), into `out`. */
+  propsNear(x: number, z: number, radius: number, out: Prop[]): Prop[] {
+    out.length = 0;
+    const radiusSq = radius * radius;
+    for (const prop of this.props.values()) {
+      const dx = prop.x - x;
+      const dz = prop.z - z;
+      if (dx * dx + dz * dz <= radiusSq) out.push(prop);
+    }
+    return out;
+  }
+
+  /**
+   * Topmost solid terrain voxel in a column, for top-down views (the map).
+   * Fills `out` and returns true; false when the column has no loaded solid
+   * voxel. Terrain only -- trees and props are separate objects.
+   */
+  topSolid(vx: number, vz: number, out: ColumnTop): boolean {
+    const cx = floorDiv(vx, CHUNK_SIZE);
+    const cz = floorDiv(vz, CHUNK_SIZE);
+    const lx = floorMod(vx, CHUNK_SIZE);
+    const lz = floorMod(vz, CHUNK_SIZE);
+    for (let cy = VERTICAL_CHUNK_MAX; cy >= VERTICAL_CHUNK_MIN; cy--) {
+      const grid = this.chunks.get(chunkKey(cx, cy, cz));
+      if (grid === undefined) continue;
+      for (let ly = CHUNK_SIZE - 1; ly >= 0; ly--) {
+        const material = grid.cells[gridIndex(grid, lx, ly, lz)] as Material;
+        if (!isSolid(material)) continue;
+        out.material = material;
+        out.voxelY = cy * CHUNK_SIZE + ly;
+        out.tint = grid.columnTint?.[lx + grid.dimX * lz] ?? 0;
+        return true;
+      }
+    }
+    return false;
+  }
+
   get treeCount(): number {
     return this.trees.size;
   }
@@ -732,8 +860,22 @@ export class World {
         continue;
       }
 
+      if (placement.type === "prop" && PROP_METRICS[placement.kind].dynamic === true) {
+        if (this.rocksPlaced.has(placement.id)) continue;
+        this.rocksPlaced.add(placement.id);
+        sink.onRockPlaced({
+          id: placement.id,
+          x: placement.x,
+          y: placement.y,
+          z: placement.z,
+          yaw: placement.yaw,
+          scale: placement.scale,
+        });
+        continue;
+      }
+
       if (placement.type === "prop") {
-        if (this.props.has(placement.id)) continue;
+        if (this.props.has(placement.id) || this.removedProps.has(placement.id)) continue;
         const metrics = PROP_METRICS[placement.kind];
         const prop: Prop = {
           id: placement.id,
@@ -743,6 +885,7 @@ export class World {
           y: placement.y,
           z: placement.z,
           scale: placement.scale,
+          fullScale: placement.scale,
           yaw: placement.yaw,
           tiltX: placement.tiltX,
           tiltZ: placement.tiltZ,
@@ -750,7 +893,10 @@ export class World {
           loot: placement.loot,
           radius: metrics.radius * placement.scale,
           height: metrics.height * placement.scale,
+          broken: this.propBroken.get(placement.id) ?? 0,
         };
+        // Back as the player left it: a used snowbank small, a snowman missing its head.
+        this.fitToWear(prop);
         this.props.set(prop.id, prop);
         owned.push(prop.id);
         sink.onPropPlaced(prop);
@@ -788,6 +934,13 @@ export class World {
         severed: cutAt !== undefined,
         chopHeightMeters: 0,
         chopHits: 0,
+        lights:
+          placement.biome === Biome.Christmas &&
+          placement.species === TreeSpecies.Conifer &&
+          cutAt === undefined &&
+          !this.strippedLights.has(placement.id)
+            ? treeLightCount(placement.id)
+            : 0,
       };
 
       this.trees.set(tree.id, tree);
@@ -795,6 +948,109 @@ export class World {
 
       sink.onTreePlaced(tree);
     }
+
+    this.respawnPlacedProps(key, sink);
+  }
+
+  /** Brings back the props the player placed in this chunk's column, if they are not already up. */
+  private respawnPlacedProps(key: ChunkKey, sink: ChunkSink): void {
+    const placed = this.placedProps.get(columnKey(keyX(key), keyZ(key)));
+    if (placed === undefined) return;
+    for (const prop of placed) {
+      if (this.props.has(prop.id)) continue;
+      this.props.set(prop.id, prop);
+      let owned = this.treesByChunk.get(key);
+      if (owned === undefined) {
+        owned = [];
+        this.treesByChunk.set(key, owned);
+      }
+      owned.push(prop.id);
+      sink.onPropPlaced(prop);
+    }
+  }
+
+  /**
+   * Puts a prop of the player's making in the world (a placed container). It is
+   * a prop like any generated one -- aimable, near-able, drawn by the sink --
+   * and it survives its chunk streaming out and back in.
+   */
+  addProp(
+    kind: PropKind,
+    x: number,
+    y: number,
+    z: number,
+    yaw: number,
+    scale: number,
+    sink: ChunkSink,
+    loot: readonly string[] = [],
+  ): Prop {
+    const metrics = PROP_METRICS[kind];
+    const weights = this.biomeAtMeters(x, z, this.biomeScratch);
+    const biome =
+      weights.christmas >= weights.halloween && weights.christmas >= weights.plain
+        ? Biome.Christmas
+        : weights.halloween >= weights.plain
+          ? Biome.Halloween
+          : Biome.Plain;
+    const prop: Prop = {
+      id: this.nextPlacedPropId++,
+      kind,
+      biome,
+      x,
+      y,
+      z,
+      scale,
+      fullScale: scale,
+      yaw,
+      tiltX: 0,
+      tiltZ: 0,
+      topsoil: false,
+      loot,
+      radius: metrics.radius * scale,
+      height: metrics.height * scale,
+      broken: 0,
+    };
+    const cx = floorDiv(Math.floor(x / VOXEL_SIZE), CHUNK_SIZE);
+    const cz = floorDiv(Math.floor(z / VOXEL_SIZE), CHUNK_SIZE);
+    const column = columnKey(cx, cz);
+    const list = this.placedProps.get(column);
+    if (list === undefined) this.placedProps.set(column, [prop]);
+    else list.push(prop);
+
+    this.props.set(prop.id, prop);
+    // Owned by the chunk of the ground it stands on, so it goes when that chunk does.
+    const groundVoxelY = Math.floor(y / VOXEL_SIZE + 1e-6) - 1;
+    const ownerKey = chunkKey(cx, floorDiv(groundVoxelY, CHUNK_SIZE), cz);
+    let owned = this.treesByChunk.get(ownerKey);
+    if (owned === undefined) {
+      owned = [];
+      this.treesByChunk.set(ownerKey, owned);
+    }
+    owned.push(prop.id);
+    sink.onPropPlaced(prop);
+    return prop;
+  }
+
+  /**
+   * Takes a prop out of the world for good: a generated one stays gone when its
+   * chunk is regenerated; a placed one is forgotten. Returns it, or undefined
+   * if there was no such prop.
+   */
+  removeProp(propId: number, sink: ChunkSink): Prop | undefined {
+    const prop = this.props.get(propId);
+    if (prop === undefined) return undefined;
+    this.props.delete(propId);
+    this.propUses.delete(propId);
+    this.propDamage.delete(propId);
+    this.propBroken.delete(propId);
+    const column = this.placedProps.get(
+      columnKey(floorDiv(Math.floor(prop.x / VOXEL_SIZE), CHUNK_SIZE), floorDiv(Math.floor(prop.z / VOXEL_SIZE), CHUNK_SIZE)),
+    );
+    const at = column?.findIndex((p) => p.id === propId) ?? -1;
+    if (column !== undefined && at >= 0) column.splice(at, 1);
+    else this.removedProps.add(propId);
+    sink.onPropUnloaded(propId);
+    return prop;
   }
 
   /**
@@ -805,7 +1061,20 @@ export class World {
    * `random` is passed in so the sim stays deterministic: the client hands
    * it Math.random, a server would hand it a seeded generator.
    */
-  harvestProp(propId: number, random: () => number): string | undefined {
+  harvestProp(propId: number, random: () => number, sink: ChunkSink): string | undefined {
+    return this.harvestPropYield(propId, random, sink)?.item;
+  }
+
+  /**
+   * As {@link harvestProp}, with how many of the item came out of the swing.
+   * A prop that `depletes` (a snowbank) shrinks as its uses go, and is removed,
+   * through `sink`, when the last is gone.
+   */
+  harvestPropYield(
+    propId: number,
+    random: () => number,
+    sink: ChunkSink,
+  ): { item: string; count: number } | undefined {
     const prop = this.props.get(propId);
     if (prop === undefined) return undefined;
     const resources = OBJECT_SHEET[prop.kind].resources;
@@ -821,9 +1090,131 @@ export class World {
       if (entry === undefined || (uses[i] ?? 0) <= 0) continue;
       if (random() >= DROP_CHANCE[entry.rarity]) continue;
       uses[i] = (uses[i] ?? 0) - 1;
-      return entry.item;
+      if (PROP_METRICS[prop.kind].depletes === true) {
+        if (this.fitToWear(prop)) this.removeProp(propId, sink);
+        else sink.onPropChanged?.(prop);
+      }
+      return { item: entry.item, count: entry.amount ?? 1 };
     }
     return undefined;
+  }
+
+  /**
+   * One blow on a prop made of parts (a snowman), landing at world height `y`.
+   * The part it lands on takes `amount` of damage; one that has taken all it
+   * can comes off, and the parts above it with it. Returns what happened, or
+   * undefined if the prop is not made of parts or none is left to hit.
+   */
+  damageProp(propId: number, y: number, amount: number, sink: ChunkSink): PropHit | undefined {
+    const prop = this.props.get(propId);
+    if (prop === undefined) return undefined;
+    const sections = sectionsOf(prop.kind);
+    const index = sectionAtHeight(prop, y);
+    if (sections === undefined || index < 0) return undefined;
+
+    let damage = this.propDamage.get(propId);
+    if (damage === undefined) {
+      damage = sections.map(() => 0);
+      this.propDamage.set(propId, damage);
+    }
+    damage[index] = (damage[index] ?? 0) + amount;
+    if ((damage[index] ?? 0) < (sections[index] as PropSection).hits) {
+      return { section: index, broken: [], drops: [], gone: false };
+    }
+
+    const broken: BrokenSection[] = [];
+    const drops: DropRow[] = [];
+    for (let i = index; i < sections.length; i++) {
+      if ((prop.broken & (1 << i)) !== 0) continue;
+      const section = sections[i] as PropSection;
+      prop.broken |= 1 << i;
+      broken.push({
+        index: i,
+        section,
+        x: prop.x,
+        y: prop.y + section.centre * prop.scale,
+        z: prop.z,
+        radius: section.radius * prop.scale,
+      });
+      if (section.releasesDrops === true) drops.push(...(OBJECT_SHEET[prop.kind].drops ?? []));
+    }
+    this.propBroken.set(propId, prop.broken);
+
+    if (index === 0) {
+      // Told first, so the sink sees every part come off before the prop goes.
+      sink.onPropChanged?.(prop);
+      this.removeProp(propId, sink);
+      return { section: index, broken, drops, gone: true };
+    }
+    this.fitToWear(prop);
+    sink.onPropChanged?.(prop);
+    return { section: index, broken, drops, gone: false };
+  }
+
+  /**
+   * One blow on a breakable prop (a gingerbread house), from anywhere on it.
+   * When it has taken all it can it is gone for good, through `sink` (told
+   * first with `broken` set, so the renderer can blow it apart), and what was
+   * inside comes out in `released`. Undefined if the prop is not breakable.
+   */
+  damageBreakable(
+    propId: number,
+    amount: number,
+    sink: ChunkSink,
+  ): { destroyed: boolean; released: readonly string[] } | undefined {
+    const prop = this.props.get(propId);
+    const breakable = prop === undefined ? undefined : PROP_METRICS[prop.kind].breakable;
+    if (prop === undefined || breakable === undefined) return undefined;
+
+    const damage = (this.propDamage.get(propId)?.[0] ?? 0) + amount;
+    this.propDamage.set(propId, [damage]);
+    if (damage < breakable.hits) return { destroyed: false, released: [] };
+
+    prop.broken = 1;
+    sink.onPropChanged?.(prop);
+    this.removeProp(propId, sink);
+    return { destroyed: true, released: prop.loot };
+  }
+
+  /**
+   * Sizes a prop to what has been done to it: a depleting prop to the uses it
+   * has left, a prop of parts to the ones still standing. True if a depleting
+   * prop has nothing left at all.
+   */
+  private fitToWear(prop: Prop): boolean {
+    const metrics = PROP_METRICS[prop.kind];
+    if (metrics.depletes === true) {
+      const resources = OBJECT_SHEET[prop.kind].resources ?? [];
+      const uses = this.propUses.get(prop.id);
+      let total = 0;
+      let left = 0;
+      resources.forEach((entry, i) => {
+        total += entry.uses;
+        left += uses?.[i] ?? entry.uses;
+      });
+      if (total > 0 && left <= 0) return true;
+      if (total > 0) {
+        prop.scale = prop.fullScale * (DEPLETED_MIN_SCALE + (1 - DEPLETED_MIN_SCALE) * (left / total));
+        prop.radius = metrics.radius * prop.scale;
+        prop.height = metrics.height * prop.scale;
+      }
+      return false;
+    }
+    const sections = sectionsOf(prop.kind);
+    if (sections !== undefined) {
+      // Aimed at as tall and wide as what is still standing.
+      const standing = standingSections(prop, sections);
+      let radius = 0;
+      let top = 0;
+      for (let i = 0; i < standing; i++) {
+        const section = sections[i] as PropSection;
+        radius = Math.max(radius, section.radius);
+        top = section.centre + section.radius;
+      }
+      prop.radius = radius * prop.scale;
+      prop.height = top * prop.scale;
+    }
+    return false;
   }
 
   /** Whether anything is left to harvest from a prop, for the crosshair readout. */
@@ -1019,6 +1410,20 @@ export class World {
   }
 
   /**
+   * Shakes the strings of xmas lights off a tree, for a chup or a scoop that
+   * lands on it. Returns how many came off (none after the first time).
+   */
+  knockLights(treeId: number, sink: ChunkSink): number {
+    const tree = this.trees.get(treeId);
+    if (tree === undefined || tree.lights <= 0) return 0;
+    const count = tree.lights;
+    tree.lights = 0;
+    this.strippedLights.add(treeId);
+    sink.onTreeLightsRemoved(tree);
+    return count;
+  }
+
+  /**
    * Chup on a trunk, at a world height. Returns whether the swing landed,
    * and whether it was the one that cut through.
    *
@@ -1041,7 +1446,10 @@ export class World {
       tree.chopHits = 0;
     }
     tree.chopHits++;
-    if (tree.chopHits < CHOPS_TO_FELL) return { landed: true, felled: false };
+
+    // Any strike shakes the lights loose.
+    const lightsDropped = this.knockLights(treeId, sink);
+    if (tree.chopHits < CHOPS_TO_FELL) return { landed: true, felled: false, lightsDropped };
 
     // Where the cut actually falls. A cut too near the top would drop a
     // stub, and one too near the ground would leave a stump you cannot
@@ -1073,7 +1481,7 @@ export class World {
     }
 
     sink.onTreeCut(tree, cut, pieceLength, carried);
-    return { landed: true, felled: true };
+    return { landed: true, felled: true, lightsDropped  };
   }
 
   dispose(): void {

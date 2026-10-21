@@ -7,6 +7,7 @@ import {
   type SolidQuery,
 } from "./collision.ts";
 import { VOXEL_SIZE } from "./constants.ts";
+import { SkateState } from "./skate.ts";
 
 /**
  * Player physics and look state. A verbatim port of src/Player.{hpp,cpp}.
@@ -37,13 +38,23 @@ export interface PlayerInput {
   /** Forward (+). */
   moveZ: number;
   jumpPressed: boolean;
+  /** Skateboard trick button went down this frame (latched like jumpPressed). */
+  skateTrickPressed: boolean;
+  /** Skateboard trick button is held: a manual on the ground. */
+  skateTrickHeld: boolean;
 }
 
 export function createPlayerInput(): PlayerInput {
-  return { moveX: 0, moveZ: 0, jumpPressed: false };
+  return {
+    moveX: 0,
+    moveZ: 0,
+    jumpPressed: false,
+    skateTrickPressed: false,
+    skateTrickHeld: false,
+  };
 }
 
-const GRAVITY = -18;
+export const GRAVITY = -18;
 const GROUND_ACCEL = 30;
 const AIR_ACCEL = 8;
 /** A hair over 5 voxels. */
@@ -70,6 +81,16 @@ export const WALK_HEIGHT = 1.9;
 /** Eyes sit just below the top of the head. */
 export const WALK_EYE_HEIGHT = 1.78;
 export const RAGBALL_RADIUS = 0.6;
+/** Kilograms: a big lad. What shoves from outside (a rope letting go) are divided by. */
+export const PLAYER_MASS = 100;
+/**
+ * A shove from outside wears off at this rate (1/s) while walking: quickly on
+ * the ground, where feet grip, hardly at all in the air. It is also the most a
+ * walker can lean on a push: their steering holds back `walkSpeed * decay`
+ * times their mass in newtons.
+ */
+const KNOCK_GROUND_DECAY = 4;
+const KNOCK_AIR_DECAY = 0.4;
 
 /**
  * Below the loaded vertical chunk band there is no terrain to catch a fall,
@@ -88,9 +109,23 @@ export class Player {
   vx = 0;
   vy = 0;
   vz = 0;
+  /**
+   * The part of the walking velocity that came from outside (see
+   * {@link applyImpulse}), which steering does not fight and which wears off
+   * by itself.
+   */
+  private knockX = 0;
+  private knockZ = 0;
 
   mode: PlayerMode = PlayerMode.Walking;
   grounded = false;
+  /** Bumped every time the player falls out of the world and is put back at the start, for sound. */
+  respawns = 0;
+
+  /** Standing on a skateboard (set each frame by whoever owns the inventory); Walking only. */
+  skating = false;
+  readonly skate = new SkateState();
+  private wasSkating = false;
 
   /** Body orientation as a quaternion. Read by the renderer at M11. */
   orientationX = 0;
@@ -142,7 +177,14 @@ export class Player {
   }
 
   get eyeHeight(): number {
-    return this.mode === PlayerMode.Walking ? WALK_EYE_HEIGHT : this.ballRadius * 1.3;
+    if (this.mode !== PlayerMode.Walking) return this.ballRadius * 1.3;
+    // Fallen off the board, the eye is down near the ground.
+    return WALK_EYE_HEIGHT - this.skate.bailTilt * (WALK_EYE_HEIGHT - 0.5);
+  }
+
+  /** How far a fallen skater has tipped over, 0..1. */
+  get skateTilt(): number {
+    return this.skate.bailTilt;
   }
 
   get bodyRadius(): number {
@@ -227,9 +269,39 @@ export class Player {
     this.mode = newMode;
   }
 
+  /**
+   * An impulse (N*s) from outside the player: a stretched rope letting go, a
+   * blast. Walking steers toward its wish velocity at a fixed rate, which
+   * would undo a shove in a few steps, so the shove is kept apart from what
+   * steering is working on and wears off on its own instead.
+   */
+  applyImpulse(ix: number, iy: number, iz: number): void {
+    const dvx = ix / PLAYER_MASS;
+    const dvz = iz / PLAYER_MASS;
+    this.vx += dvx;
+    this.vy += iy / PLAYER_MASS;
+    this.vz += dvz;
+    if (this.mode === PlayerMode.Walking && !this.skating) {
+      this.knockX += dvx;
+      this.knockZ += dvz;
+    }
+  }
+
   /** One fixed physics substep. */
   update(input: PlayerInput, dt: number, query: SolidQuery, surfaceHeightVoxels: () => number): void {
-    if (this.mode === PlayerMode.Walking) {
+    const skating = this.skating && this.mode === PlayerMode.Walking;
+    if (skating && !this.wasSkating) this.skate.reset(this);
+    this.wasSkating = skating;
+    if (skating || this.mode !== PlayerMode.Walking) {
+      this.knockX = 0;
+      this.knockZ = 0;
+    }
+
+    if (skating) {
+      this.updateSkating(input, dt, query);
+      this.updateFacingOrientation();
+    } else if (this.mode === PlayerMode.Walking) {
+      this.skate.bailTilt = 0;
       this.updateWalking(input, dt, query);
       this.updateFacingOrientation();
     } else {
@@ -246,6 +318,8 @@ export class Player {
       this.vz = 0;
       this.mode = PlayerMode.Walking;
       this.grounded = false;
+      this.skate.reset(this);
+      this.respawns = (this.respawns + 1) & 0xff;
     }
   }
 
@@ -274,8 +348,9 @@ export class Player {
     const wishVelX = wishLen > 1e-5 ? (this.wishX / wishLen) * this.walkSpeed : 0;
     const wishVelZ = wishLen > 1e-5 ? (this.wishZ / wishLen) * this.walkSpeed : 0;
 
-    const deltaX = wishVelX - this.vx;
-    const deltaZ = wishVelZ - this.vz;
+    // Steering works on the player's own velocity, not on a shove they were given.
+    const deltaX = wishVelX - (this.vx - this.knockX);
+    const deltaZ = wishVelZ - (this.vz - this.knockZ);
     const deltaLen = Math.hypot(deltaX, deltaZ);
     const maxChange = (this.grounded ? GROUND_ACCEL : AIR_ACCEL) * dt;
     if (deltaLen <= maxChange || deltaLen < 1e-5) {
@@ -285,11 +360,59 @@ export class Player {
       this.vx += (deltaX / deltaLen) * maxChange;
       this.vz += (deltaZ / deltaLen) * maxChange;
     }
+    if (this.knockX !== 0 || this.knockZ !== 0) this.wearOffKnock(dt);
 
     this.vy += GRAVITY * dt;
     if (input.jumpPressed && this.grounded) {
       this.vy = this.jumpSpeed;
     }
+
+    const sweptX = this.vx;
+    const sweptZ = this.vz;
+    const result = sweepAabb(
+      query,
+      this.x,
+      this.y,
+      this.z,
+      this.halfWidth,
+      WALK_HEIGHT,
+      this.vx,
+      this.vy,
+      this.vz,
+      dt,
+      STEP_HEIGHT,
+      this.aabbResult,
+    );
+    this.x = result.x;
+    this.y = result.y;
+    this.z = result.z;
+    this.vx = result.vx;
+    this.vy = result.vy;
+    this.vz = result.vz;
+    this.grounded = result.grounded;
+    // A wall takes the shove with the rest of the speed it stops.
+    if (sweptX !== this.vx) this.knockX = sweptX === 0 ? 0 : this.knockX * (this.vx / sweptX);
+    if (sweptZ !== this.vz) this.knockZ = sweptZ === 0 ? 0 : this.knockZ * (this.vz / sweptZ);
+  }
+
+  /** Lets a shove from outside fade: the ground grips it, the air barely does. */
+  private wearOffKnock(dt: number): void {
+    const gone = 1 - Math.exp(-(this.grounded ? KNOCK_GROUND_DECAY : KNOCK_AIR_DECAY) * dt);
+    let lostX = this.knockX * gone;
+    let lostZ = this.knockZ * gone;
+    if (Math.hypot(this.knockX, this.knockZ) < 0.02) {
+      lostX = this.knockX;
+      lostZ = this.knockZ;
+    }
+    this.vx -= lostX;
+    this.vz -= lostZ;
+    this.knockX -= lostX;
+    this.knockZ -= lostZ;
+  }
+
+  private updateSkating(input: PlayerInput, dt: number, query: SolidQuery): void {
+    this.vy += GRAVITY * dt;
+    this.skate.beforeSweep(this, input, dt, query);
 
     const result = sweepAabb(
       query,
@@ -312,6 +435,8 @@ export class Player {
     this.vy = result.vy;
     this.vz = result.vz;
     this.grounded = result.grounded;
+
+    this.skate.afterSweep(this, query, WALK_HEIGHT, STEP_HEIGHT);
   }
 
   private updateRagball(input: PlayerInput, dt: number, query: SolidQuery): void {

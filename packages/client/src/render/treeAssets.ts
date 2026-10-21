@@ -93,6 +93,10 @@ async function loadSpecies(species: TreeSpecies): Promise<SpeciesAsset | undefin
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
   }
+  // Trunks are drawn with [bark, stump] materials, which needs groups: all
+  // bark until a cut adds a cap (see sliceGeometry.ts).
+  trunk.clearGroups();
+  trunk.addGroup(0, trunk.getAttribute("position").count, 0);
 
   return { trunk, foliage };
 }

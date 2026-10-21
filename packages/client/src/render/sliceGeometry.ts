@@ -9,12 +9,18 @@ import { BufferAttribute, BufferGeometry } from "three/webgpu";
  * than only at seams an artist placed. The dead tree's branches are part of
  * its trunk mesh and go through the same path without knowing about it.
  *
- * Deliberately not a CSG boolean and deliberately not capped: the cut face
- * is left open. Capping means triangulating the cut outline, which for a
- * branching mesh is several disjoint loops and the point at which this stops
- * being eighty lines of code. An open trunk reads fine at the game's
- * fidelity, and the trunk material draws both faces so the far wall shows
- * through the cut rather than leaving a hole.
+ * Deliberately not a CSG boolean. The cut face is capped simply: every
+ * triangle the plane crosses leaves one segment of the cut outline, the
+ * segments are joined into outlines by their shared ends (a branching mesh
+ * cut through a branch gives several), and each outline is fanned from its
+ * centre. That is exact for a convex cross-section, which a trunk is, and
+ * close enough for the odd shape where a branch meets it. Caps are mapped
+ * flat, centred on their outline and stretched to fill it, so a stump
+ * texture's rings sit in the middle of the cut.
+ *
+ * Cap triangles are geometry group 1 (material index 1), the original
+ * surface group 0, so a mesh draws them with `[bark, stump]` materials. A
+ * cap already on the input stays a cap on whichever side it falls.
  *
  * Both halves come back from one pass, because felling needs both: the
  * stump stays standing and the piece above becomes a rigid body.
@@ -30,6 +36,9 @@ const ATTRIBUTES = [
 const STRIDE = ATTRIBUTES.reduce((total, attribute) => total + attribute.size, 0);
 /** Where Y sits inside a packed vertex: position is first. */
 const Y_OFFSET = 1;
+
+/** Geometry group / material index of the cut faces. */
+export const CAP_GROUP = 1;
 
 export interface SlicedGeometry {
   /** The part below the plane, or undefined if nothing was. */
@@ -59,10 +68,25 @@ function pack(geometry: BufferGeometry): Float32Array | undefined {
   return packed;
 }
 
-function unpack(values: number[]): BufferGeometry | undefined {
+/** Which triangles of `geometry` are caps, from its groups. */
+function capTriangles(geometry: BufferGeometry, triangles: number): Uint8Array {
+  const caps = new Uint8Array(triangles);
+  for (const group of geometry.groups) {
+    if (group.materialIndex !== CAP_GROUP) continue;
+    const start = Math.floor(group.start / 3);
+    const end = Math.min(triangles, Math.floor((group.start + group.count) / 3));
+    caps.fill(1, start, end);
+  }
+  return caps;
+}
+
+function unpack(sides: number[], caps: number[]): BufferGeometry | undefined {
+  const values = sides.concat(caps);
   if (values.length === 0) return undefined;
   const count = values.length / STRIDE;
   const geometry = new BufferGeometry();
+  geometry.addGroup(0, sides.length / STRIDE, 0);
+  if (caps.length > 0) geometry.addGroup(sides.length / STRIDE, caps.length / STRIDE, CAP_GROUP);
 
   let offset = 0;
   for (const attribute of ATTRIBUTES) {
@@ -148,16 +172,157 @@ export function sliceAtY(geometry: BufferGeometry, planeY: number): SlicedGeomet
 
   const below: number[] = [];
   const above: number[] = [];
+  const belowCaps: number[] = [];
+  const aboveCaps: number[] = [];
   const triangles = Math.floor(packed.length / STRIDE / 3);
+  const isCap = capTriangles(geometry, triangles);
   const corners: [number, number, number] = [0, 0, 0];
+  const segments: number[] = [];
 
   for (let t = 0; t < triangles; t++) {
     corners[0] = t * 3;
     corners[1] = t * 3 + 1;
     corners[2] = t * 3 + 2;
-    clipTriangle(below, packed, corners, planeY, 1);
-    clipTriangle(above, packed, corners, planeY, -1);
+    const cap = isCap[t] === 1;
+    clipTriangle(cap ? belowCaps : below, packed, corners, planeY, 1);
+    clipTriangle(cap ? aboveCaps : above, packed, corners, planeY, -1);
+    if (!cap) crossing(segments, packed, corners, planeY);
   }
 
-  return { below: unpack(below), above: unpack(above) };
+  if (below.length > 0 && above.length > 0) capCut(segments, planeY, belowCaps, aboveCaps);
+  return { below: unpack(below, belowCaps), above: unpack(above, aboveCaps) };
+}
+
+/**
+ * Where the plane crosses a triangle, as one segment (x0, z0, x1, z1), if it
+ * does. On-plane vertices count as above, so a triangle touching the plane
+ * at a corner crosses it at no edges or two, never one.
+ */
+function crossing(
+  out: number[],
+  packed: Float32Array,
+  corners: readonly [number, number, number],
+  planeY: number,
+): void {
+  let found = 0;
+  let x0 = 0;
+  let z0 = 0;
+  for (let edge = 0; edge < 3; edge++) {
+    const a = (corners[edge] ?? 0) * STRIDE;
+    const b = (corners[(edge + 1) % 3] ?? 0) * STRIDE;
+    const ya = packed[a + Y_OFFSET] ?? 0;
+    const yb = packed[b + Y_OFFSET] ?? 0;
+    if (ya >= planeY === yb >= planeY) continue;
+    const t = (planeY - ya) / (yb - ya);
+    const x = (packed[a] ?? 0) + ((packed[b] ?? 0) - (packed[a] ?? 0)) * t;
+    const z = (packed[a + 2] ?? 0) + ((packed[b + 2] ?? 0) - (packed[a + 2] ?? 0)) * t;
+    if (found === 0) {
+      x0 = x;
+      z0 = z;
+    } else {
+      out.push(x0, z0, x, z);
+    }
+    found++;
+  }
+}
+
+/** Weld tolerance for joining segment ends, in geometry units. */
+const WELD = 1e-4;
+
+interface Outline {
+  x: number;
+  z: number;
+  n: number;
+  /** Furthest point of the outline from its centre. */
+  r: number;
+}
+
+/**
+ * Fans each outline of the cut from its centre: facing up on the part below
+ * the plane, down on the part above.
+ */
+function capCut(segments: number[], planeY: number, belowOut: number[], aboveOut: number[]): void {
+  const count = segments.length / 4;
+  if (count === 0) return;
+  const seg = (i: number): number => segments[i] ?? 0;
+
+  // Union-find over welded segment ends: each set is one outline.
+  const ids = new Map<string, number>();
+  const parent: number[] = [];
+  const find = (i: number): number => {
+    let root = i;
+    while (parent[root] !== root) root = parent[root] ?? root;
+    return root;
+  };
+  const id = (x: number, z: number): number => {
+    const key = `${Math.round(x / WELD)},${Math.round(z / WELD)}`;
+    let value = ids.get(key);
+    if (value === undefined) {
+      value = parent.length;
+      parent.push(value);
+      ids.set(key, value);
+    }
+    return value;
+  };
+  const owner = new Int32Array(count);
+  for (let i = 0; i < count; i++) {
+    const a = find(id(seg(i * 4), seg(i * 4 + 1)));
+    const b = find(id(seg(i * 4 + 2), seg(i * 4 + 3)));
+    if (a !== b) parent[a] = b;
+    owner[i] = b;
+  }
+
+  // Centre and reach of each outline.
+  const outlines = new Map<number, Outline>();
+  const outlineOf = (i: number): Outline => {
+    const root = find(owner[i] ?? 0);
+    let outline = outlines.get(root);
+    if (outline === undefined) {
+      outline = { x: 0, z: 0, n: 0, r: 0 };
+      outlines.set(root, outline);
+    }
+    return outline;
+  };
+  for (let i = 0; i < count; i++) {
+    const c = outlineOf(i);
+    c.x += seg(i * 4) + seg(i * 4 + 2);
+    c.z += seg(i * 4 + 1) + seg(i * 4 + 3);
+    c.n += 2;
+  }
+  for (const c of outlines.values()) {
+    c.x /= c.n;
+    c.z /= c.n;
+  }
+  for (let i = 0; i < count; i++) {
+    const c = outlineOf(i);
+    c.r = Math.max(
+      c.r,
+      Math.hypot(seg(i * 4) - c.x, seg(i * 4 + 1) - c.z),
+      Math.hypot(seg(i * 4 + 2) - c.x, seg(i * 4 + 3) - c.z),
+    );
+  }
+
+  const vertex = (out: number[], c: Outline, x: number, z: number, ny: number): void => {
+    const span = Math.max(1e-6, c.r * 2);
+    out.push(x, planeY, z, 0, ny, 0, 0.5 + (x - c.x) / span, 0.5 + (z - c.z) / span);
+  };
+
+  for (let i = 0; i < count; i++) {
+    const c = outlineOf(i);
+    let ax = seg(i * 4);
+    let az = seg(i * 4 + 1);
+    let bx = seg(i * 4 + 2);
+    let bz = seg(i * 4 + 3);
+    // Wound so (centre, a, b) faces +Y: the cross product's y is
+    // (az - cz)(bx - cx) - (ax - cx)(bz - cz).
+    if ((az - c.z) * (bx - c.x) - (ax - c.x) * (bz - c.z) < 0) {
+      [ax, az, bx, bz] = [bx, bz, ax, az];
+    }
+    vertex(belowOut, c, c.x, c.z, 1);
+    vertex(belowOut, c, ax, az, 1);
+    vertex(belowOut, c, bx, bz, 1);
+    vertex(aboveOut, c, c.x, c.z, -1);
+    vertex(aboveOut, c, bx, bz, -1);
+    vertex(aboveOut, c, ax, az, -1);
+  }
 }
