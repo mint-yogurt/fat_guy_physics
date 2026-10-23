@@ -59,10 +59,15 @@ export const ItemType = {
   SpringShoes: 22,
   /** Cast with left mouse (hold to throw farther), reeled in with right; see items/fishing.ts. */
   FishingRod: 23,
+  /**
+   * Made from leaves (items/crafting.ts). Rolled with left mouse, put with right, like a rock;
+   * the paper it unrolls is drawn by the client (render/paperTrail.ts), the sim only rolls it.
+   */
+  ToiletPaper: 24,
 } as const;
 export type ItemType = (typeof ItemType)[keyof typeof ItemType];
 
-export const ITEM_TYPE_COUNT = 24;
+export const ITEM_TYPE_COUNT = 25;
 
 export const ITEM_NAMES = [
   "stick",
@@ -89,6 +94,7 @@ export const ITEM_NAMES = [
   "spring",
   "spring_shoes",
   "fishing_rod",
+  "toilet_paper",
 ] as const;
 
 /**

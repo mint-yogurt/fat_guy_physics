@@ -21,8 +21,8 @@ import type { PropTemplates } from "./propAssets.ts";
 /**
  * Dropped items, drawn as their own meshes: a log is a little log and a
  * stick is the stick, hovering over the ground and slowly turning about the
- * vertical so they catch the eye. Leaves are still a camera-facing billboard
- * of their hotbar icon until they get a mesh of their own.
+ * vertical so they catch the eye. Anything without a mesh of its own is a
+ * camera-facing billboard of its hotbar icon, or a coloured square.
  *
  * A stuck stick (one thrown into something) is drawn where and how it went
  * in, and does not turn.
@@ -30,7 +30,7 @@ import type { PropTemplates } from "./propAssets.ts";
 
 /** Radians per second an item on the ground turns. */
 export const SPIN_SPEED = 0.9;
-const LEAF_SIZE = 0.2;
+const SPRITE_SIZE = 0.2;
 /** Lying sticks are drawn smaller than in the hand, so a pile reads as litter. */
 const GROUND_STICK_SCALE = 0.6;
 /** A dropped rock is smaller than one lying in the world, which is the real thing. */
@@ -60,6 +60,7 @@ const FALLBACK_COLORS: Record<ItemType, number> = {
   [ItemType.Spring]: 0x9aa0a8,
   [ItemType.SpringShoes]: 0xc83a3a,
   [ItemType.FishingRod]: 0x8a6033,
+  [ItemType.ToiletPaper]: 0xf4f1e8,
   [ItemType.PresentSmall]: 0xc83a3a,
   [ItemType.PresentBig]: 0x2f9a4a,
   [ItemType.CandyBucket]: 0xd9741a,
@@ -94,7 +95,7 @@ export class PickupRenderer {
       this.spriteMaterials.set(type, material);
     }
     const sprite = new Sprite(material);
-    sprite.scale.setScalar(LEAF_SIZE);
+    sprite.scale.setScalar(SPRITE_SIZE);
     return sprite;
   }
 
@@ -178,6 +179,16 @@ export class PickupRenderer {
       pivot.add(this.assets.fishingRod.clone());
       return pivot;
     }
+    if (type === ItemType.Leaf) {
+      const pivot = new Group();
+      pivot.add(this.assets.leaves.clone());
+      return pivot;
+    }
+    if (type === ItemType.ToiletPaper) {
+      const pivot = new Group();
+      pivot.add(this.assets.toiletPaper.clone());
+      return pivot;
+    }
     const wood =
       type === ItemType.Toobifer
         ? this.assets.toobifer
@@ -232,7 +243,7 @@ export class PickupRenderer {
         this.objects.set(item.id, object);
       }
       object.position.set(item.x, item.y, item.z);
-      if (item.stuck === undefined && item.type !== ItemType.Leaf) {
+      if (item.stuck === undefined) {
         object.rotation.y = (now - item.spawnTime) * SPIN_SPEED + item.id;
       }
     }

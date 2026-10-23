@@ -2,12 +2,6 @@ build/
 build-*/
 out/
 
-# CMake
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-compile_commands.json
-
 # Editors / IDEs
 .vs/
 .vscode/
@@ -21,13 +15,6 @@ dist-types/
 *.tsbuildinfo
 .vite/
 
-# Golden-data tooling build artifacts. golden.json itself IS committed --
-# it is the fixture the TypeScript port is asserted against.
-tools/golden/dump_golden.exe
-tools/golden/dump_golden
-tools/golden/hash_extracted.inc
-
 # OS cruft
 .DS_Store
 Thumbs.db
-tools/golden/.stage/

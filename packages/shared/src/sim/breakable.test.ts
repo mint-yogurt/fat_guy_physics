@@ -4,7 +4,7 @@ import type { Trunk } from "../items/snowball.ts";
 import { PROP_METRICS } from "../worldgen/props.ts";
 import { SyncChunkSource } from "./chunkSource.ts";
 import { VOXEL_SIZE } from "./constants.ts";
-import { PROP_DAMAGE, propBox, propColliders, sectionTouching } from "./propDamage.ts";
+import { breakableDamage, PROP_DAMAGE, propBox, propColliders, sectionTouching } from "./propDamage.ts";
 import { SceneSolidQuery, type YawBox } from "./sceneQuery.ts";
 import { type ChunkSink, type Prop, World } from "./world.ts";
 
@@ -80,6 +80,40 @@ describe("a gingerbread house", () => {
     const { prop } = house();
     expect(prop.radius).toBeGreaterThan(breakable.halfX * prop.scale);
     expect(prop.height).toBeCloseTo(PROP_METRICS.gbreadhouse_1.height * prop.scale);
+  });
+});
+
+describe("a hut", () => {
+  const hut = PROP_METRICS.hut.breakable;
+  if (hut === undefined) throw new Error("the hut is not breakable");
+
+  function standingHut(): { world: World; sink: HouseSink; prop: Prop } {
+    const { world, sink } = house();
+    const prop = world.addProp("hut", 8, world.surfaceHeightVoxels(80, 0) * VOXEL_SIZE, 0, 0, 1.3, sink, []);
+    return { world, sink, prop };
+  }
+
+  it("takes its hits from any face, then explodes", () => {
+    const { world, sink, prop } = standingHut();
+    for (let i = 0; i < hut.hits - 1; i++) {
+      expect(world.damageBreakable(prop.id, breakableDamage("hut", "chup"), sink)?.destroyed).toBe(false);
+    }
+    expect(world.getProp(prop.id)).toBe(prop);
+    expect(world.damageBreakable(prop.id, breakableDamage("hut", "chup"), sink)?.destroyed).toBe(true);
+    expect(sink.changed).toEqual([{ id: prop.id, broken: 1 }]);
+    expect(world.getProp(prop.id)).toBeUndefined();
+  });
+
+  it("is weak to fire: much quicker than a chup a second, and a house is not", () => {
+    expect(breakableDamage("hut", "fire")).toBeGreaterThan(breakableDamage("hut", "chup") * 5);
+    expect(breakableDamage("gbreadhouse_1", "fire")).toBe(PROP_DAMAGE.fire);
+    expect(breakableDamage("hut", "rock")).toBe(PROP_DAMAGE.rock);
+    const { world, sink, prop } = standingHut();
+    const seconds = Math.ceil(hut.hits / breakableDamage("hut", "fire"));
+    expect(seconds).toBeLessThanOrEqual(3);
+    let result;
+    for (let i = 0; i < seconds; i++) result = world.damageBreakable(prop.id, breakableDamage("hut", "fire"), sink);
+    expect(result?.destroyed).toBe(true);
   });
 });
 

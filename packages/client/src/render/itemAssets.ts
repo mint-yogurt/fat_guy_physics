@@ -1,6 +1,7 @@
 import {
   Box3,
   Color,
+  DoubleSide,
   Group,
   Mesh,
   MeshLambertNodeMaterial,
@@ -20,6 +21,7 @@ import { litByBulbs } from "./bulbLights.ts";
 import { nearestify } from "./n64Texture.ts";
 import { createGooMaterial } from "./gooMaterial.ts";
 import { faceOutward } from "./meshOrientation.ts";
+import { readPaperParts, type PaperParts } from "./paperFlap.ts";
 import { bulbGlassMaterial, buildCoil, readRopeParts, type RopeParts } from "./ropeView.ts";
 
 /**
@@ -65,6 +67,10 @@ import { bulbGlassMaterial, buildCoil, readRopeParts, type RopeParts } from "./r
  *    long. `fishingRodHeld` is the one in the hand, HELD_ROD_LENGTH long: the Blade frame, the
  *    handle's "hand_attachment_point" at the origin and the rod running out along +Z, with a
  *    child named ROD_TIP_NAME where the line leaves it ("line_attachment_point").
+ *  - leaves: a small bunch of different leaves lying flat in XY, facing +Z, centred, LEAVES_SIZE across.
+ *  - toilet paper: `toiletPaper` is the item (slot, ground): the roll with its flap as modelled, centred.
+ *    `toiletPaperRoll` is the roll alone for a rolled one: standing on end (its axis on Y), centred. The
+ *    parts themselves are in `paperParts` (render/paperFlap.ts), which also builds the one in the hand.
  *  - goo: the puddle of it lying flat, centred, about 32cm across: the item as it
  *    looks in a slot or on the ground. gooBall: the ball of it in the hand, 16cm.
  */
@@ -92,6 +98,8 @@ const ROD_ITEM_SIZE = 0.9;
 const HELD_ROD_LENGTH = 2.2;
 /** The child of the held rod that sits where the fishing line leaves it. */
 export const ROD_TIP_NAME = "rod_tip";
+/** A bunch of leaves, longest side, metres. */
+const LEAVES_SIZE = 0.4;
 /** Diameter of the ball of goo in the hand, metres. */
 const GOO_BALL_DIAMETER = 0.16;
 /** Authored diameter of gooball.glb, units. */
@@ -162,6 +170,16 @@ export interface ItemAssets {
   readonly ropeCoil: Object3D;
   /** The pieces a tied string of xmas lights is assembled from. */
   readonly ropeParts: RopeParts;
+  /** A bunch of leaves. */
+  readonly leaves: Object3D;
+  /** The roll of toilet paper with its flap as modelled: the item. */
+  readonly toiletPaper: Object3D;
+  /** The roll alone, standing on end: what rolls along. */
+  readonly toiletPaperRoll: Object3D;
+  /** Half the roll's length along its axis as drawn, metres: how far its middle is above the ground when it stands on end. */
+  readonly toiletPaperRestHalfHeight: number;
+  /** The roll, flap and hand mark as read from the file; the flap in a hand and the trails are made from these. */
+  readonly paperParts: PaperParts;
 }
 
 /**
@@ -270,6 +288,8 @@ export async function loadItemAssets(): Promise<ItemAssets> {
     springFile,
     springShoesFile,
     rodFile,
+    leavesFile,
+    paperFile,
   ] = await Promise.all([
     loader.loadAsync("/meshes/stick.glb"),
     loader.loadAsync("/meshes/log.glb"),
@@ -292,6 +312,9 @@ export async function loadItemAssets(): Promise<ItemAssets> {
     loader.loadAsync("/meshes/spring.glb"),
     loader.loadAsync("/meshes/spring shoes.glb"),
     loader.loadAsync("/meshes/fishinrod.glb"),
+    loader.loadAsync("/meshes/leaves.glb"),
+    // The toilet paper: roll, flap, hand mark.
+    loader.loadAsync("/meshes/tp.glb"),
   ]);
 
   const stickScale = STICK_LENGTH / STICK_AUTHORED_LENGTH;
@@ -456,6 +479,35 @@ export async function loadItemAssets(): Promise<ItemAssets> {
   const gooBall = wrap(gooBallFile.scene, GOO_BALL_DIAMETER / GOO_BALL_AUTHORED_DIAMETER);
   recentre(gooBall, gooBallFile.scene);
 
+  // Flat leaves with a cut-out outline, seen from both sides.
+  pixelLit(leavesFile.scene);
+  leavesFile.scene.traverse((object) => {
+    if (!(object instanceof Mesh)) return;
+    for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+      material.side = DoubleSide;
+      material.alphaTest = 0.5;
+    }
+  });
+  const leaves = wrap(leavesFile.scene, fitScale(leavesFile.scene, LEAVES_SIZE));
+  recentre(leaves, leavesFile.scene);
+
+  const paperParts = readPaperParts(paperFile.scene);
+  if (paperParts === undefined) throw new Error('tp.glb: no node called "duct tape" (the roll)');
+  if (paperParts.flap === undefined) throw new Error('tp.glb: no node called "flap" (nothing to flap or trail)');
+  const paperItem = new Group();
+  paperItem.add(new Mesh(paperParts.roll, paperParts.material));
+  if (paperParts.flap !== undefined) paperItem.add(new Mesh(paperParts.flap, paperParts.material));
+  const toiletPaper = new Group();
+  toiletPaper.add(paperItem);
+  recentre(toiletPaper, paperItem);
+  // Turned so the roll's axis is up and centred on the roll alone: what rolls, and what stands.
+  const standing = new Group();
+  standing.add(new Mesh(paperParts.roll, paperParts.material));
+  standing.quaternion.setFromUnitVectors(paperParts.rollAxis, new Vector3(0, 1, 0));
+  standing.position.copy(paperParts.rollCentre).applyQuaternion(standing.quaternion).negate();
+  const toiletPaperRoll = new Group();
+  toiletPaperRoll.add(standing);
+
   const ropeParts = readRopeParts(lightsFile.scene);
   const ropeCoil = buildCoil(ropeParts);
 
@@ -484,6 +536,11 @@ export async function loadItemAssets(): Promise<ItemAssets> {
     gooBall,
     ropeCoil,
     ropeParts,
+    leaves,
+    toiletPaper,
+    toiletPaperRoll,
+    toiletPaperRestHalfHeight: paperParts.rollHalfLength,
+    paperParts,
     skateboardHeight: boardBounds.max.y - boardBounds.min.y,
     stick,
     stickGrip,

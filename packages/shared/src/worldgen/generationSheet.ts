@@ -80,7 +80,9 @@ export type PropKindName =
   | "leafpile"
   | "snowbank"
   | "rock"
-  | "gbreadhouse_1";
+  | "gbreadhouse_1"
+  | "hut"
+  | "hut_grass";
 export type SpawnKind = TreeKind | "bush" | PropKindName;
 
 export interface SpawnEntry {
@@ -217,16 +219,20 @@ export interface BiomeSection {
 }
 
 export const BIOME_SHEET: Readonly<Record<Biome, BiomeSection>> = {
-  // The third region has no name yet, and no purpose beyond the terrain.
-  // See README.
+  // The third region is the Forest biome. The code still says `Biome.Plain`
+  // (and `plain` in TERRAIN and the biome weights): that is the same region.
   [Biome.Plain]: {
-    label: "plain (unnamed)",
+    label: "forest",
     spawns: [
       { kind: "broadleaf", rarity: "common" },
       { kind: "bush", rarity: "common" },
       // Lying about; it is a physical thing (items/rock.ts), shoved, roped, carried.
       { kind: "rock", rarity: "uncommon" },
+      // A landmark, like the gingerbread house: break it open for what lies inside.
+      { kind: "hut", rarity: "structure" },
     ],
+    // Empty until the forest loot table is written (next: chests and the table).
+    // Until then a hut has nothing inside.
     lootTable: [],
   },
 
@@ -324,7 +330,20 @@ export interface ObjectSection {
     readonly items: number;
     readonly containerChance: number;
     readonly containers: readonly PropKindName[];
+    /**
+     * Where it is kept. `inside` (the default) is hidden in the walls until
+     * they break. `floor` is meant to lie on the ground in the middle, and
+     * a container there already does (it is placed at the structure's
+     * centre); loose items still only come out when the structure breaks,
+     * because nothing places a pickup at world generation yet (stub).
+     */
+    readonly contents?: "inside" | "floor";
   };
+  /**
+   * Props placed with a structure at its spot, in its size and facing, that
+   * are their own props and so outlast it (a hut's ring of grass).
+   */
+  readonly companions?: readonly PropKindName[];
   /**
    * Ground this flat or flatter, or it does not spawn: the greatest drop
    * between the centre and the edge of its footprint, in voxels. Omitted
@@ -370,6 +389,16 @@ export const OBJECT_SHEET: Readonly<Record<PropKindName, ObjectSection>> = {
     maxSlope: 4,
     interior: { items: 1, containerChance: 0.2, containers: ["present_small", "present_big"] },
   },
+  // A structure like the gingerbread house. Its contents are a placeholder:
+  // the forest has no loot table or chest yet, so nothing is rolled. When it
+  // does, set `containers` to the chest kind(s) and raise `containerChance`; the
+  // chest stands on the floor in the middle of the hut (`contents: "floor"`).
+  hut: {
+    maxSlope: 4,
+    interior: { items: 1, containerChance: 0.5, containers: [], contents: "floor" },
+    companions: ["hut_grass"],
+  },
+  hut_grass: {},
 };
 
 /**

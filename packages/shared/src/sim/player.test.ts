@@ -8,8 +8,8 @@ import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
 
 /**
  * Asserts the ported player and collision code against a trace recorded from
- * the C++ build (see tools/golden/dump-golden.sh, which compiles the real,
- * unmodified Collision.cpp and Player.cpp headlessly against a stub World).
+ * the C++ build (tools/golden/golden.json; the generator is gone, see git history before 6c60e4f), which compiled the real,
+ * unmodified Collision.cpp and Player.cpp headlessly against a stub World.
  *
  * This test exists because Collision.cpp is the most behaviourally fragile
  * code in the project: a dozen hand-tuned epsilons, an asymmetric floor/ceil

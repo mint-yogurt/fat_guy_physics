@@ -31,9 +31,9 @@ import { hasTopFace, splitTopFace } from "./containerLook.ts";
  * (the grave), left with its own origin on the ground. The renderer then
  * places an instance by position, yaw, lean and scale and nothing else.
  *
- * None of the files embed their textures, and their materials are named
- * rather than coloured, so what each material looks like is decided here, by
- * name, below. A material name nobody has an entry for draws plain white,
+ * Most files do not embed their textures (the tombstones and leafpile do), and
+ * their materials are named rather than coloured, so what each material looks
+ * like is decided here, by name, below. A material name nobody has an entry for draws plain white,
  * which is visible enough to notice.
  */
 
@@ -57,9 +57,10 @@ const LOOKS: Readonly<Record<string, Look>> = {
   snow: { color: 0xf3f7fb },
   carrot: { map: "carrot.png", color: 0xffffff },
   eye: { map: "eye.png", color: 0xffffff },
-  tombstone1: { color: 0x8b8f94 },
-  tombstone2: { color: 0x7b7f84 },
-  tombstone2_engraved: { color: 0x4b4e52 },
+  // The tombstone files embed their stone textures (bricks_1, stone3, stone3_engrave).
+  tombstone1: { color: 0xffffff, embedded: true },
+  tombstone2: { color: 0xffffff, embedded: true },
+  tombstone2_engraved: { color: 0xffffff, embedded: true },
   grave: { color: 0x3a2e25 },
   // Both present files misspell this ("wrappinpape"); which paper it is
   // comes from the file, below.
@@ -73,11 +74,18 @@ const LOOKS: Readonly<Record<string, Look>> = {
   leafpile: { color: 0xffffff, embedded: true },
   // The gingerbread house: one texture over the whole mesh (UVs are in the file).
   gingerbreadhouse: { map: "gingerbread.png", color: 0xffffff },
+  // The hut's walls and roof embed their textures (hut_walls, thatch).
+  hutwalls: { color: 0xffffff, embedded: true },
+  thatch: { color: 0xffffff, embedded: true },
 };
 
 /** By node name, overriding the material's: the grave's topsoil shares its box's material. */
 const NODE_LOOKS: Readonly<Record<string, Look>> = {
   topsoil: { color: 0x4a3524 },
+  // The hut's ring of grass: one-sided-thin walls of a grass texture whose alpha
+  // is the blades' outline. Cut out (not blended), so the gaps are properly
+  // empty and need no sorting; the file's own material is a blended one.
+  grass_surrounding: { color: 0xffffff, embedded: true, cutout: true },
 };
 
 /** The wrapping paper each present file gets. */
@@ -114,6 +122,13 @@ async function loadTemplate(
   const metrics = PROP_METRICS[kind];
   const gltf = await new GLTFLoader().loadAsync(metrics.asset);
 
+  // One file can make two props: drop the nodes this one does not own.
+  for (const child of [...gltf.scene.children]) {
+    const left = metrics.omit?.includes(child.name) === true;
+    const foreign = metrics.only !== undefined && !metrics.only.includes(child.name);
+    if (left || foreign) child.removeFromParent();
+  }
+
   const meshes: Mesh[] = [];
   gltf.scene.traverse((object) => {
     if (object instanceof Mesh) meshes.push(object);
@@ -138,7 +153,7 @@ async function loadTemplate(
         `${metrics.asset}: material "${materialName}" has no embedded texture`,
       );
     }
-    const key = `${embedded === null ? (file ?? "") : `embedded:${kind}`}|${(look?.color ?? 0xffffff).toString(16)}|${String(look?.cutout === true)}`;
+    const key = `${embedded === null ? (file ?? "") : `embedded:${kind}:${materialName}`}|${(look?.color ?? 0xffffff).toString(16)}|${String(look?.cutout === true)}`;
     let material = materials.get(key);
     if (material === undefined) {
       material = litByBulbs(

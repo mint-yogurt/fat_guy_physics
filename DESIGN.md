@@ -70,8 +70,10 @@ it, so a region fades in over ~20 m instead of starting at a line.
   sections, with cliffs jutting out of them. Tombstones, and graves set into
   the ground: most are covered with topsoil, some are open, and a few lean.
   Both kinds can hold loot.
-- **Unnamed third region** — flat, gently hilly, and big cartoony multi-tiered
-  bluffs. Still to be named and given a purpose.
+- **Forest** — the third region (the code still calls it `Biome.Plain`): flat,
+  gently hilly, and big cartoony multi-tiered bluffs. Broadleaf trees, with
+  huts to break open; chests, a loot table, a bigger tree, shrubs, thin grass
+  and vines are planned.
 
 ### Verticality
 

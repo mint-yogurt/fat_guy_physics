@@ -304,6 +304,79 @@ describe("gingerbread houses", () => {
   });
 });
 
+describe("huts", () => {
+  const HUT_SCAN = 250;
+  const huts: PropPlacement[] = [];
+  const out: Placement[] = [];
+  for (let cz = -HUT_SCAN; cz <= HUT_SCAN; cz++) {
+    for (let cx = -HUT_SCAN; cx <= HUT_SCAN; cx++) {
+      out.length = 0;
+      placeCell(gen, cx, cz, SEED, out);
+      for (const p of out) if (p.type === "prop" && p.kind === "hut") huts.push(p);
+    }
+  }
+
+  it("are a landmark of the forest region and nowhere else", () => {
+    expect(huts.length).toBeGreaterThan(20);
+    expect(huts.every((h) => h.biome === Biome.Plain)).toBe(true);
+    expect(BIOME_SHEET[Biome.Christmas].spawns.some((e) => e.kind === "hut")).toBe(false);
+    expect(BIOME_SHEET[Biome.Plain].label).toBe("forest");
+  });
+
+  it("only go on level ground, and clear of what is round them", () => {
+    const scratch: Placement[] = [];
+    for (const h of huts) {
+      const vx = Math.floor(h.x / VOXEL_SIZE);
+      const vz = Math.floor(h.z / VOXEL_SIZE);
+      const centre = gen.surfaceHeight(vx, vz);
+      const reach = Math.ceil((PROP_METRICS.hut.radius * h.scale) / VOXEL_SIZE);
+      for (const [dx, dz] of [[reach, 0], [-reach, 0], [0, reach], [0, -reach]] as const) {
+        expect(Math.abs(gen.surfaceHeight(vx + dx, vz + dz) - centre)).toBeLessThanOrEqual(OBJECT_SHEET.hut.maxSlope ?? 0);
+      }
+      const cx = floorDiv(vx, CHUNK_SIZE);
+      const cz = floorDiv(vz, CHUNK_SIZE);
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dz === 0) continue;
+          scratch.length = 0;
+          placeCell(gen, cx + dx, cz + dz, SEED, scratch, false);
+          for (const other of scratch) {
+            const ox = other.type === "prop" ? other.x : (other.rootVoxelX + 0.5) * VOXEL_SIZE;
+            const oz = other.type === "prop" ? other.z : (other.rootVoxelZ + 0.5) * VOXEL_SIZE;
+            expect(Math.hypot(ox - h.x, oz - h.z)).toBeGreaterThanOrEqual(PROP_METRICS.hut.radius * h.scale);
+          }
+        }
+      }
+    }
+  });
+
+  it("each come with a ring of grass at the same spot, size and facing, that is its own prop", () => {
+    const scratch: Placement[] = [];
+    for (const h of huts) {
+      const cx = floorDiv(Math.floor(h.x / VOXEL_SIZE), CHUNK_SIZE);
+      const cz = floorDiv(Math.floor(h.z / VOXEL_SIZE), CHUNK_SIZE);
+      scratch.length = 0;
+      placeCell(gen, cx, cz, SEED, scratch);
+      const grass = scratch.filter((p): p is PropPlacement => p.type === "prop" && p.kind === "hut_grass");
+      expect(grass).toHaveLength(1);
+      const ring = grass[0] as PropPlacement;
+      expect([ring.x, ring.y, ring.z, ring.yaw]).toEqual([h.x, h.y, h.z, h.yaw]);
+      expect(ring.scale).toBeCloseTo(h.scale);
+      expect(ring.id).not.toBe(h.id);
+    }
+    // Decor: nothing to aim at, nothing to break.
+    expect(PROP_METRICS.hut_grass.height).toBe(0);
+    expect(PROP_METRICS.hut_grass.breakable).toBeUndefined();
+  });
+
+  it("have nothing in them yet: the forest has no loot table or chest", () => {
+    expect(BIOME_SHEET[Biome.Plain].lootTable).toEqual([]);
+    expect(OBJECT_SHEET.hut.interior?.containers).toEqual([]);
+    expect(OBJECT_SHEET.hut.interior?.contents).toBe("floor");
+    for (const h of huts) expect(h.loot).toEqual([]);
+  });
+});
+
 describe("Christmas presents", () => {
   it("are stocked from the Christmas loot table", () => {
     const table = BIOME_SHEET[Biome.Christmas].lootTable.map((e) => e.item);

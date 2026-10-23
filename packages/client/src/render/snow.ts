@@ -238,7 +238,7 @@ export const CRUMB_BURST: BurstStyle = {
   fade: 0.4,
   gravity: 9,
   drag: 0.6,
-  sizeScale: 2.4,
+  sizeScale: 1.4,
   round: false,
   opacity: 1,
   bounce: 0.35,

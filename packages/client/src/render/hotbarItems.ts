@@ -153,6 +153,10 @@ export class HotbarItems {
       content.add(assets.springShoeItem.clone());
     } else if (type === ItemType.FishingRod) {
       content.add(assets.fishingRod.clone());
+    } else if (type === ItemType.Leaf) {
+      content.add(assets.leaves.clone());
+    } else if (type === ItemType.ToiletPaper) {
+      content.add(assets.toiletPaper.clone());
     } else if (type === ItemType.Goo) {
       content.add(assets.goo.clone());
     } else if (type === ItemType.XmasLights) {

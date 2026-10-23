@@ -48,8 +48,8 @@ const LOG_PIECE_MAX_METERS = 1.3;
 /** Wood volume per log, m^3: a typical trunk comes apart into four or five. */
 const LOG_VOLUME = 0.12;
 const MAX_LOGS_PER_PIECE = 6;
-/** Leaves each foliage cluster on a broken-down piece puffs into. */
-const LEAVES_PER_CLUSTER = 4;
+/** Leaves each foliage cluster on a broken-down piece puffs into (it was four). */
+const LEAVES_PER_CLUSTER = 2;
 
 /** Swings to cut a piece in two, how far a cut may wander, and the shortest part a cut leaves. */
 const CHOPS_TO_CUT = 2;

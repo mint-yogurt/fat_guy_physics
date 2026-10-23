@@ -78,6 +78,15 @@ export const RECIPES: readonly Recipe[] = [
     ],
     output: { type: ItemType.FishingRod, count: 1 },
   },
+  // Fabric: ten leaves make a roll of toilet paper, and a dozen rolls and some metal a trampoline.
+  { inputs: [{ type: ItemType.Leaf, count: 10 }], output: { type: ItemType.ToiletPaper, count: 1 } },
+  {
+    inputs: [
+      { type: ItemType.ToiletPaper, count: 12 },
+      { type: ItemType.Metal, count: 4 },
+    ],
+    output: { type: ItemType.Trampoline, count: 1 },
+  },
 ];
 
 /** Every known recipe that takes `type`: what a material can be turned into. */

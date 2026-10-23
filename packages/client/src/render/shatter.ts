@@ -19,15 +19,15 @@ import {
 
 const GRAVITY = 9.8;
 /** Out from the middle, m/s, and the lift every piece gets on top of that. */
-const OUT_SPEED_MIN = 2;
-const OUT_SPEED_MAX = 6;
-const LIFT_MIN = 1.5;
-const LIFT_MAX = 4.5;
+const OUT_SPEED_MIN = 0.8;
+const OUT_SPEED_MAX = 2.5;
+const LIFT_MIN = 0.6;
+const LIFT_MAX = 1.8;
 /** Tumble, radians per second at most either way about each axis. */
-const SPIN = 12;
+const SPIN = 6;
 /** How long a piece lasts, seconds, and the last of that over which it shrinks to nothing. */
-const LIFE_MIN = 0.8;
-const LIFE_MAX = 1.5;
+const LIFE_MIN = 0.5;
+const LIFE_MAX = 0.9;
 const SHRINK = 0.4;
 
 interface Piece {
@@ -125,9 +125,9 @@ export class Shatter {
         const out = OUT_SPEED_MIN + Math.random() * (OUT_SPEED_MAX - OUT_SPEED_MIN);
         this.pieces.push({
           mesh,
-          vx: ox * out + (Math.random() - 0.5) * 2,
-          vy: LIFT_MIN + Math.random() * (LIFT_MAX - LIFT_MIN) + Math.max(0, centre.y - cy) * 0.8,
-          vz: oz * out + (Math.random() - 0.5) * 2,
+          vx: ox * out + (Math.random() - 0.5) * 0.8,
+          vy: LIFT_MIN + Math.random() * (LIFT_MAX - LIFT_MIN) + Math.max(0, centre.y - cy) * 0.4,
+          vz: oz * out + (Math.random() - 0.5) * 0.8,
           spinX: (Math.random() - 0.5) * SPIN,
           spinY: (Math.random() - 0.5) * SPIN,
           spinZ: (Math.random() - 0.5) * SPIN,

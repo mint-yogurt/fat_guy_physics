@@ -111,6 +111,8 @@ const HOLD_STYLES: Record<ItemType, HoldStyle> = {
   // Gripped at the handle like a stick, tip out. Casting reuses the spear wind-up and lunge, but
   // the rod never leaves the hand (`leavesHandOnThrow`).
   [ItemType.FishingRod]: HoldStyle.Blade,
+  // In the fist, rolled and put exactly as a rock is.
+  [ItemType.ToiletPaper]: HoldStyle.Ball,
 };
 
 /** Whether a throw of the held item sends it out of the hand (a stick, a log); a cast keeps the rod. */

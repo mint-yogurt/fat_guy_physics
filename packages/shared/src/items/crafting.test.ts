@@ -255,6 +255,26 @@ describe("crafting", () => {
     expect(hand.held).toEqual({ type: ItemType.SpringShoes, count: 1 });
   });
 
+  it("turns ten leaves into a roll of toilet paper, and a dozen rolls and some metal into a trampoline", () => {
+    const bench = new CraftingBench(bookWith(ItemType.Leaf, ItemType.ToiletPaper, ItemType.Metal));
+    const cursor = new ItemCursor();
+    bench.setSlot(0, { type: ItemType.Leaf, count: 9 });
+    expect(bench.result()).toBeUndefined();
+    bench.setSlot(0, { type: ItemType.Leaf, count: 25 });
+    expect(bench.craft(cursor, Infinity)).toBe(2);
+    expect(cursor.held).toEqual({ type: ItemType.ToiletPaper, count: 2 });
+    expect(bench.slot(0)).toEqual({ type: ItemType.Leaf, count: 5 });
+
+    const trampoline = new CraftingBench(bookWith(ItemType.ToiletPaper, ItemType.Metal));
+    const hand = new ItemCursor();
+    trampoline.setSlot(0, { type: ItemType.ToiletPaper, count: 12 });
+    trampoline.setSlot(1, { type: ItemType.Metal, count: 3 });
+    expect(trampoline.result()).toBeUndefined();
+    trampoline.setSlot(1, { type: ItemType.Metal, count: 4 });
+    expect(trampoline.craft(hand)).toBe(1);
+    expect(hand.held).toEqual({ type: ItemType.Trampoline, count: 1 });
+  });
+
   it("learns what it makes, so the next recipe in the chain opens up", () => {
     const book = bookWith(ItemType.Log, ItemType.Stick);
     const bench = new CraftingBench(book);

@@ -13,7 +13,7 @@ import { hash32, hashFloat } from "./hash.ts";
  * is just somewhere else than the reference build puts it, forever. And once
  * there is a server, client and server disagree about where everything is.
  *
- * Reference values come from the real C++ via tools/golden/dump-golden.sh,
+ * Reference values come from the real C++, recorded in tools/golden/golden.json (the generator is gone; see git history before 6c60e4f),
  * which extracts hash32/hashFloat straight out of Vegetation.cpp rather than
  * copying them, so this cannot pass against a drifted copy of the function.
  */

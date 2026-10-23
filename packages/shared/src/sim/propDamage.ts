@@ -4,7 +4,7 @@ import type { YawBox } from "./sceneQuery.ts";
 import type { Prop } from "./world.ts";
 
 /**
- * Props that are hit and come apart (snowmen, gingerbread houses), as opposed
+ * Props that are hit and come apart (snowmen, gingerbread houses, huts), as opposed
  * to props that are scraped for resources (a snowbank) or opened (a present).
  *
  * The parts of a snowman are `PROP_SECTIONS` (worldgen/props.ts): stacked
@@ -30,9 +30,21 @@ export const PROP_DAMAGE = {
   rock: 3,
   /** A carton of eggnog thrown or kicked hard enough to hurt. */
   eggnog: 1,
+  /**
+   * A second of burning (stub: nothing sets a prop alight yet). Whatever does
+   * should deal this once a second; a prop that burns well has a
+   * `fireMultiplier` in its `breakable` row.
+   */
+  fire: 1,
 } as const;
 
 export type PropDamageSource = keyof typeof PROP_DAMAGE;
+
+/** What a blow of this kind does to a breakable prop: `PROP_DAMAGE`, bar fire's multiplier. */
+export function breakableDamage(kind: PropKind, source: PropDamageSource): number {
+  const damage = PROP_DAMAGE[source];
+  return source === "fire" ? damage * (PROP_METRICS[kind].breakable?.fireMultiplier ?? 1) : damage;
+}
 
 /** A ball slower than this (m/s) only leans on a prop; it does not hit it. */
 export const HIT_SPEED = 3;

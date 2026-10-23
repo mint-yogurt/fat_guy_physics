@@ -52,6 +52,9 @@ const PROP_COLORS: Readonly<Record<string, readonly [number, number, number]>> =
   leafpile: [0.8, 0.45, 0.1],
   snowbank: [0.92, 0.96, 1],
   gbreadhouse_1: [0.62, 0.36, 0.17],
+  hut: [0.72, 0.6, 0.3],
+  // Under the hut and about the colour of the ground, so it only shows once the hut is gone.
+  hut_grass: [0.3, 0.5, 0.2],
 };
 const DEFAULT_PROP_COLOR: readonly [number, number, number] = [0.9, 0.9, 0.2];
 

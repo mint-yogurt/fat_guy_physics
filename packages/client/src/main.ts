@@ -140,12 +140,14 @@ import { LooseBoardsView, SkateboardView } from "./render/skateboardView.ts";
 import { TreeLightsView } from "./render/treeLights.ts";
 import { RopesView } from "./render/ropeView.ts";
 import { FishingView } from "./render/fishingView.ts";
+import { PaperTrails } from "./render/paperTrail.ts";
 import { SnowballsView, SnowPuffs } from "./render/snowballView.ts";
 import { GOO_SPRAY_COLORS, GooStains } from "./render/gooMaterial.ts";
 import { VesselsView } from "./render/vesselView.ts";
 import { createBiomeWeights } from "@fgp/shared/worldgen/biome";
 import { PROP_METRICS, PROP_SECTIONS } from "@fgp/shared/worldgen/props";
 import {
+  breakableDamage,
   HIT_SPEED,
   isBreakable,
   PROP_DAMAGE,
@@ -218,10 +220,11 @@ const SCOOP_REANCHOR_DIRECTION = 0.995;
 const CHUP_TICK_SECONDS = CHUP_CYCLE_SECONDS / 2;
 
 /**
- * Sticks splashed out of a trunk by each chup that lands on it: one, and a
- * chance of a second, flung out towards the swinger's side of the tree.
+ * Sticks splashed out of a trunk by each chup that lands on it, flung out towards the
+ * swinger's side of the tree: a quarter of the one-and-a-bit it used to be, on average, so
+ * most chups give none. (A whole number is drawn so the average comes out right.)
  */
-const STICK_SPLASH_EXTRA_CHANCE = 0.3;
+const STICK_SPLASH_AVERAGE = 0.325;
 const STICK_SPLASH_SPREAD = 1.2;
 
 /** Spear throw: hold to charge for up to this long; speed runs min..max with the charge. */
@@ -279,13 +282,17 @@ const SNOWMAN_BREAK_FLAKE_SPEED = 3.5;
 /** A ball that has hurt a prop cannot hurt it again for this long, seconds. */
 const BALL_HIT_COOLDOWN = 0.4;
 /** Crumbs knocked off a gingerbread house by a blow, and by its blowing up; and how fast they leave, m/s. */
-const HOUSE_HIT_CRUMBS = 12;
-const HOUSE_HIT_CRUMB_SPEED = 2.6;
-const HOUSE_BREAK_CRUMBS = 140;
-const HOUSE_BREAK_CRUMB_SPEED = 5;
+const HOUSE_HIT_CRUMBS = 3;
+const HOUSE_HIT_CRUMB_SPEED = 1.8;
+const HOUSE_BREAK_CRUMBS = 20;
+const HOUSE_BREAK_CRUMB_SPEED = 3;
 /** Gingerbread, icing and candy: the colours the crumbs come in (browns twice, for more of them). */
 const CRUMB_PALETTE = [
   0x9a5a2c, 0x9a5a2c, 0x7a431e, 0xb8743a, 0xb8743a, 0xf4efe6, 0xffffff, 0xd63a3a, 0x2f9e55,
+].map(flakeRgb);
+/** A hut's: weathered wood, thatch straw, a little grass green. */
+const HUT_CRUMB_PALETTE = [
+  0x6b4a2b, 0x6b4a2b, 0x4f351f, 0x8a6a3e, 0xc9ad63, 0xc9ad63, 0xa88c45, 0x5f8a3a,
 ].map(flakeRgb);
 /** What was inside a house hops out of it at this speed, m/s. */
 const HOUSE_LOOT_HOP = 2;
@@ -337,9 +344,10 @@ const ROPE_TIE_STANDOFF = 0.03;
 /**
  * Leaves a harvested canopy bursts into, and how far they scatter. A
  * cluster is the whole of a tree's foliage at that height, so it is worth
- * a handful of leaves rather than the one a voxel scoop dropped.
+ * a handful of leaves rather than the one a voxel scoop dropped. Counts are averages: a
+ * whole number is drawn round them, so 2.5 is two or three.
  */
-const LEAF_PUFF_COUNT = 5;
+const LEAF_PUFF_COUNT = 2.5;
 const LEAF_PUFF_SPREAD = 0.4;
 
 /** Explored radius around the player, in chunks (3.2m each); kept inside the load radius. */
@@ -458,12 +466,11 @@ async function start(): Promise<void> {
   });
   const material = terrainMaterial.material;
   const bushTexture = await loadTexture("/billboard/bush.png");
-  const leafIcon = await loadTexture("/icons/leaf.png");
   const itemAssets = await loadItemAssets();
   const propAssets = await loadPropAssets();
   const heldSources: HeldItemSources = {
     assets: itemAssets,
-    icons: { [ItemType.Leaf]: leafIcon },
+    icons: {},
     props: propAssets,
   };
   const treeAssets = await loadTreeAssets();
@@ -516,7 +523,7 @@ async function start(): Promise<void> {
   const inventory = new Inventory();
   const hotbar = new Hotbar(requireElement<HTMLDivElement>("#hotbar"), heldSources);
   const pickups = new PickupField();
-  const pickupRenderer = new PickupRenderer(scene, itemAssets, { [ItemType.Leaf]: leafIcon }, propAssets);
+  const pickupRenderer = new PickupRenderer(scene, itemAssets, {}, propAssets);
   const trampolines = new TrampolineField();
   const trampolineSystem = new TrampolineSystem(scene, itemAssets, trampolines);
   // Building pieces: the sim's field of them (saved, climbed, hit); BuildSystem below makes them physical.
@@ -621,6 +628,22 @@ async function start(): Promise<void> {
   /** What things land on: terrain, or a trampoline mat standing over it. */
   const groundAt = (x: number, z: number): number =>
     Math.max(terrainAt(x, z), trampolines.topAt(x, z) ?? -Infinity);
+  /**
+   * What loose paper lies on at (x, z), coming down from about y: the ground, or the top of something
+   * standing on it (a log, a snowbank, a piece, a wall) that is more than a hand's width high.
+   */
+  const paperSupport = (x: number, y: number, z: number): number => {
+    const ground = groundAt(x, z);
+    if (y - ground > 2) return ground;
+    const vx = Math.floor(x / VOXEL_SIZE);
+    const vz = Math.floor(z / VOXEL_SIZE);
+    for (let vy = Math.floor((y + 0.1) / VOXEL_SIZE); (vy + 1) * VOXEL_SIZE > ground + 0.12; vy--) {
+      if (sceneQuery.isSolid(vx, vy, vz)) return (vy + 1) * VOXEL_SIZE;
+    }
+    return ground;
+  };
+  /** The paper a rolled or thrown roll of toilet paper leaves behind it. */
+  const paperTrails = new PaperTrails(scene, itemAssets.paperParts, paperSupport);
 
   // Bring back the last session, before the first chunk is asked for: the world's
   // edits must be in before terrain streams, and the player's spot decides which
@@ -676,6 +699,8 @@ async function start(): Promise<void> {
     inventory.tryAdd(ItemType.PresentSmall, 2);
     inventory.tryAdd(ItemType.PresentBig, 2);
     inventory.tryAdd(ItemType.CandyBucket, 2);
+    inventory.tryAdd(ItemType.Leaf, 30);
+    inventory.tryAdd(ItemType.ToiletPaper, 10);
   }
   if (DEBUG) hud.set("DEBUG", "ON");
 
@@ -807,7 +832,7 @@ async function start(): Promise<void> {
    * side the swing came from.
    */
   const splashSticks = (x: number, y: number, z: number): void => {
-    const count = 1 + (Math.random() < STICK_SPLASH_EXTRA_CHANCE ? 1 : 0);
+    const count = Math.floor(STICK_SPLASH_AVERAGE + Math.random());
     const base = Math.atan2(player.z - z, player.x - x);
     for (let i = 0; i < count; i++) {
       const angle = base + (Math.random() - 0.5) * 2 * STICK_SPLASH_SPREAD;
@@ -963,13 +988,14 @@ async function start(): Promise<void> {
   };
 
   /**
-   * A blow on a breakable prop (a gingerbread house), landing at (x, y, z):
+   * A blow on a breakable prop (a gingerbread house, a hut), landing at (x, y, z):
    * crumbs fly off it, and when it has taken all it can it explodes into its
    * triangles (see `onShattered`) and what was inside hops out.
    */
   const hurtHouse = (prop: Prop, x: number, y: number, z: number, source: PropDamageSource): void => {
-    const hurt = world.damageBreakable(prop.id, PROP_DAMAGE[source], worldRenderer);
+    const hurt = world.damageBreakable(prop.id, breakableDamage(prop.kind, source), worldRenderer);
     if (hurt === undefined) return;
+    const crumbs = prop.kind === "hut" ? HUT_CRUMB_PALETTE : CRUMB_PALETTE;
 
     let outX = x - prop.x;
     let outZ = z - prop.z;
@@ -979,13 +1005,13 @@ async function start(): Promise<void> {
       outZ = player.z - prop.z;
       outLength = Math.max(1e-3, Math.hypot(outX, outZ));
     }
-    crumbBurst.burst(x, y, z, outX / outLength, 0.4, outZ / outLength, HOUSE_HIT_CRUMBS, HOUSE_HIT_CRUMB_SPEED, CRUMB_PALETTE);
+    crumbBurst.burst(x, y, z, outX / outLength, 0.4, outZ / outLength, HOUSE_HIT_CRUMBS, HOUSE_HIT_CRUMB_SPEED, crumbs);
     audio.play("hit4", { variance: 2, gain: 0.8 * hearing(x, y, z), pitch: 3 });
     if (!hurt.destroyed) return;
 
     const middleY = prop.y + prop.height * 0.3;
     audio.play("treeBreak", { variance: 1, gain: hearing(prop.x, middleY, prop.z), pitch: 2 });
-    crumbBurst.burst(prop.x, middleY, prop.z, 0, 1, 0, HOUSE_BREAK_CRUMBS, HOUSE_BREAK_CRUMB_SPEED, CRUMB_PALETTE);
+    crumbBurst.burst(prop.x, middleY, prop.z, 0, 1, 0, HOUSE_BREAK_CRUMBS, HOUSE_BREAK_CRUMB_SPEED, crumbs);
     for (const name of hurt.released) {
       const type = itemTypeFromName(name);
       if (type === undefined) continue;
@@ -1230,7 +1256,7 @@ async function start(): Promise<void> {
     const flat = Math.max(1e-3, Math.hypot(player.frontX, player.frontZ));
     const fx = player.frontX / flat;
     const fz = player.frontZ / flat;
-    const speed = BOWL_MIN_SPEED + (BOWL_MAX_SPEED - BOWL_MIN_SPEED) * charge;
+    const speed = (BOWL_MIN_SPEED + (BOWL_MAX_SPEED - BOWL_MIN_SPEED) * charge) * (rolled?.speedScale ?? 1);
     const x = player.x + fx * 0.8;
     const z = player.z + fz * 0.8;
     const y = Math.max(player.y, groundAt(x, z)) + (rolled?.radius ?? SNOW_UNIT_RADIUS) + 0.04;
@@ -1246,7 +1272,9 @@ async function start(): Promise<void> {
     const rolled = rolledItemOf(held);
     const vessel = vesselOf(held);
     const speed =
-      vessel !== undefined ? putSpeedAt(vessel, charge) : PUT_MIN_SPEED + (PUT_MAX_SPEED - PUT_MIN_SPEED) * charge;
+      vessel !== undefined
+        ? putSpeedAt(vessel, charge)
+        : (PUT_MIN_SPEED + (PUT_MAX_SPEED - PUT_MIN_SPEED) * charge) * (rolled?.speedScale ?? 1);
     // A touch above the crosshair, as a shot put leaves the hand rising.
     const length = Math.hypot(player.frontX, player.frontY + 0.06, player.frontZ);
     const dx = player.frontX / length;
@@ -1637,6 +1665,8 @@ async function start(): Promise<void> {
           if (sectionTouching(prop, ball.x, ball.y, ball.z, ball.radius) < 0) continue;
           ballHitAt.set(ball, ballHitClock + BALL_HIT_COOLDOWN);
           const made = itemOfBall(ball);
+          // Paper is no weapon.
+          if (made === ItemType.ToiletPaper) break;
           hurtProp(prop.id, ball.x, ball.y, ball.z, made === ItemType.Rock ? "rock" : made === ItemType.Eggnog ? "eggnog" : "snowball");
           break;
         }
@@ -1940,7 +1970,8 @@ async function start(): Promise<void> {
               world.stripFoliage(anchorTreeId, anchorTreePart, worldRenderer);
             if (puffed) {
               audio.play("leafPuff", { variance: 2 });
-              for (let leaf = 0; leaf < LEAF_PUFF_COUNT; leaf++) {
+              const leaves = Math.floor(LEAF_PUFF_COUNT + Math.random());
+              for (let leaf = 0; leaf < leaves; leaf++) {
                 dropItem(
                   ItemType.Leaf,
                   anchorCenterX + (Math.random() - 0.5) * LEAF_PUFF_SPREAD,
@@ -2549,6 +2580,7 @@ async function start(): Promise<void> {
     skateboardView.update(player, renderX, renderY, renderZ, onBoard);
     looseBoardsView.sync(looseBoards, alpha);
     snowballsView.sync(snowballs, flyingSnow.flying, alpha);
+    paperTrails.sync(snowballs, rawDt, alpha);
     vesselsView.sync(vessels.flying, alpha);
 
     playerModel.update(player, avatarPose, rawDt, renderX, renderY + rideLift, renderZ, rideLift);
@@ -2692,6 +2724,7 @@ async function start(): Promise<void> {
     skateboardView.dispose();
     looseBoardsView.dispose();
     snowballsView.dispose();
+    paperTrails.dispose();
     vesselsView.dispose();
     gooStains.dispose();
     snowPuffs.dispose();

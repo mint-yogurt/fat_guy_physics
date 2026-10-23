@@ -286,6 +286,8 @@ can make (see TODO). Recipes are the `RECIPES` table in `items/crafting.ts`:
 | 2 metal | 1 spring |
 | 1 toobifer + 1 xmas lights + 2 springs | 1 pair of spring shoes |
 | 1 stick + 1 wheel + 3 xmas lights | 1 fishing rod |
+| 10 leaves | 1 toilet paper |
+| 12 toilet paper + 4 metal | 1 trampoline |
 
 **Spring shoes** (`spring_shoes`) are worn while they are the selected hotbar
 item: one shoe (`spring shoes.glb`, not resized) is snapped by the top face of
@@ -337,14 +339,17 @@ container's own `loot` row in the generation sheet. Entries are single items.
   foliage it was carrying puffs into leaves. So a tree comes apart into four
   or five logs. Numbers are at the top of
   [`logSystem.ts`](packages/client/src/physics/logSystem.ts).
-- **Sticks** splash out of the bark on every chup that lands on a tree or a
-  piece: one, 30% chance of two, flung towards your side.
-- **Leaves** come from scooping foliage (left mouse on a canopy) and from
-  pieces breaking down.
+- **Sticks** splash out of the bark on a chup that lands on a tree or a
+  piece, flung towards your side: a quarter of what they were, so about one
+  chup in three gives one (`STICK_SPLASH_AVERAGE` in `main.ts`).
+- **Leaves** come from scooping foliage (left mouse on a canopy; 2 or 3 a
+  scoop, half of what it was; the leaves mesh is drawn at 0.4 m across) and from pieces breaking down (2 a foliage
+  cluster, was 4).
 
 Dropped items are their own meshes (`log.glb`, `stick.glb`), hovering above
 the ground, bobbing and slowly turning about the vertical so they are easy
-to spot. Leaves are still a billboard of their icon until they get a mesh.
+to spot. Everything is a mesh now (the leaf is `leaves.glb`, a small bunch of
+maple, oak and poplar leaves).
 Nothing is collected by walking over it any more: aim at it and press **E**
 (anything right at your feet also counts). A prompt under the crosshair
 says what E would pick up.
@@ -414,7 +419,7 @@ the actions:
   field as the snowballs
   ([`snowball.ts`](packages/shared/src/items/snowball.ts) takes a `RollMaterial`,
   and [`rock.ts`](packages/shared/src/items/rock.ts) is the stone one). Rocks
-  lie about the **unnamed region** (uncommon) and **Halloween** (rare), in a
+  lie about the **Forest** (uncommon) and **Halloween** (rare), in a
   range of sizes. A rock in the world is not scenery. It is a body with weight
   (a standard one is about 25 kg, more by the cube of its size; the dev stats
   show the mass of the one you aim at):
@@ -464,7 +469,34 @@ the actions:
 - **Xmas lights** (the basic rope; `xmas_lights`, stacks to 255): wound up
   in a coil as an item, held in the fist. Equipped, left mouse ties it; see
   [Xmas lights](#xmas-lights-rope-and-bulb-glow) below.
-- **Leaf**: pinched in the fingers (a small billboard of its icon for now).
+- **Leaf** (`leaf`): a bunch of leaves (`leaves.glb`) pinched in the fingers. The
+  fabric of the game: ten of them make a roll of toilet paper.
+- **Toilet paper** (`toilet_paper`): made from 10 leaves, and 12 of it with 4
+  metal make a trampoline. Used exactly as a rock is (**left mouse rolls it**,
+  **right mouse puts it**, **E** picks it up; a row in
+  [`rolledItems.ts`](packages/shared/src/items/rolledItems.ts), about a tenth of
+  a kilogram, hops a little), but it does no damage. It is light: it leaves the
+  hand at half a rock's speed (`speedScale` in `rolledItems.ts`) and the ground
+  slows it hard, so a good bowl goes about two metres and a good throw nine.
+  In the first-person hand it is seated against the palm (`PAPER_POINT` in
+  `armViewmodel.ts`); bowling turns the wrist a quarter so it runs like a wheel,
+  and a throw is drawn back and swung out to the right, not up over the shoulder. The mesh (`tp.glb`)
+  has three named parts, found by name
+  ([`paperFlap.ts`](packages/client/src/render/paperFlap.ts)): the **roll**
+  (`roll`), the **flap** (`flap`: the loose
+  end, a strip of squares joined to the roll along its nearest edge) and the
+  **hand mark** (`hand goes here`). In a slot, on the ground and in the hotbar
+  the flap stays as modelled. In the hand it is a hanging strip that swings and
+  flaps with the arm (a short chain of points under gravity, kept out of the roll;
+  tuning constants at the top of `paperFlap.ts`). Rolled or thrown, the flap is
+  copied behind the roll as a **trail** of ribbon, one cell per flap length with
+  its texture ([`paperTrail.ts`](packages/client/src/render/paperTrail.ts)): on
+  the ground it is laid down following the surface under each corner, in the air
+  it is left where the roll was and floats down, settling on whatever is under
+  it (ground, log, snowbank, piece). It is not a cloth simulation. Trails fade
+  90 s after the roll leaves them; at most 40 ribbon meshes of 120 cells exist at
+  once, and the oldest is recycled. The rolled roll turns like a wheel and stands
+  on its end when it stops.
 - **Empty hand**: a chup is a karate chop; the scoop dips both hands.
 
 #### Held items, multiplayer, and adding a new one
@@ -733,9 +765,9 @@ one file to tune the world from. It has a section for each region:
 - per-object rows (`OBJECT_SHEET`): what swinging at a snowman gets you, what
   a container holds, how flat the ground must be under it;
 - `lootTable` per region: what turns up in its containers and in its
-  gingerbread houses. Christmas has one (xmas lights, mowden lightning,
+  gingerbread houses and huts. Christmas has one (xmas lights, mowden lightning,
   eggnog, snowball, log, stick, coal, metal, candy, each with a rarity); the other regions
-  have none yet. Names with no item behind them yet are skipped.
+  (Forest included) have none yet. Names with no item behind them yet are skipped.
 
 Adding a mesh: put the `.glb` in `assets/meshes`, add its metrics to
 [`props.ts`](packages/shared/src/worldgen/props.ts) and its materials' looks to
@@ -749,13 +781,13 @@ game as a physical body, `onRockPlaced`, once per rock; the game owns it after.)
 | --- | --- | --- |
 | Christmas | Flat, with gentle rolling hills. | Conifers, bushes, snowmen (two sizes; sticks), presents (two sizes; containers; rare), gingerbread houses (very rare). |
 | Halloween | Flat sections, and cliffs that jut out of them. | Dead trees, a few autumn-coloured broadleaf trees, tombstones (two kinds), graves, candy buckets (container; rare), the odd rock (rare). |
-| **Unnamed** | Flat, gently hilly, and big cartoony multi-tiered bluffs. | Broadleaf trees, bushes, rocks (uncommon). |
+| **Forest** | Flat, gently hilly, and big cartoony multi-tiered bluffs. | Broadleaf trees, bushes, rocks (uncommon), huts (very rare). |
 
-**The third region needs a name and a purpose.** Today it is just "plain":
-the ground between the two holiday regions, with a forest of broadleaf trees.
-"Forest" is the working guess, but the bluffs suggest something more like
-hill country; decide what it is for and what lives there, then fill in its
-`BIOME_SHEET` section.
+**The third region is the Forest biome.** It is the ground between the two
+holiday regions. In the code it is still `Biome.Plain` (and `plain` in
+`TERRAIN` and the biome weights); the sheet labels it "forest". Coming for it:
+chests, a forest loot table, a bigger tree, shrubs and thin grass, vines off
+trees.
 
 Height is the game's progression: the player cannot climb a cliff or a bluff
 face, so getting up to what is on top means building something to get there.
@@ -806,6 +838,36 @@ the wreck when it blows. One house in five also has a **present or gift** standi
 in its middle, stocked from the same table like every other present; it is there
 from the start, behind the walls. The item and container odds are the `interior`
 row in `OBJECT_SHEET`.
+
+### Huts
+
+A rare landmark in the Forest region (`hut.glb`: a round hut under a conical
+thatch roof, ringed by a thin wall of grass). It spawns exactly like a
+gingerbread house (`structure` rate, level ground, clear of its neighbours; the
+Forest is most of the world, so there are many more of them than houses), and is
+solid the same way: a box just inside the round of the walls, you cannot walk in.
+The hut is 1.3x authored size (walls 1.85 m, roof 4.3 m across): the `scale` in
+[`props.ts`](packages/shared/src/worldgen/props.ts) is the dial.
+
+It takes **15 chups** (rock 3, thrown stick 1, snowball 0.5) from any side, with
+a puff of wood, thatch and grass crumbs per hit; the last one explodes the whole
+hut into its triangles, like a house. The grass ring is a separate prop (`hut_grass`, an `OBJECT_SHEET` companion placed with every hut) and stays standing.
+
+**Weak to fire (stub).** `breakable.fireMultiplier` (10) is wired through
+`breakableDamage` in [`propDamage.ts`](packages/shared/src/sim/propDamage.ts)
+for a `fire` source, so a burning hut goes in about 1.5 s. Nothing can set
+anything alight yet, so nothing deals it.
+
+**Contents (stub).** The `interior` row for `hut` in `OBJECT_SHEET` has
+`contents: "floor"`: a chest standing on the floor in the middle, and loose items
+on the ground there. The Forest has no loot table and no chest yet, so a hut is
+empty today. Today loose items still come out when the hut breaks, because
+nothing places a pickup at world generation.
+
+The grass ring is a cut-out: the material is alpha-tested (not blended) from the
+texture's alpha, so the gaps are fully empty and need no sorting. The file's own
+material is a blended one; `propAssets.ts` replaces it (`NODE_LOOKS`,
+`grass_surrounding`). Thin grass for the rest of the forest can reuse that look.
 
 ### Saving
 
@@ -895,9 +957,9 @@ untouched props) are not saved because they do not need to be.
   yet by thrown sticks, thrown logs (Jolt bodies), a flying snowball or a
   trampoline; they are spheres, so one never tips or rests on a corner; and
   nothing breaks them. They are not on the map.
-- Props are not solid to the player, except snowmen, gingerbread houses (and
+- Props are not solid to the player, except snowmen, gingerbread houses, huts (and
   snowbanks, which are stood on); for the rest only the aiming raycast sees them.
-- Gingerbread houses are never walked into: they are a solid box until they
+- Gingerbread houses and huts are never walked into: they are a solid box until they
   explode, and a flying snowball or thrown log can pass through the gaps in it.
   The container inside cannot be reached before then.
 - Graves: an open one has a pit (a finer 0.2 m mesh with the ground lowered to the box floor), but a covered one is left as solid
@@ -954,6 +1016,8 @@ untouched props) are not saved because they do not need to be.
 `tools/golden/golden.json` holds reference data some of the shared tests
 assert against (hashes, terrain, player movement). If one fails, the code is
 wrong until proven otherwise — don't regenerate the file to make it pass.
+The C++ build that recorded it has been removed from the tree; it lives in git
+history before commit `6c60e4f`.
 
 Rope, inventory stacking, the bulb-light picker and the tree-light rolls have
 tests next to the code (`rope.test.ts`, `inventory.test.ts`, `treeLights.test.ts`

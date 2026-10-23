@@ -1,4 +1,4 @@
-import { Color, Group, Quaternion, Sprite, SpriteMaterial, Vector3, type Object3D, type Texture } from "three/webgpu";
+import { Group, Quaternion, Vector3, type Object3D, type Texture } from "three/webgpu";
 
 import { HoldStyle, holdStyleOf } from "@fgp/shared/items/avatarPose";
 import type { ContainerKind } from "@fgp/shared/items/container";
@@ -6,6 +6,7 @@ import { ItemType } from "@fgp/shared/items/inventory";
 
 import { emptyContainerFitted } from "./containerLook.ts";
 import type { ItemAssets } from "./itemAssets.ts";
+import { HeldPaper } from "./paperFlap.ts";
 import type { PropTemplates } from "./propAssets.ts";
 
 /**
@@ -25,7 +26,8 @@ import type { PropTemplates } from "./propAssets.ts";
 
 /** A held log is drawn smaller than one on the ground, so it fits the hands. */
 const HELD_LOG_SCALE = 0.65;
-const HELD_LEAF_SIZE = 0.14;
+/** A held bunch of leaves is drawn smaller than the one on the ground, so it fits the fingers. */
+const HELD_LEAVES_SCALE = 0.7;
 /** A held snowball is bigger than the one on the ground reads, so it fills the fist. */
 const HELD_SNOWBALL_SCALE = 1.2;
 /** A rock in the fist: the world's rock is bigger than a fist, so it is drawn smaller than it lies. */
@@ -62,17 +64,6 @@ function heldContainer(sources: HeldItemSources, kind: ContainerKind): Object3D 
   const carry = new Group();
   carry.add(emptyContainerFitted(sources.props, kind, HELD_CONTAINER_SIZE[kind]));
   return carry;
-}
-
-function iconSprite(sources: HeldItemSources, type: ItemType, size: number, fallback: number): Object3D {
-  const map = sources.icons[type];
-  const material =
-    map === undefined
-      ? new SpriteMaterial({ color: new Color(fallback) })
-      : new SpriteMaterial({ map, alphaTest: 0.5, transparent: false });
-  const sprite = new Sprite(material);
-  sprite.scale.setScalar(size);
-  return sprite;
 }
 
 /**
@@ -192,7 +183,19 @@ const BUILDERS: Record<ItemType, Builder> = {
   [ItemType.PresentSmall]: (sources) => heldContainer(sources, "present_small"),
   [ItemType.PresentBig]: (sources) => heldContainer(sources, "present_big"),
   [ItemType.CandyBucket]: (sources) => heldContainer(sources, "bucket_candy"),
-  [ItemType.Leaf]: (sources) => iconSprite(sources, ItemType.Leaf, HELD_LEAF_SIZE, 0x4e8c2b),
+  [ItemType.Leaf]: ({ assets }) => {
+    const pinch = new Group();
+    const mesh = assets.leaves.clone();
+    mesh.scale.multiplyScalar(HELD_LEAVES_SCALE);
+    pinch.add(mesh);
+    return pinch;
+  },
+  // The roll as modelled, with its flap hanging off it as a strip that swings with the hand: see paperFlap.ts.
+  [ItemType.ToiletPaper]: ({ assets }) => {
+    const paper = new HeldPaper(assets.paperParts);
+    paper.object.userData["paper"] = paper;
+    return paper.object;
+  },
 };
 
 const rollParent = new Quaternion();
@@ -247,6 +250,17 @@ export class HeldItemSlot {
     rollWanted.normalize();
     rollCross.crossVectors(rollReel, rollWanted);
     rod.rotation.z += Math.atan2(rollAxis.dot(rollCross), rollReel.dot(rollWanted));
+  }
+
+  /**
+   * Moves anything in the shown item that is alive (the toilet paper's flap) on to the frame being drawn.
+   * Call once the holder has been posed for the frame, with a steady clock in seconds.
+   */
+  animate(seconds: number): void {
+    if (this.shown !== ItemType.ToiletPaper) return;
+    const object = this.built.get(ItemType.ToiletPaper);
+    if (object === undefined || !object.visible) return;
+    (object.userData["paper"] as HeldPaper | undefined)?.update(seconds);
   }
 
   /** Shows `held` (or nothing); returns its hold style. */

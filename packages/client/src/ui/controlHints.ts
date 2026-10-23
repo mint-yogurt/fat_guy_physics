@@ -58,6 +58,7 @@ export function controlHintsFor(
     case ItemType.Snowball:
     case ItemType.Rock:
     case ItemType.Eggnog:
+    case ItemType.ToiletPaper:
       return [
         { key: "LMB", action: "roll", hold: true },
         { key: "RMB", action: "throw", hold: true },

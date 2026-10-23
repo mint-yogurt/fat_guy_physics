@@ -1,7 +1,7 @@
 import { Group, Quaternion, Sprite, SpriteMaterial, Vector3, type Object3D, type Scene } from "three/webgpu";
 
 import { ItemType } from "@fgp/shared/items/inventory";
-import { CARTON_RADIUS, itemOfBall } from "@fgp/shared/items/rolledItems";
+import { CARTON_RADIUS, TOILET_PAPER_RADIUS, itemOfBall } from "@fgp/shared/items/rolledItems";
 import { ROCK_RADIUS } from "@fgp/shared/items/rock";
 import {
   SNOW_UNIT_RADIUS,
@@ -19,6 +19,9 @@ import type { ItemAssets } from "./itemAssets.ts";
  * A rolled snowball is the item's mesh scaled up to its radius and turned as
  * it travels, so it reads as rolling; the sim only knows where it is. Drawn
  * between substeps like the player is.
+ *
+ * A roll of toilet paper rolls like a wheel instead (its axis across the way it goes, spun by the
+ * distance covered) and stands on end when it stops. The paper it leaves behind is paperTrail.ts.
  */
 
 interface RolledView {
@@ -34,6 +37,9 @@ interface RolledView {
   restHalf: number;
   /** 0 while rolling, easing to 1 as it settles into its lying pose. */
   lying: number;
+  /** Toilet paper only: the way it last travelled (a yaw), and how far it has turned about its axis. */
+  heading: number;
+  turned: number;
 }
 
 /** How fast a rock that has stopped eases into lying on its flat side, per frame. */
@@ -44,6 +50,19 @@ const turn = new Quaternion();
 const lyingPose = new Quaternion();
 const quarter = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), Math.PI / 2);
 const yawAxis = new Vector3(0, 1, 0);
+const zAxis = new Vector3(0, 0, 1);
+/** Lays a standing roll's axis (Y) along the sideways direction (X) of the way it is heading. */
+const onItsSide = new Quaternion().setFromAxisAngle(zAxis, -Math.PI / 2);
+const headingTurn = new Quaternion();
+const spinTurn = new Quaternion();
+const standingTurn = new Quaternion();
+
+function standardRadius(item: ItemType | undefined): number {
+  if (item === ItemType.Rock) return ROCK_RADIUS;
+  if (item === ItemType.Eggnog) return CARTON_RADIUS;
+  if (item === ItemType.ToiletPaper) return TOILET_PAPER_RADIUS;
+  return SNOW_UNIT_RADIUS;
+}
 
 export class SnowballsView {
   private readonly rolled = new Map<number, RolledView>();
@@ -58,6 +77,7 @@ export class SnowballsView {
   private meshOf(item: ItemType | undefined): Object3D {
     if (item === ItemType.Rock) return this.assets.rock;
     if (item === ItemType.Eggnog) return this.assets.eggnog;
+    if (item === ItemType.ToiletPaper) return this.assets.toiletPaperRoll;
     return this.assets.snowball;
   }
 
@@ -89,9 +109,16 @@ export class SnowballsView {
           lastX: ball.x,
           lastZ: ball.z,
           item,
-          standard: item === ItemType.Rock ? ROCK_RADIUS : item === ItemType.Eggnog ? CARTON_RADIUS : SNOW_UNIT_RADIUS,
-          restHalf: item === ItemType.Eggnog ? this.assets.eggnogRestHalfHeight : this.assets.rockRestHalfHeight,
+          standard: standardRadius(item),
+          restHalf:
+            item === ItemType.Eggnog
+              ? this.assets.eggnogRestHalfHeight
+              : item === ItemType.ToiletPaper
+                ? this.assets.toiletPaperRestHalfHeight
+                : this.assets.rockRestHalfHeight,
           lying: 0,
+          heading: ball.id * 2.1,
+          turned: 0,
         };
         // Each one starts turned differently, so a field of them is not a row of twins.
         view.spin.rotation.set(ball.id * 1.7, ball.id * 2.9, ball.id * 0.6);
@@ -131,6 +158,12 @@ export class SnowballsView {
     const z = ball.prevZ + (ball.z - ball.prevZ) * alpha;
     view.root.position.set(x, y, z);
     view.spin.scale.setScalar(ball.radius / view.standard);
+    if (view.item === ItemType.ToiletPaper) {
+      this.placeRoll(view, ball, x, z);
+      view.lastX = x;
+      view.lastZ = z;
+      return;
+    }
     if (view.item !== undefined) {
       // Rolling it is a ball; once it stops it settles onto its flat side and sinks into the
       // ground a touch, as a rock does, instead of balancing on a corner or floating.
@@ -155,6 +188,31 @@ export class SnowballsView {
     }
     view.lastX = x;
     view.lastZ = z;
+  }
+
+  /** A roll of toilet paper: a wheel while it goes, stood on its end once it stops. */
+  private placeRoll(view: RolledView, ball: Snowball, x: number, z: number): void {
+    const dx = x - view.lastX;
+    const dz = z - view.lastZ;
+    const distance = Math.hypot(dx, dz);
+    if (distance > 1e-4) {
+      view.heading = Math.atan2(dx, dz);
+      view.turned += distance / ball.radius;
+    }
+    headingTurn.setFromAxisAngle(yawAxis, view.heading);
+    spinTurn.setFromAxisAngle(yawAxis, view.turned);
+    view.spin.quaternion.copy(headingTurn).multiply(onItsSide).multiply(spinTurn);
+    if (ball.rolling) {
+      view.lying = 0;
+      view.spin.position.y = 0;
+      return;
+    }
+    // Stopped: it settles on its end and sinks to the ground, a roll being flatter than the ball round it.
+    view.lying += (1 - view.lying) * LIE_DOWN_RATE;
+    if (1 - view.lying < 0.01) view.lying = 1;
+    standingTurn.setFromAxisAngle(yawAxis, view.heading);
+    view.spin.quaternion.slerp(standingTurn, view.lying);
+    view.spin.position.y = view.lying * (view.restHalf * (ball.radius / view.standard) - ball.radius);
   }
 
   /** Eases a rock (or a carton on its side) toward lying down, `amount` of the way there (1: all the way). */

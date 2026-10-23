@@ -28,6 +28,8 @@ export const PROP_KINDS: readonly PropKind[] = [
   "snowbank",
   "rock",
   "gbreadhouse_1",
+  "hut",
+  "hut_grass",
 ];
 
 export function isPropKind(kind: string): kind is PropKind {
@@ -57,6 +59,12 @@ export interface PropMetrics {
    * for a file whose origin is off to one side (the leaf pile).
    */
   readonly centre?: boolean;
+  /**
+   * Top-level nodes of the file to leave out, or the only ones to keep, so one
+   * file can make two props (the hut and the ring of grass that outlasts it).
+   */
+  readonly omit?: readonly string[];
+  readonly only?: readonly string[];
   /**
    * Aiming cylinder, authored units; zero height means not aimable. The radius
    * also sizes the footprint checked for level ground, so a flat prop sets one
@@ -89,6 +97,12 @@ export interface PropMetrics {
     readonly halfX: number;
     readonly halfZ: number;
     readonly height: number;
+    /**
+     * How much harder fire hits it than a plain blow of the same size (a
+     * hut). Nothing sets anything alight yet, so only the `fire` source in
+     * `PROP_DAMAGE` uses it: see `breakableDamage` in propDamage.ts.
+     */
+    readonly fireMultiplier?: number;
   };
 }
 
@@ -223,6 +237,40 @@ export const PROP_METRICS: Readonly<Record<PropKind, PropMetrics>> = {
     radius: 2.2,
     height: 5.03,
     breakable: { hits: 12, halfX: 1.5, halfZ: 1.5, height: 2.28 },
+  },
+  // Read off hut.glb (nodes' transforms applied): a Z-up round hut, walls 1.42
+  // high and about 2.3 across, under a conical thatch roof that overhangs to
+  // 3.3 across and peaks at 2.49, ringed by a wall of grass (cut-out alpha)
+  // out to a radius of 2.2 and up to 1.07. The grass is its own prop
+  // (`hut_grass`, below) so it stays when the hut goes. The origin is the
+  // middle of the hut, on the floor. At 1.3 the walls are 1.85 m, about as tall as the
+  // player, and the roof is 4.3 m across. Solid as a box just inside the
+  // round of the walls until it is hit to pieces; wood and thatch, so fire
+  // (not lit by anything yet) takes it down ten times as fast. The cylinder
+  // is the roof's, what is aimed at and what sizes the level-ground check.
+  hut: {
+    asset: "/meshes/hut.glb",
+    up: "z",
+    scale: 1.3,
+    sizeJitter: 0.1,
+    anchor: "bottom",
+    omit: ["grass_surrounding"],
+    radius: 1.7,
+    height: 2.49,
+    breakable: { hits: 15, halfX: 1, halfZ: 1, height: 1.42, fireMultiplier: 10 },
+  },
+  // The hut's ring of grass: the same file, only that node. Placed with every
+  // hut (OBJECT_SHEET `companions`), same spot, size and facing, and left
+  // standing when the hut is destroyed. Decor: not aimable, not solid.
+  hut_grass: {
+    asset: "/meshes/hut.glb",
+    up: "z",
+    scale: 1.3,
+    sizeJitter: 0,
+    anchor: "bottom",
+    only: ["grass_surrounding"],
+    radius: 0,
+    height: 0,
   },
 };
 

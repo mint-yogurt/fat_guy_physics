@@ -92,6 +92,11 @@ const LOG_REST = new Vector3(0, 1.6, 5.2 * PALM_SIGN);
 const PINCH_POINT = new Vector3(0.6, 4.6, 1.4 * PALM_SIGN);
 /** A snowball sits on the palm, held there by the half-closed fingers. */
 const BALL_POINT = new Vector3(0, 3.4, 5.4 * PALM_SIGN);
+/**
+ * A roll of toilet paper: its middle (the roll is 5.4 units across, axis along the thumb) sits so its
+ * side rests on the palm and the curled fingertips dig into it. The palm's face is at z = 0.9.
+ */
+const PAPER_POINT = new Vector3(0, 2.6, 3.5 * PALM_SIGN);
 /** The stick tilts this far from the thumb's line towards the arm's (forward), at rest. */
 const STICK_SWORD_TILT = 0.6;
 
@@ -153,6 +158,8 @@ export class ArmViewmodel {
   private shakePhase = 0;
   private bowlWeight = 0;
   private lobWeight = 0;
+  /** A roll of toilet paper being bowled: the wrist turned a quarter so the roll stands like a wheel. */
+  private paperTwist = 0;
   private kick = 0;
   /** The wind-up the follow-through under way came out of. */
   private kickKind: AvatarAction = AvatarAction.Charge;
@@ -328,6 +335,11 @@ export class ArmViewmodel {
     // by the knees, then up and out.
     const windBowl = this.bowlWeight;
     const windLob = this.lobWeight;
+    // Toilet paper is bowled with the wrist turned a quarter (palm up) so it runs like a wheel, and thrown
+    // side-arm out to the right rather than drawn up over the shoulder.
+    const paper = held === ItemType.ToiletPaper;
+    const bowling = pose.action === AvatarAction.Bowl || (this.kick > 0 && this.kickKind === AvatarAction.Bowl);
+    this.paperTwist += rate * ((paper && bowling ? 1 : 0) - this.paperTwist);
 
     const walking = s.grounded ? s.walk : 0;
     this.walkAmount += rate * (walking - this.walkAmount);
@@ -347,12 +359,12 @@ export class ArmViewmodel {
     // Shaking: the fist comes up in front of the chest and is jerked up and down.
     const jerk = Math.sin(this.shakePhase * TAU) * this.shakeWeight;
     this.shoulder.position.set(
-      SHOULDER.x + bobX - 0.05 * dip - 0.04 * draw - 0.04 * this.shakeWeight,
+      SHOULDER.x + bobX - 0.05 * dip + (paper ? 0.1 : -0.04) * draw - 0.04 * this.shakeWeight,
       SHOULDER.y +
         bobY -
         0.06 * dip +
         0.02 * lift +
-        0.12 * draw +
+        (paper ? 0.02 : 0.12) * draw +
         0.04 * lunge +
         0.05 * this.shakeWeight +
         0.07 * jerk -
@@ -376,7 +388,7 @@ export class ArmViewmodel {
         0.7 * dip +
         0.35 * lift -
         0.35 * this.chopWeight * (1 - chop) +
-        0.2 * draw +
+        (paper ? 0.04 : 0.2) * draw +
         0.3 * jerk -
         0.15 * lunge -
         0.25 * this.carryWeight -
@@ -384,7 +396,7 @@ export class ArmViewmodel {
         0.35 * bowlThrough -
         0.9 * windLob +
         0.6 * lobThrough,
-      REST_YAW - 0.15 * this.scoopWeight - 0.12 * draw,
+      REST_YAW - 0.15 * this.scoopWeight - (paper ? 0.6 : 0.12) * draw - (paper ? 0.3 : 0) * lunge,
       0,
     );
     this.poseQuat.setFromEuler(this.euler).multiply(this.baseQuat);
@@ -393,7 +405,7 @@ export class ArmViewmodel {
     // Forearm roll turns the palm to the sky for the scoop.
     // A log is carried the same way, palm up under it.
     this.roll.rotation.y =
-      (Math.PI / 2) * 0.9 * Math.max(dip, this.carryWeight) * PALM_SIGN;
+      (Math.PI / 2) * 0.9 * Math.max(dip, this.carryWeight, this.paperTwist) * PALM_SIGN;
 
     // Chop keeps the hand flat; scoop cups it. Rotation about X curls the
     // fingers towards +Z, so the sign carries the palm side.
@@ -423,7 +435,7 @@ export class ArmViewmodel {
       this.holder.position.copy(PINCH_POINT);
       this.holder.quaternion.identity();
     } else if (style === HoldStyle.Ball) {
-      this.holder.position.copy(BALL_POINT);
+      this.holder.position.copy(paper ? PAPER_POINT : BALL_POINT);
       this.holder.quaternion.identity();
     } else {
       this.holder.position.copy(STICK_GRIP);
@@ -436,6 +448,7 @@ export class ArmViewmodel {
       }
     }
     this.held.settleRod(draw < 0.02 && lunge < 0.02);
+    this.held.animate(performance.now() / 1000);
 
     // Thumb folds up along the fingers (the chop) unless scooping, where it
     // opens back out a little as if to hold the scoop.

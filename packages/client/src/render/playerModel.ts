@@ -822,6 +822,7 @@ export class PlayerModel {
       this.holder.quaternion.copy(qa);
     }
     this.held.settleRod(this.chargeWeight < 0.02 && this.lunge < 0.02);
+    this.held.animate(performance.now() / 1000);
   }
 
   /** The limb's free end after `rotation` (geometry space), in body space. */

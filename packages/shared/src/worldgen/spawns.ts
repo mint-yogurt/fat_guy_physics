@@ -295,6 +295,24 @@ function placeStructure(
     loot: rollInterior(kind, biome, id),
   });
 
+  (OBJECT_SHEET[kind].companions ?? []).forEach((companion, i) => {
+    out.push({
+      type: "prop",
+      id: (id ^ (0x6a550000 + i)) >>> 0,
+      kind: companion,
+      biome,
+      x,
+      y,
+      z,
+      scale: shape.scale * (PROP_METRICS[companion].scale / metrics.scale),
+      yaw: shape.yaw,
+      tiltX: 0,
+      tiltZ: 0,
+      topsoil: false,
+      loot: [],
+    });
+  });
+
   const containers = interior?.containers ?? [];
   if (interior === undefined || containers.length === 0) return;
   if (hashFloat(id, 0xc0a7, 0, 0) >= interior.containerChance) return;
