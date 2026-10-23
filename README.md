@@ -67,6 +67,12 @@ Only the hotbar and what is relevant right now are shown:
   (`ui/mapView.ts`). It opens centred on the player each time.
 - The full control legend (WASD, E, M, R, V, FOV, slots) is kept in
   `index.html` as `#controls`, hidden. It is for menu > controls.
+- **Main screen**: the controls list sits beside the name/face/colour form
+  ([`controlsList.ts`](packages/client/src/ui/controlsList.ts): add a new key there).
+  A **LOADING...** bar covers the two waits: the script download before that
+  screen (in `index.html`, a sliding bar, nothing to count yet) and after Play
+  (`ui/loadingBar.ts`, filled by `loadStep` in `main.ts`, gone when the first
+  ground tile arrives).
 
 ### URL flags
 

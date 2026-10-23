@@ -187,6 +187,7 @@ import {
   StrideTracker,
 } from "./audio/triggers.ts";
 import { askAppearance } from "./ui/characterCreate.ts";
+import { LoadingBar } from "./ui/loadingBar.ts";
 import { ControlHints } from "./ui/controlHints.ts";
 import { Hotbar } from "./ui/hotbar.ts";
 import { InventoryScreen } from "./ui/inventoryScreen.ts";
@@ -400,11 +401,20 @@ function loadRadiusFromUrl(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_LOAD_RADIUS_CHUNKS;
 }
 
+/** Steps `loading.set` is called for between Play and the world appearing; the last 1/n is the first ground tile. */
+const LOAD_STEPS = 9;
+
 async function start(): Promise<void> {
   const audio = new GameAudio(new URLSearchParams(window.location.search).get("audio") !== "0");
+  // The page shows a LOADING bar from the first byte; the script is here, so the setup screen takes over.
+  const loading = new LoadingBar(requireElement<HTMLDivElement>("#loading"));
+  let loadedSteps = 0;
+  const loadStep = (): void => loading.set(++loadedSteps / LOAD_STEPS);
+  loading.hide();
   const appearance = await askAppearance(requireElement<HTMLDivElement>("#charcreate"), () =>
     audio.play("menuAccept", { variance: 1 }),
   );
+  loading.begin();
 
   // Singleplayer saves live in this browser (see save/). `?save=0` plays without
   // reading or writing one; `?reset=1` throws the saved game away and starts over.
@@ -420,10 +430,12 @@ async function start(): Promise<void> {
   const [playerSave, worldSave] = saving
     ? await Promise.all([saveStore.loadPlayer(), saveStore.loadWorld()])
     : [undefined, undefined];
+  loadStep();
 
   const canvas = requireElement<HTMLCanvasElement>("#viewport");
   const bundle = await createRenderer(canvas);
   const { renderer } = bundle;
+  loadStep();
 
   const statsPanel = requireElement<HTMLDivElement>("#stats");
   const hud = new Hud(statsPanel);
@@ -464,16 +476,20 @@ async function start(): Promise<void> {
     dirt: await loadGroundTexture("/textures/dirt1_twp.png"),
     snow: await loadGroundTexture("/textures/snow_64x64.png"),
   });
+  loadStep();
   const material = terrainMaterial.material;
   const bushTexture = await loadTexture("/billboard/bush.png");
   const itemAssets = await loadItemAssets();
+  loadStep();
   const propAssets = await loadPropAssets();
+  loadStep();
   const heldSources: HeldItemSources = {
     assets: itemAssets,
     icons: {},
     props: propAssets,
   };
   const treeAssets = await loadTreeAssets();
+  loadStep();
 
   const radius = loadRadiusFromUrl();
   const source = new WorkerChunkSource(SEED);
@@ -517,7 +533,9 @@ async function start(): Promise<void> {
   const elasticColliders = [new PlayerBody(player)];
   const playerCamera = new PlayerCamera();
   const playerModel = await PlayerModel.load(scene, appearance, heldSources);
+  loadStep();
   const arm = await ArmViewmodel.load(appearance.skin, heldSources);
+  loadStep();
   hud.set("NAME", appearance.name);
 
   const inventory = new Inventory();
@@ -1486,6 +1504,8 @@ async function start(): Promise<void> {
 
     if (!spawned && world.hasChunkAt(player.x, player.y, player.z)) {
       spawned = true;
+      loading.set(1);
+      loading.hide();
       audio.play("spawn");
     }
 
@@ -2743,4 +2763,6 @@ void start().catch((err: unknown) => {
   console.error(err);
   const stats = document.querySelector("#stats");
   if (stats !== null) stats.textContent = `startup failed: ${String(err)}`;
+  const loadingRoot = document.querySelector<HTMLElement>("#loading");
+  if (loadingRoot !== null) new LoadingBar(loadingRoot).fail(`startup failed: ${String(err)}`);
 });

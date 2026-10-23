@@ -4,8 +4,63 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>fatguyphysics</title>
+    <!-- Inline so the loading bar paints before the (large) script bundle arrives. -->
+    <style>
+      body {
+        background: #0b0e13;
+      }
+      #loading {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background: #0b0e13;
+        color: #e8f0f7;
+        font: 14px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+        letter-spacing: 0.12em;
+      }
+      #loading[hidden] {
+        display: none;
+      }
+      #loading-track {
+        position: relative;
+        width: min(320px, 70vw);
+        height: 10px;
+        overflow: hidden;
+        border: 1px solid rgba(232, 240, 247, 0.4);
+      }
+      #loading-fill {
+        height: 100%;
+        width: 0;
+        background: #2f6fb0;
+        transition: width 0.15s ease-out;
+      }
+      /* Before the script arrives there is nothing to count, so the bar slides instead of filling. */
+      #loading.indeterminate #loading-fill {
+        position: absolute;
+        width: 35%;
+        transition: none;
+        animation: loading-slide 1.2s ease-in-out infinite alternate;
+      }
+      @keyframes loading-slide {
+        from {
+          left: 0;
+        }
+        to {
+          left: 65%;
+        }
+      }
+    </style>
   </head>
   <body>
+    <div id="loading" class="indeterminate">
+      <div id="loading-label">LOADING...</div>
+      <div id="loading-track"><div id="loading-fill"></div></div>
+    </div>
     <canvas id="viewport"></canvas>
     <div id="overlay">
       <div id="stats" hidden></div>

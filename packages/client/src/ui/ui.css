@@ -230,6 +230,47 @@ body {
   background: #0b0e13;
   font: 14px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
   color: var(--hud-fg);
+  overflow-y: auto;
+}
+
+/* Form and controls side by side; stacked on a narrow window. margin: auto keeps it
+   centred when it fits and scrollable (not clipped at the top) when it does not. */
+#charcreate .cc-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 40px 64px;
+  justify-content: center;
+  align-items: flex-start;
+  margin: auto;
+  padding: 24px;
+}
+
+#charcreate .controls {
+  max-width: 440px;
+}
+
+#charcreate .controls h1 {
+  margin-bottom: 8px;
+}
+
+#charcreate .controls h2 {
+  margin-top: 12px;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+#charcreate .controls dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 14px;
+}
+
+#charcreate .controls dt {
+  text-align: right;
+  color: #8ec0f0;
 }
 
 #charcreate .panel {
