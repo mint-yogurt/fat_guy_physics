@@ -3,10 +3,15 @@
 Working document. The priority is a fun prototype, not a fixed design. For
 build instructions and status see [README.md](README.md).
 
+> **Old version note.** Voxels and digging belonged to an earlier version of this
+> game. The game is **not** doing voxels: the ground is a smooth low-poly
+> heightfield. Explosions and big impacts may carve craters out of it later, but
+> not as voxels, and that is not promised.
+
 ## Overview
 
 A multiplayer physics sandbox, played in the browser. Players roll around
-a deformable world, throw things, and build simple mechanical contraptions.
+a world, throw things, and build simple mechanical contraptions.
 Multiplayer interaction and emergent physics *are* the gameplay. Not a
 survival game.
 
@@ -24,18 +29,19 @@ should emerge rather than be scripted.
 
 ## The ground
 
-The world is procedurally generated voxel terrain (~10 cm voxels). It is
-deformable: impacts and explosions knock chunks out of it and send them
-flying, and the rest can collapse or fall. Digging and tunneling are not a
-focus.
+The world is procedurally generated terrain, drawn as a smooth low-poly
+heightfield: a lattice with a vertex every 0.8 m, in 3.2 m tiles. It does not
+change, and there is no digging or tunneling. Hills, cliffs and bluffs come from
+the generator; the physics happens on top of the ground, not in it. Explosions
+and large impacts might carve craters out of it later, but not as voxels.
 
 ## Construction
 
 Simple machines, not detailed buildings: beams, planks, wheels, hinges,
 ropes, springs, axles, barrels, crates, explosives — enough for catapults,
 bridges, launchers and traps. Collected material becomes physics objects
-(counterweights, boulders, snowballs) rather than being placed back voxel by
-voxel.
+(counterweights, boulders, snowballs) rather than being placed back into the
+ground.
 
 ## Players
 
@@ -82,15 +88,19 @@ something: eggnog cartons in the Christmas presents is one row. Pre-made
 generative structures are planned: they need flat ground, and resources and
 objects cluster around them.
 
-Extracting resources from the ground itself is not a goal for now; digging
-machines or shovels may come later.
+Extracting resources from the ground itself is not a goal: resources are things
+lying on it, in containers, or knocked off trees and snowmen.
 
 ## Visual direction
 
-Chunky voxel ground, low-poly models, vertex colours where practical, low
-texture memory, simple shaders. Mild post-processing under consideration:
-slight texture filtering like late-90s hardware, subtle chromatic aberration,
-mild colour bleed.
+Nintendo 64. The 3D scene is rendered at a low internal resolution (320x240
+at 4:3 by default, 480 lines as an option), scaled up to the window with nearest
+sampling, with a light horizontal smear and a 5-bit-per-channel ordered dither,
+so the pixels are chunky. Textures are small and blurry (nearest, no mipmaps; the
+ground uses the N64's 3-point filter). Low-poly models, vertex-colour lighting,
+and a short fog that hides the load distance. The HUD and UI stay sharp on top.
+No PS1-style vertex wobble or affine warping: the N64 did not have them.
+Possible later: bloom and mild colour bleed.
 
 ## Technical direction
 
@@ -98,8 +108,10 @@ TypeScript end to end, so client and server share the simulation.
 
 - three.js `WebGPURenderer`, falling back to WebGL2.
 - Jolt (`jolt-physics`) for rigid bodies.
-- Chunked voxel terrain with greedy meshing; generation and meshing on a Web
-  Worker pool with transferable buffers.
+- Heightfield ground in 3.2 m tiles (a vertex every 0.8 m; a finer lattice
+  where an open grave has a pit), one layer of tiles high; generation and
+  meshing on a Web Worker pool with transferable buffers. Collision samples
+  the same surface.
 - Fixed-timestep simulation with render interpolation.
 - Zero-allocation frame loop.
-- Node + ws authoritative server, with terrain changes replicated.
+- Node + ws authoritative server, with world changes (trees, props, pieces) replicated.

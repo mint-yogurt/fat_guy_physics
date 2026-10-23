@@ -1,10 +1,10 @@
 import { Group, Mesh, Quaternion, Vector3, type Object3D, type Scene } from "three/webgpu";
 
 import { ItemType } from "@fgp/shared/items/inventory";
-import { chunkKey, keyX, keyY, keyZ } from "@fgp/shared/sim/chunkKey";
+import { chunkKey, keyX, keyZ } from "@fgp/shared/sim/chunkKey";
 import type { OrientedBody, SceneSolidQuery } from "@fgp/shared/sim/sceneQuery";
-import { VOXEL_SIZE } from "@fgp/shared/sim/constants";
-import { CHUNK_METERS, type Tree, type World } from "@fgp/shared/sim/world";
+import { tileOf, TILE_METERS } from "@fgp/shared/worldgen/groundField";
+import type { Tree, World } from "@fgp/shared/sim/world";
 
 import type { ItemAssets } from "../render/itemAssets.ts";
 import { sliceAtY } from "../render/sliceGeometry.ts";
@@ -168,6 +168,8 @@ export class LogSystem {
   private readonly wantedChunks = new Set<number>();
   private readonly wantedTrunks = new Set<number>();
   private readonly nearTrees: Tree[] = [];
+  /** Spots other systems' moving bodies are at (x, y, z, reach), to be kept in terrain until the next update. */
+  private readonly keeping: number[] = [];
 
   constructor(
     private readonly physics: PhysicsWorld,
@@ -446,10 +448,30 @@ export class LogSystem {
     this.physics.addImpulse(piece.handle, ix, iy, iz);
   }
 
+  /**
+   * Keeps terrain and trunk bodies around a point for the next update, for a
+   * moving body that is not one of this system's (a building piece falling).
+   * This system owns those bodies, so everything that needs them asks here.
+   */
+  keepAround(x: number, y: number, z: number, reach: number): void {
+    this.keeping.push(x, y, z, reach);
+  }
+
+  /** As {@link keepAround}, and makes the bodies now, for a body about to be dropped into the world this instant. */
+  ensureStaticAround(x: number, y: number, z: number, reach: number): void {
+    this.keepAround(x, y, z, reach);
+    this.markWanted(x, y, z, reach);
+    this.syncStaticBodies();
+  }
+
   /** Drives mesh transforms off the bodies and keeps static bodies around them. */
   update(playerX: number, playerY: number, playerZ: number): void {
     this.wantedChunks.clear();
     this.wantedTrunks.clear();
+    for (let i = 0; i < this.keeping.length; i += 4) {
+      this.markWanted(this.keeping[i] ?? 0, this.keeping[i + 1] ?? 0, this.keeping[i + 2] ?? 0, this.keeping[i + 3] ?? 0);
+    }
+    this.keeping.length = 0;
     // Rebuilt from scratch each frame rather than patched: the list is a
     // handful of entries, and a piece that woke up has to leave it the same
     // frame or the player stands on a piece that is no longer there.
@@ -545,8 +567,7 @@ export class LogSystem {
 
   /** Slows a thrown log that is on the ground; see ROLL_RESISTANCE. */
   private resistRolling(log: ThrownLog, x: number, y: number, z: number, dt: number): void {
-    const ground =
-      this.world.surfaceHeightVoxels(Math.floor(x / VOXEL_SIZE), Math.floor(z / VOXEL_SIZE)) * VOXEL_SIZE;
+    const ground = this.world.groundHeight(x, z);
     const radius = this.items.logRadius;
     if (y - ground > radius + ROLL_CONTACT_SLACK) return;
     if (!this.physics.readVelocity(log.handle, this.velocity)) return;
@@ -574,15 +595,12 @@ export class LogSystem {
   }
 
   /** Marks the chunks and trunks around a point as needing a collision body. */
-  private markWanted(x: number, y: number, z: number, reach: number): void {
-    const cx = Math.floor(x / CHUNK_METERS);
-    const cy = Math.floor(y / CHUNK_METERS);
-    const cz = Math.floor(z / CHUNK_METERS);
+  private markWanted(x: number, _y: number, z: number, reach: number): void {
+    const cx = tileOf(x);
+    const cz = tileOf(z);
     for (let dz = -TERRAIN_BODY_RADIUS; dz <= TERRAIN_BODY_RADIUS; dz++) {
-      for (let dy = -TERRAIN_BODY_RADIUS; dy <= TERRAIN_BODY_RADIUS; dy++) {
-        for (let dx = -TERRAIN_BODY_RADIUS; dx <= TERRAIN_BODY_RADIUS; dx++) {
-          this.wantedChunks.add(chunkKey(cx + dx, cy + dy, cz + dz));
-        }
+      for (let dx = -TERRAIN_BODY_RADIUS; dx <= TERRAIN_BODY_RADIUS; dx++) {
+        this.wantedChunks.add(chunkKey(cx + dx, 0, cz + dz));
       }
     }
     for (const tree of this.world.treesNear(x, z, TRUNK_BODY_RADIUS + reach, this.nearTrees)) {
@@ -595,17 +613,16 @@ export class LogSystem {
     for (const key of this.wantedChunks) {
       if (this.physics.hasTerrainBody(key)) continue;
       const cx = keyX(key);
-      const cy = keyY(key);
       const cz = keyZ(key);
-      const mesh = this.world.meshChunk(cx, cy, cz);
-      if (mesh === undefined) continue;
+      const triangles = this.world.groundTriangles(cx, cz);
+      if (triangles === undefined) continue;
       this.physics.addTerrainBody(
         key,
-        cx * CHUNK_METERS,
-        cy * CHUNK_METERS,
-        cz * CHUNK_METERS,
-        mesh.vertices,
-        mesh.vertexCount,
+        cx * TILE_METERS,
+        0,
+        cz * TILE_METERS,
+        triangles,
+        triangles.length / 3,
       );
     }
     for (const key of this.physics.terrainBodyKeys()) {

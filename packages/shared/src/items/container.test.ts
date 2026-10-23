@@ -13,7 +13,6 @@ import {
   inContainerReach,
   takeAll,
 } from "./container.ts";
-import { CRAFT_MAX_BOXES, CRAFT_MIN_BOXES, CraftingBench } from "./crafting.ts";
 import { Inventory, ItemType, MAX_STACK, TOTAL_SLOTS, itemDisplayName } from "./inventory.ts";
 
 describe("item names the player sees", () => {
@@ -212,31 +211,5 @@ describe("world props the player adds and removes", () => {
     const prop = world.addProp("present_big", 0.05, y, 0.05, 0, 0.3, sink);
     expect(inContainerReach(prop, 1.5, y, 0)).toBe(true);
     expect(inContainerReach(prop, 6, y, 0)).toBe(false);
-  });
-});
-
-describe("crafting bench", () => {
-  it("shows two boxes, and another each time the last is filled", () => {
-    const bench = new CraftingBench();
-    expect(bench.visibleBoxes).toBe(CRAFT_MIN_BOXES);
-    bench.setSlot(0, { type: ItemType.Stick, count: 1 });
-    expect(bench.visibleBoxes).toBe(2);
-    bench.setSlot(1, { type: ItemType.Rock, count: 1 });
-    expect(bench.visibleBoxes).toBe(3);
-    bench.setSlot(2, { type: ItemType.Leaf, count: 1 });
-    expect(bench.visibleBoxes).toBe(4);
-    bench.setSlot(5, { type: ItemType.Leaf, count: 1 });
-    expect(bench.visibleBoxes).toBe(CRAFT_MAX_BOXES);
-  });
-
-  it("has no recipes yet and gives back what was put in", () => {
-    const bench = new CraftingBench();
-    bench.setSlot(0, { type: ItemType.Stick, count: 4 });
-    bench.setSlot(1, { type: ItemType.Rock, count: 1 });
-    expect(bench.result()).toBeUndefined();
-    const inventory = new Inventory();
-    for (const stack of bench.takeAll()) inventory.tryAdd(stack.type, stack.count);
-    expect(inventory.slot(1)).toEqual({ type: ItemType.Stick, count: 4 });
-    expect(bench.visibleBoxes).toBe(CRAFT_MIN_BOXES);
   });
 });

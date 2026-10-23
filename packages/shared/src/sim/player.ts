@@ -6,6 +6,18 @@ import {
   sweepSphere,
   type SolidQuery,
 } from "./collision.ts";
+import {
+  CLIMB_HOP_AWAY,
+  CLIMB_HOP_LIFT,
+  CLIMB_MANTLE_LIFT,
+  CLIMB_MANTLE_MARGIN,
+  CLIMB_MANTLE_PUSH,
+  CLIMB_REGRAB_DELAY,
+  CLIMB_SNAP_SPEED,
+  CLIMB_SPEED,
+  ClimbState,
+  type RailSource,
+} from "./climb.ts";
 import { VOXEL_SIZE } from "./constants.ts";
 import { SkateState } from "./skate.ts";
 
@@ -126,6 +138,11 @@ export class Player {
   skating = false;
   readonly skate = new SkateState();
   private wasSkating = false;
+  /** Holding a rail (a ladder): see sim/climb.ts. */
+  readonly climb = new ClimbState();
+  /** Where rails are found; unset, nothing can be climbed. */
+  rails: RailSource | undefined = undefined;
+  private readonly railNormal = { x: 0, z: 0 };
 
   /** Body orientation as a quaternion. Read by the renderer at M11. */
   orientationX = 0;
@@ -187,6 +204,11 @@ export class Player {
     return this.skate.bailTilt;
   }
 
+  /** Holding a ladder or other rail. */
+  get climbing(): boolean {
+    return this.climb.active;
+  }
+
   get bodyRadius(): number {
     return this.mode === PlayerMode.Walking ? this.halfWidth : this.ballRadius;
   }
@@ -203,6 +225,13 @@ export class Player {
     this.yawDeg += xOffset * this.mouseSensitivity;
     this.pitchDeg += yOffset * this.mouseSensitivity;
     this.pitchDeg = Math.min(89, Math.max(-89, this.pitchDeg));
+    this.updateVectors();
+  }
+
+  /** Faces a saved direction (degrees), as `look` would have got there. */
+  setLook(yawDegrees: number, pitchDegrees: number): void {
+    this.yawDeg = yawDegrees;
+    this.pitchDeg = Math.min(89, Math.max(-89, pitchDegrees));
     this.updateVectors();
   }
 
@@ -297,7 +326,23 @@ export class Player {
       this.knockZ = 0;
     }
 
-    if (skating) {
+    // A rail is held by a walker only; tucking into a ball or mounting a board lets go.
+    if (skating || this.mode !== PlayerMode.Walking) this.climb.release();
+    if (this.climb.cooldown > 0) this.climb.cooldown -= dt;
+    if (this.climb.active && !this.refreshRail()) this.letGo(0);
+    if (
+      !this.climb.active &&
+      !skating &&
+      this.mode === PlayerMode.Walking &&
+      this.climb.cooldown <= 0 &&
+      input.moveZ > 0
+    ) {
+      this.tryGrab();
+    }
+
+    if (this.climb.active) {
+      this.updateClimbing(input, dt, query);
+    } else if (skating) {
       this.updateSkating(input, dt, query);
       this.updateFacingOrientation();
     } else if (this.mode === PlayerMode.Walking) {
@@ -319,8 +364,127 @@ export class Player {
       this.mode = PlayerMode.Walking;
       this.grounded = false;
       this.skate.reset(this);
+      this.climb.release();
       this.respawns = (this.respawns + 1) & 0xff;
     }
+  }
+
+  /** The held rail as it stands now (its piece may have moved); false if it is gone. */
+  private refreshRail(): boolean {
+    return this.rails !== undefined && this.rails.railOf(this.climb.rail.pieceId, this.climb.rail);
+  }
+
+  /** Takes hold of the best rail in reach, if the player is at one and facing it. */
+  private tryGrab(): void {
+    const rails = this.rails;
+    if (rails === undefined) return;
+    const rail = this.climb.rail;
+    if (!rails.findRail(this.x, this.y, this.z, this.frontX, this.frontZ, rail)) return;
+    const along = (this.x - rail.px) * rail.dx + (this.y - rail.py) * rail.dy + (this.z - rail.pz) * rail.dz;
+    this.climb.grab(rail, Math.min(Math.max(along, 0), rail.length));
+    this.knockX = 0;
+    this.knockZ = 0;
+  }
+
+  /** Lets go of the rail; it will not take hold again for `delay` seconds. */
+  private letGo(delay: number): void {
+    this.climb.release();
+    this.climb.cooldown = delay;
+  }
+
+  /**
+   * One step of hanging on a rail: up and down it at climbing speed, nothing
+   * else. The body is drawn in to the line and stays a body's width off it, and
+   * goes through the same sweep as walking, so a wall or a ledge still stops it.
+   * Jumping lets go with a hop, and the ends of the rail let go too: the
+   * bottom onto the ground, the top over onto whatever ledge is there.
+   */
+  private updateClimbing(input: PlayerInput, dt: number, query: SolidQuery): void {
+    const climb = this.climb;
+    const rail = climb.rail;
+    const wall = rail.horizontalNormal(this.railNormal);
+
+    if (input.jumpPressed) {
+      this.letGo(CLIMB_REGRAB_DELAY);
+      this.vx = wall.x * CLIMB_HOP_AWAY;
+      this.vz = wall.z * CLIMB_HOP_AWAY;
+      this.vy = this.jumpSpeed * CLIMB_HOP_LIFT;
+      this.grounded = false;
+      this.updateWalking(input, dt, query);
+      this.updateFacingOrientation();
+      return;
+    }
+
+    climb.speed = input.moveZ * CLIMB_SPEED;
+    climb.t += climb.speed * dt;
+    if (climb.t <= 0 && climb.speed < 0) {
+      // Down the bottom and onto the ground.
+      this.letGo(CLIMB_REGRAB_DELAY);
+      this.vx = 0;
+      this.vy = 0;
+      this.vz = 0;
+      this.updateWalking(input, dt, query);
+      this.updateFacingOrientation();
+      return;
+    }
+    if (climb.t >= rail.length - CLIMB_MANTLE_MARGIN && climb.speed > 0) {
+      // Up the top and over: forward, toward the rail's wall, and up.
+      this.letGo(CLIMB_REGRAB_DELAY);
+      this.vx = -wall.x * CLIMB_MANTLE_PUSH;
+      this.vz = -wall.z * CLIMB_MANTLE_PUSH;
+      this.vy = CLIMB_MANTLE_LIFT;
+      this.grounded = false;
+      this.updateWalking(input, dt, query);
+      this.updateFacingOrientation();
+      return;
+    }
+    climb.t = Math.min(Math.max(climb.t, 0), rail.length);
+
+    const stand = rail.standoff(this.halfWidth);
+    const wantX = rail.px + rail.dx * climb.t + wall.x * stand;
+    const wantY = rail.py + rail.dy * climb.t;
+    const wantZ = rail.pz + rail.dz * climb.t + wall.z * stand;
+    let vx = (wantX - this.x) / dt;
+    let vy = (wantY - this.y) / dt;
+    let vz = (wantZ - this.z) / dt;
+    const speed = Math.hypot(vx, vy, vz);
+    const limit = Math.max(CLIMB_SNAP_SPEED, Math.abs(climb.speed) * 1.5);
+    if (speed > limit) {
+      vx *= limit / speed;
+      vy *= limit / speed;
+      vz *= limit / speed;
+    }
+    const result = sweepAabb(
+      query,
+      this.x,
+      this.y,
+      this.z,
+      this.halfWidth,
+      WALK_HEIGHT,
+      vx,
+      vy,
+      vz,
+      dt,
+      STEP_HEIGHT,
+      this.aabbResult,
+    );
+    this.x = result.x;
+    this.y = result.y;
+    this.z = result.z;
+    this.vx = result.vx;
+    this.vy = result.vy;
+    this.vz = result.vz;
+    this.grounded = false;
+
+    // Where the feet really are along the rail, so a ledge in the way holds the climb back too.
+    const along =
+      (this.x - rail.px) * rail.dx +
+      (this.y - rail.py) * rail.dy +
+      (this.z - rail.pz) * rail.dz -
+      stand * (wall.x * rail.dx + wall.z * rail.dz);
+    climb.t = Math.min(Math.max(along, 0), rail.length);
+    climb.travelled += Math.abs(climb.speed) * dt;
+    this.updateFacingOrientation(-wall.x, -wall.z);
   }
 
   /**
@@ -522,17 +686,18 @@ export class Player {
    * ends up facing sideways or backwards at M11, this is the constant to
    * flip.
    */
-  private updateFacingOrientation(): void {
+  /** Turns the body to face along (faceX, faceZ): where it is looking, unless told otherwise (a climber faces the rungs). */
+  private updateFacingOrientation(faceX = this.frontX, faceZ = this.frontZ): void {
     const MODEL_FACE_LOCAL_X = 1;
     const MODEL_FACE_LOCAL_Z = 0;
 
-    const flatLen = Math.hypot(this.frontX, this.frontZ);
+    const flatLen = Math.hypot(faceX, faceZ);
     if (flatLen < 1e-6) return;
 
     // Both vectors are flattened to the XZ plane, so aligning their
     // atan2(x, z) angles is a pure yaw rotation.
     const faceAngle = Math.atan2(MODEL_FACE_LOCAL_X, MODEL_FACE_LOCAL_Z);
-    const targetAngle = Math.atan2(this.frontX / flatLen, this.frontZ / flatLen);
+    const targetAngle = Math.atan2(faceX / flatLen, faceZ / flatLen);
     const half = (targetAngle - faceAngle) * 0.5;
     this.orientationX = 0;
     this.orientationY = Math.sin(half);

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import type { SolidQuery } from "../sim/collision.ts";
-import { VOXEL_SIZE } from "../sim/constants.ts";
+import { FIXED_TIMESTEP, VOXEL_SIZE } from "../sim/constants.ts";
+import { createPlayerInput, Player } from "../sim/player.ts";
+import { PlayerBody } from "../sim/playerBody.ts";
 import {
   planRope,
   Rope,
@@ -11,6 +13,7 @@ import {
   ropeMinReach,
   ropeSpecFor,
   BallRopeBody,
+  PlayerRopeBody,
   XMAS_LIGHTS,
   type RopeTie,
 } from "./rope.ts";
@@ -192,6 +195,111 @@ describe("rope tied to a snowball", () => {
     run(rope, nothing, 1);
     expect(rope.isTied(1)).toBe(false);
     expect(node(rope, 9)[1]).toBeLessThan(1.2);
+  });
+});
+
+describe("rope held by the player", () => {
+  /** A player on the flat, facing along +x or wherever the default look is, with the rope's far end `behind` metres back. */
+  function walker(): { player: Player; ahead: (metres: number) => [number, number] } {
+    const player = new Player(0, 1, 0);
+    player.look(0, 0);
+    const flatLen = Math.hypot(player.frontX, player.frontZ);
+    const fx = player.frontX / flatLen;
+    const fz = player.frontZ / flatLen;
+    return { player, ahead: (m) => [player.x + fx * m, player.z + fz * m] };
+  }
+
+  function walk(player: Player, rope: Rope, field: SnowballField | undefined, seconds: number): void {
+    const input = createPlayerInput();
+    input.moveZ = 1;
+    const bodies = [new PlayerBody(player)];
+    for (let i = 0; i < seconds / FIXED_TIMESTEP; i++) {
+      player.update(input, FIXED_TIMESTEP, flat, () => 0);
+      field?.step(FIXED_TIMESTEP, flat, () => false);
+      rope.step(FIXED_TIMESTEP, flat, bodies);
+    }
+  }
+
+  it("is tied at the hand, and follows the player", () => {
+    const { player, ahead } = walker();
+    const body = new PlayerRopeBody(player);
+    const [bx, bz] = ahead(-2);
+    const rope = new Rope(1, XMAS_LIGHTS, at(bx, 1.3, bz), { x: player.x, y: 1.5, z: player.z, body }, 5);
+    rope.step(FIXED_TIMESTEP, flat);
+    const [hx, , hz] = node(rope, rope.nodeCount - 1);
+    expect(Math.hypot(hx - player.x, hz - player.z)).toBeLessThan(0.6);
+    expect(node(rope, rope.nodeCount - 1)[1]).toBeGreaterThan(player.y + 0.5);
+  });
+
+  it("stops a player walking away from a fixed tie, stretching only a little", () => {
+    const { player, ahead } = walker();
+    const [bx, bz] = ahead(-2);
+    const rope = new Rope(
+      1,
+      XMAS_LIGHTS,
+      at(bx, 1.2, bz),
+      { x: player.x, y: 1.5, z: player.z, body: new PlayerRopeBody(player, new PlayerBody(player)) },
+      ropeMaxReach(XMAS_LIGHTS),
+    );
+    walk(player, rope, undefined, 12);
+    const away = Math.hypot(player.x - bx, player.z - bz);
+    // Walking 12 seconds would be 50m. The rope is 5m, hand ahead of the middle, and gives maybe 2m.
+    expect(away).toBeGreaterThan(4.5);
+    expect(away).toBeLessThan(8);
+    expect(Number.isFinite(player.x)).toBe(true);
+  });
+
+  it("drags what it is tied to once it is stretched out", () => {
+    const { player, ahead } = walker();
+    const field = new SnowballField();
+    const [bx, bz] = ahead(-2);
+    const ball = field.spawn(bx, 1.3, bz, 0, 0, 0, 0.3);
+    for (let i = 0; i < 60 * 120 && ball.rolling; i++) field.step(DT, flat, () => false);
+    const startX = ball.x;
+    const startZ = ball.z;
+    const body = new BallRopeBody(ball, ball.x, ball.y + ball.radius * 0.9, ball.z);
+    const rope = new Rope(
+      1,
+      XMAS_LIGHTS,
+      { x: ball.x, y: ball.y + ball.radius * 0.9, z: ball.z, body },
+      { x: player.x, y: 1.5, z: player.z, body: new PlayerRopeBody(player, new PlayerBody(player)) },
+      ropeMaxReach(XMAS_LIGHTS),
+    );
+    walk(player, rope, field, 8);
+    const [tx, tz] = ahead(0);
+    // The ball came along, and the player was slowed by hauling it: 8s of walking is 36m.
+    expect(Math.hypot(ball.x - startX, ball.z - startZ)).toBeGreaterThan(6);
+    expect(Math.hypot(tx - ball.x, tz - ball.z)).toBeLessThan(8);
+    expect(Math.hypot(player.x, player.z)).toBeLessThan(20);
+  });
+
+  it("does not push the player's own box when held", () => {
+    const { player, ahead } = walker();
+    const [bx, bz] = ahead(-1);
+    const rope = new Rope(
+      1,
+      XMAS_LIGHTS,
+      at(bx, 1.2, bz),
+      { x: player.x, y: 1.5, z: player.z, body: new PlayerRopeBody(player, new PlayerBody(player)) },
+      ropeMaxReach(XMAS_LIGHTS),
+    );
+    for (let i = 0; i < 240; i++) rope.step(FIXED_TIMESTEP, flat, [new PlayerBody(player)]);
+    // Standing still with slack in it: nothing shoves them.
+    expect(Math.hypot(player.vx, player.vz)).toBeLessThan(0.05);
+  });
+});
+
+describe("a longer rope replacing a shorter", () => {
+  it("keeps the shape it had", () => {
+    const short = new Rope(1, XMAS_LIGHTS, at(0, 3, 0), at(4, 3, 0), 4);
+    for (let i = 0; i < 240; i++) short.step(DT, nothing);
+    const longer = new Rope(2, ropeSpecFor(XMAS_LIGHTS, 2), at(0, 3, 0), at(4, 3, 0), 8);
+    longer.seedFrom(short);
+    const mid = node(longer, longer.nodeCount >> 1);
+    const shortMid = node(short, short.nodeCount >> 1);
+    expect(mid[1]).toBeCloseTo(shortMid[1], 1);
+    expect(node(longer, 0)[0]).toBeCloseTo(0, 6);
+    expect(node(longer, longer.nodeCount - 1)[0]).toBeCloseTo(4, 1);
   });
 });
 

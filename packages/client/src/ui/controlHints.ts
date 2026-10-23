@@ -1,4 +1,5 @@
 import { ItemType } from "@fgp/shared/items/inventory";
+import { placementOf } from "@fgp/shared/items/placement";
 
 /**
  * The controls that matter right now, bottom right: a keycap per input with
@@ -24,6 +25,12 @@ export interface LightsState {
 
 const NOT_PLACING: LightsState = { placing: false, canExtend: false };
 
+/** What anything that can be placed (a mat, a gift, a ladder, a plank) is turned with. */
+const TURNING: readonly ControlHint[] = [
+  { key: "Scroll", action: "turn" },
+  { key: "R", action: "turn freely", hold: true },
+];
+
 /** Key: an item, or `undefined` for bare hands. */
 export function controlHintsFor(
   type: ItemType | undefined,
@@ -41,9 +48,12 @@ export function controlHintsFor(
         { key: "RMB", action: "throw", hold: true },
       ];
     case ItemType.Log:
+      // The left button does both: a tap places it, holding it bowls it.
       return [
+        { key: "LMB", action: "place" },
         { key: "LMB", action: "bowl", hold: true },
         { key: "RMB", action: "lob", hold: true },
+        ...TURNING,
       ];
     case ItemType.Snowball:
     case ItemType.Rock:
@@ -58,15 +68,15 @@ export function controlHintsFor(
         { key: "LMB", action: "shake", hold: true },
         { key: "RMB", action: "throw", hold: true },
       ];
-    case ItemType.Trampoline:
-    case ItemType.PresentSmall:
-    case ItemType.PresentBig:
-    case ItemType.CandyBucket:
-      return [{ key: "LMB", action: "place" }];
     case ItemType.Skateboard:
       return [
         { key: "LMB", action: "ollie" },
         { key: "RMB", action: "trick", hold: true },
+      ];
+    case ItemType.FishingRod:
+      return [
+        { key: "LMB", action: "cast", hold: true },
+        { key: "RMB", action: "reel in", hold: true },
       ];
     case ItemType.XmasLights: {
       const hints: ControlHint[] = [
@@ -77,7 +87,8 @@ export function controlHintsFor(
       return hints;
     }
     default:
-      return [];
+      // Everything else that is placed: a mat, a gift, a ladder, a plank.
+      return placementOf(type) !== undefined ? [{ key: "LMB", action: "place" }, ...TURNING] : [];
   }
 }
 

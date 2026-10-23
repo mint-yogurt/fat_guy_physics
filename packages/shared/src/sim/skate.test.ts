@@ -61,6 +61,73 @@ describe("skateboard", () => {
     expect(Math.hypot(p.vx, p.vz)).toBeLessThan(coasted * 0.5);
   });
 
+  it("stops pushing at the top speed pushing gives, holds it, and pushes again once under it", () => {
+    const { p, input } = rider(flat);
+    input.moveZ = 1;
+    let pushedAt = 0;
+    let stoppedAt = -1;
+    for (let i = 0; i < 12 / DT; i++) {
+      p.update(input, DT, flat, () => 10);
+      if (p.skate.pushing) pushedAt = i * DT;
+      else if (stoppedAt < 0 && Math.hypot(p.vx, p.vz) > 4) stoppedAt = i * DT;
+    }
+    // Long after the run has ramped up: at speed, not pushing, and not slowing.
+    expect(p.skate.pushing).toBe(false);
+    expect(stoppedAt).toBeGreaterThan(0);
+    expect(pushedAt).toBeLessThan(12 - 2);
+    const held = Math.hypot(p.vx, p.vz);
+    expect(held).toBeGreaterThan(9.5);
+    run(p, input, 2, flat);
+    expect(Math.hypot(p.vx, p.vz)).toBeGreaterThanOrEqual(held - 0.05);
+    expect(p.skate.pushing).toBe(false);
+
+    // Something takes the speed off it (here, a hard shove back): pushing again.
+    p.vx *= 0.4;
+    p.vz *= 0.4;
+    run(p, input, 0.3, flat);
+    expect(p.skate.pushing).toBe(true);
+  });
+
+  it("leans with the ground: nose up on a rise, down on a fall, banked across a slope, level in the air", () => {
+    // Faces +X. A 30% rise, and a 30% fall.
+    for (const [rise, sign] of [
+      [0.3, 1],
+      [-0.3, -1],
+    ] as const) {
+      const hill = terrain((x) => 4 + x * rise);
+      const { p, input } = rider(hill);
+      p.x = 0.5;
+      p.y = 4 + 0.5 * rise;
+      run(p, input, 0.5, hill);
+      expect(p.skate.pitch * sign).toBeGreaterThan(0.2);
+      expect(Math.abs(p.skate.pitch)).toBeLessThan(0.4);
+      expect(Math.abs(p.skate.roll)).toBeLessThan(0.05);
+    }
+    // Ground that falls away to the board's right/left leans the deck across it.
+    const bank = terrain((_, z) => 4 + z * 0.3);
+    const banked = rider(bank);
+    banked.p.y = 4;
+    run(banked.p, banked.input, 0.5, bank);
+    expect(Math.abs(banked.p.skate.roll)).toBeGreaterThan(0.2);
+    expect(Math.abs(banked.p.skate.pitch)).toBeLessThan(0.05);
+    // Off the lip: it levels out.
+    const lip = terrain((x) => (x < 3 ? 4 + Math.max(0, x) * 0.3 : -10));
+    const jumper = rider(lip);
+    jumper.p.x = -1;
+    jumper.p.y = 4;
+    jumper.p.vx = 9;
+    let early = 0;
+    for (let i = 0; i < 1.2 / DT; i++) {
+      jumper.p.update(jumper.input, DT, lip, () => 10);
+      if (jumper.p.grounded && jumper.p.x > 1.5) early = Math.abs(jumper.p.skate.pitch);
+      if (!jumper.p.grounded && jumper.p.x > 2.5) break;
+    }
+    expect(jumper.p.grounded).toBe(false);
+    expect(early).toBeGreaterThan(0.2);
+    run(jumper.p, jumper.input, 0.5, lip);
+    expect(Math.abs(jumper.p.skate.pitch)).toBeLessThan(early * 0.3);
+  });
+
   it("ollies, and lands rolling", () => {
     const { p, input } = rider(flat);
     input.moveZ = 1;

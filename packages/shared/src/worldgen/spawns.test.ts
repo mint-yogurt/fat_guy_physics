@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import { CHUNK_SIZE, VOXEL_SIZE } from "../sim/constants.ts";
-import { VERTICAL_CHUNK_MAX } from "../sim/world.ts";
+import { WORLD_CEILING_METERS } from "../sim/world.ts";
 import { Biome } from "../voxel/biomeTint.ts";
-import { Material, floorDiv } from "../voxel/voxel.ts";
-import { createChunkGrid } from "../voxel/voxelGrid.ts";
+import { floorDiv } from "../voxel/voxel.ts";
 import { BIOME_SHEET, GRAVE_SHEET, OBJECT_SHEET, SPAWN_CHANCE } from "./generationSheet.ts";
 import { GRAVE_BOX, PROP_METRICS } from "./props.ts";
 import { placeCell, rollInterior, type Placement, type PropPlacement } from "./spawns.ts";
@@ -44,8 +43,8 @@ describe("generation sheet", () => {
 });
 
 describe("biome terrain", () => {
-  it("stays inside the loaded vertical band", () => {
-    const ceiling = (VERTICAL_CHUNK_MAX + 1) * CHUNK_SIZE;
+  it("stays under the world ceiling", () => {
+    const ceiling = WORLD_CEILING_METERS / VOXEL_SIZE;
     let lowest = Infinity;
     let highest = -Infinity;
     for (let z = -6000; z < 6000; z += 41) {
@@ -181,47 +180,6 @@ describe("placement", () => {
       for (const [dx, dz] of [[10, 0], [-10, 0], [0, 10], [0, -10]] as const) {
         expect(Math.abs(gen.surfaceHeight(vx + dx, vz + dz) - centre)).toBeLessThanOrEqual(3);
       }
-    }
-  });
-});
-
-describe("open graves", () => {
-  /** The voxel at a world position, generating whichever chunk holds it. */
-  function voxelAt(x: number, y: number, z: number): Material {
-    const vx = Math.floor(x / VOXEL_SIZE);
-    const vy = Math.floor(y / VOXEL_SIZE);
-    const vz = Math.floor(z / VOXEL_SIZE);
-    const grid = createChunkGrid();
-    gen.generate(grid, floorDiv(vx, CHUNK_SIZE), floorDiv(vy, CHUNK_SIZE), floorDiv(vz, CHUNK_SIZE));
-    const lx = vx - floorDiv(vx, CHUNK_SIZE) * CHUNK_SIZE;
-    const ly = vy - floorDiv(vy, CHUNK_SIZE) * CHUNK_SIZE;
-    const lz = vz - floorDiv(vz, CHUNK_SIZE) * CHUNK_SIZE;
-    return grid.cells[lx + CHUNK_SIZE * (ly + CHUNK_SIZE * lz)] as Material;
-  }
-
-  const graves = props.filter((p) => p.kind === "grave");
-
-  it("hollows the pit under an open grave and leaves a covered one solid", () => {
-    const open = graves.filter((g) => !g.topsoil && g.tiltX === 0 && g.tiltZ === 0).slice(0, 12);
-    const covered = graves.filter((g) => g.topsoil).slice(0, 12);
-    expect(open.length).toBeGreaterThan(0);
-
-    for (const g of open) {
-      // Half a metre down the middle is inside the box whatever the yaw.
-      expect(voxelAt(g.x, g.y - 0.5, g.z), `open grave at ${g.x},${g.z}`).toBe(Material.Air);
-    }
-    for (const g of covered) {
-      expect(voxelAt(g.x, g.y - 0.5, g.z), `covered grave at ${g.x},${g.z}`).not.toBe(Material.Air);
-    }
-  });
-
-  it("leaves the ground beside the pit alone", () => {
-    for (const g of graves.filter((p) => !p.topsoil).slice(0, 8)) {
-      // Well past the box's half-width, on the grave's own side axis.
-      const side = (GRAVE_BOX.halfWidth * g.scale + 0.5);
-      const x = g.x + side * Math.sin(g.yaw);
-      const z = g.z + side * Math.cos(g.yaw);
-      expect(voxelAt(x, g.y - 0.5, z)).not.toBe(Material.Air);
     }
   });
 });

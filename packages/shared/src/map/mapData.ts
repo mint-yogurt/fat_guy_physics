@@ -1,23 +1,14 @@
 import { chunkKey, keyX, keyZ, type ChunkKey } from "../sim/chunkKey.ts";
-import { CHUNK_SIZE } from "../sim/constants.ts";
 import { nowMs } from "../sim/time.ts";
 import {
   CHUNK_METERS,
-  VERTICAL_CHUNK_MAX,
-  VERTICAL_CHUNK_MIN,
-  type ColumnTop,
+  createGroundSurface,
   type Prop,
   type Tree,
   World,
 } from "../sim/world.ts";
-import {
-  BIOME_GROUND_COLORS,
-  Biome,
-  biomeTintStrength,
-  unpackBiome,
-  unpackBiomeWeight,
-} from "../voxel/biomeTint.ts";
-import { MATERIAL_COLORS } from "../voxel/voxel.ts";
+import { Biome } from "../voxel/biomeTint.ts";
+import { GROUND } from "../worldgen/generationSheet.ts";
 import { TREE_METRICS, TreeSpecies } from "../worldgen/trees.ts";
 
 /**
@@ -34,11 +25,15 @@ import { TREE_METRICS, TreeSpecies } from "../worldgen/trees.ts";
 /** Map pixels per chunk-column edge, and the metres each one covers. */
 export const MAP_TILE_PX = 8;
 export const MAP_PX_METERS = CHUNK_METERS / MAP_TILE_PX;
-const VOXELS_PER_PX = CHUNK_SIZE / MAP_TILE_PX;
 
-/** Height difference to the up-left neighbour, in voxels, that saturates the relief shading. */
-const RELIEF_PER_VOXEL = 0.05;
+/** Relief shading per metre of height difference to the up-left neighbour, and its limit. */
+const RELIEF_PER_METER = 0.5;
 const RELIEF_MAX = 0.3;
+
+/** The ground's colours on the map, standing in for its textures. */
+const GRASS: readonly [number, number, number] = [0.3, 0.5, 0.2];
+const DIRT: readonly [number, number, number] = [0.42, 0.3, 0.18];
+const SNOW: readonly [number, number, number] = [0.95, 0.95, 0.97];
 
 /** Props are drawn at least this wide so a one-pixel snowman is still visible. */
 const PROP_MIN_RADIUS = 0.3;
@@ -81,8 +76,8 @@ export class MapData {
 
   private queue: ChunkKey[] = [];
   private readonly queued = new Set<ChunkKey>();
-  private readonly top: ColumnTop = { material: 0, voxelY: 0, tint: 0 };
-  private readonly neighbour: ColumnTop = { material: 0, voxelY: 0, tint: 0 };
+  private readonly top = createGroundSurface();
+  private readonly neighbour = createGroundSurface();
   private readonly treeScratch: Tree[] = [];
   private readonly propScratch: Prop[] = [];
 
@@ -146,12 +141,7 @@ export class MapData {
   }
 
   private columnLoaded(world: World, cx: number, cz: number): boolean {
-    const x = (cx + 0.5) * CHUNK_METERS;
-    const z = (cz + 0.5) * CHUNK_METERS;
-    for (let cy = VERTICAL_CHUNK_MIN; cy <= VERTICAL_CHUNK_MAX; cy++) {
-      if (!world.hasChunkAt(x, (cy + 0.5) * CHUNK_METERS, z)) return false;
-    }
-    return true;
+    return world.hasChunkAt((cx + 0.5) * CHUNK_METERS, 0, (cz + 0.5) * CHUNK_METERS);
   }
 
   private drawTile(world: World, cx: number, cz: number, tile: Uint8ClampedArray): void {
@@ -193,25 +183,23 @@ export class MapData {
         let b = 0;
         let a = 255;
 
-        const vx = cx * CHUNK_SIZE + px * VOXELS_PER_PX + VOXELS_PER_PX / 2;
-        const vz = cz * CHUNK_SIZE + py * VOXELS_PER_PX + VOXELS_PER_PX / 2;
-        if (world.topSolid(vx, vz, this.top)) {
-          const { material, tint } = this.top;
-          const ci = material * 3;
-          r = MATERIAL_COLORS[ci] as number;
-          g = MATERIAL_COLORS[ci + 1] as number;
-          b = MATERIAL_COLORS[ci + 2] as number;
-          const strength = tint === 0 ? 0 : biomeTintStrength(material);
-          if (strength > 0) {
-            const blend = unpackBiomeWeight(tint) * strength;
-            const bi = unpackBiome(tint) * 3;
-            r += ((BIOME_GROUND_COLORS[bi] as number) - r) * blend;
-            g += ((BIOME_GROUND_COLORS[bi + 1] as number) - g) * blend;
-            b += ((BIOME_GROUND_COLORS[bi + 2] as number) - b) * blend;
+        if (world.groundSurface(mx, mz, this.top)) {
+          const { grass, dirt, snow, spooky } = this.top;
+          r = GRASS[0] * grass + DIRT[0] * dirt + SNOW[0] * snow;
+          g = GRASS[1] * grass + DIRT[1] * dirt + SNOW[1] * snow;
+          b = GRASS[2] * grass + DIRT[2] * dirt + SNOW[2] * snow;
+          if (spooky > 0) {
+            // Halloween ground: drained of colour and dark, like the real thing.
+            const grey = 0.3 * r + 0.59 * g + 0.11 * b;
+            const drain = spooky * GROUND.halloweenDesaturation;
+            const dark = 1 - spooky * GROUND.halloweenDarkening;
+            r = (r + (grey - r) * drain) * dark;
+            g = (g + (grey - g) * drain) * dark;
+            b = (b + (grey - b) * drain) * dark;
           }
-          // Relief: lit from the up-left, so slopes and dug holes read.
-          if (world.topSolid(vx - VOXELS_PER_PX, vz - VOXELS_PER_PX, this.neighbour)) {
-            const dh = (this.top.voxelY - this.neighbour.voxelY) * RELIEF_PER_VOXEL;
+          // Relief: lit from the up-left, so slopes read.
+          if (world.groundSurface(mx - MAP_PX_METERS, mz - MAP_PX_METERS, this.neighbour)) {
+            const dh = (this.top.height - this.neighbour.height) * RELIEF_PER_METER;
             const shade = 1 + Math.max(-RELIEF_MAX, Math.min(RELIEF_MAX, dh));
             r *= shade;
             g *= shade;

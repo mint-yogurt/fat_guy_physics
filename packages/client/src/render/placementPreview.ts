@@ -11,12 +11,14 @@ import {
 
 import { CONTAINER_ITEMS, CONTAINER_KINDS, type ContainerKind } from "@fgp/shared/items/container";
 import { ItemType } from "@fgp/shared/items/inventory";
+import { PIECE_SPECS } from "@fgp/shared/items/building";
 import type { PlacementPlan } from "@fgp/shared/items/placement";
 import { TRAMPOLINE_HEIGHT } from "@fgp/shared/items/trampoline";
 import { PROP_METRICS } from "@fgp/shared/worldgen/props";
 
 import { emptyContainerClone } from "./containerLook.ts";
 import type { ItemAssets } from "./itemAssets.ts";
+import type { PieceMeshes } from "./pieceMesh.ts";
 import type { PropTemplates } from "./propAssets.ts";
 
 /**
@@ -25,9 +27,11 @@ import type { PropTemplates } from "./propAssets.ts";
  * reason is the plan's, shared/items/placement.ts).
  *
  * Ghost builders are the only per-item part. Each returns the item's mesh in
- * the placement frame: origin on the ground at the middle of the footprint,
- * +Y up, turned by the plan's yaw. To preview a new placeable (a log, a sheet
- * of plywood, a 2x4), add its builder to {@link GHOSTS}.
+ * the placement frame: origin where the plan puts it (on the ground at the
+ * middle of the footprint for a mat or a gift, at the middle of the shape for
+ * a building piece), +Y up, turned by the plan's rotation. A building piece
+ * needs no builder of its own: it is made from shared/items/building.ts. To
+ * preview any other new placeable, add its builder to {@link GHOSTS}.
  *
  * The ghost is the item's own meshes with their materials swapped for a
  * translucent tint. That swap is the transparency support: it keeps a source
@@ -39,6 +43,7 @@ import type { PropTemplates } from "./propAssets.ts";
 export interface GhostSources {
   readonly assets: ItemAssets;
   readonly props: PropTemplates;
+  readonly pieces: PieceMeshes;
 }
 
 type GhostBuilder = (sources: GhostSources) => Object3D | undefined;
@@ -74,6 +79,8 @@ const GHOSTS: Partial<Record<ItemType, GhostBuilder>> = {
   },
 };
 for (const kind of CONTAINER_KINDS) GHOSTS[CONTAINER_ITEMS[kind]] = containerGhost(kind);
+// A building piece's ghost is the piece itself, centred on the plan's point.
+for (const piece of Object.values(PIECE_SPECS)) GHOSTS[piece.item] = ({ pieces }) => pieces.make(piece.item);
 
 /** One mesh of a ghost, with the materials it wears when it can go and when it cannot. */
 interface GhostMesh {
@@ -127,7 +134,7 @@ export class PlacementPreview {
     }
     if (ghost === undefined) return;
     ghost.root.position.set(plan.x, plan.y, plan.z);
-    ghost.root.rotation.y = plan.yaw;
+    ghost.root.quaternion.set(plan.qx, plan.qy, plan.qz, plan.qw);
     if (ghost.valid !== plan.valid) {
       ghost.valid = plan.valid;
       for (const part of ghost.meshes) part.mesh.material = plan.valid ? part.ok : part.blocked;

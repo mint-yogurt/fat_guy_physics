@@ -35,6 +35,8 @@ export class SkateboardView {
     this.hinge.add(this.roll);
     this.root.add(this.hinge);
     this.root.visible = false;
+    // Turned to its heading first, then up or down along it, then rolled about it.
+    this.root.rotation.order = "YZX";
     scene.add(this.root);
   }
 
@@ -45,7 +47,7 @@ export class SkateboardView {
     const { skate } = player;
     this.root.position.set(x, y, z);
     // Sim yaw is atan2(z, x); three's rotation about Y runs the other way.
-    this.root.rotation.y = -skate.heading;
+    this.root.rotation.set(skate.roll, -skate.heading, skate.pitch);
     this.hinge.rotation.z = skate.manual;
     this.roll.rotation.x = skate.flip;
   }

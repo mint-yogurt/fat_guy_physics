@@ -1,10 +1,12 @@
 import {
   Box3,
   BufferAttribute,
+  Euler,
   Group,
   Mesh,
   MeshLambertNodeMaterial,
   Quaternion,
+  type Object3D,
   Vector3,
   type Scene,
 } from "three/webgpu";
@@ -14,12 +16,14 @@ import {
   AvatarAction,
   CHUP_CYCLE_SECONDS,
   HoldStyle,
+  leavesHandOnThrow,
   SCOOP_CYCLE_SECONDS,
   SHAKE_CYCLE_SECONDS,
   THROW_FOLLOW_SECONDS,
   ThrowWatcher,
   type AvatarPose,
 } from "@fgp/shared/items/avatarPose";
+import { ItemType } from "@fgp/shared/items/inventory";
 import { PlayerMode, WALK_HEIGHT, type Player } from "@fgp/shared/sim/player";
 
 import { HeldItemSlot, type HeldItemSources } from "./heldItems.ts";
@@ -85,6 +89,8 @@ export type AvatarBody = Pick<
   | "skating"
   | "skate"
   | "skateTilt"
+  | "climbing"
+  | "climb"
 >;
 
 export interface Appearance {
@@ -150,11 +156,22 @@ const LOB_THROUGH = new Vector3(0.7, 0.75, 0.05);
  */
 const CARRY_AIM = new Vector3(0.75, -0.2, -0.65);
 
+// Climbing: the hand that is reaching, high above the head and in front, and the one that has
+// just pulled (body space as above, for the right arm).
+const CLIMB_HIGH = new Vector3(0.25, 0.97, 0.2);
+const CLIMB_LOW = new Vector3(0.65, 0.45, 0.4);
+/** Radians of the climbing cycle per metre climbed: one cycle is a couple of rungs. */
+const CLIMB_STRIDE = 9;
+/** How far the body is drawn in toward the rungs while climbing, metres: the sim keeps the (wide) collision box off them. */
+const CLIMB_BODY_SHIFT = 0.3;
+
 // Grip frames, in body space at the T-pose (right arm straight out along +Z).
 /** A blade's shaft points forward and up out of the fist. */
 const BLADE_REST_DIR = new Vector3(1, 0.6, 0).normalize();
 /** Charged for a throw, the shaft points straight ahead whatever the arm does. */
 const SPEAR_DIR = new Vector3(1, 0.08, 0).normalize();
+/** A fishing rod drawn back for a cast points up and back over the shoulder. */
+const ROD_BACK_DIR = new Vector3(-0.55, 0.8, 0.15).normalize();
 /** A carried item sits this far above the hands, across the chest. */
 const CARRY_LIFT = 0.08;
 /**
@@ -165,6 +182,18 @@ const CARRY_SCALE = 1.5;
 
 const Z_AXIS = new Vector3(0, 0, 1);
 const Y_AXIS = new Vector3(0, 1, 0);
+
+/**
+ * Spring shoes. One shoe, as authored and not resized (ItemAssets.springShoe), is
+ * snapped by the top face of its sole onto the bottom of each foot, and follows the
+ * leg's swing. The springs hang below the foot, so the whole model is lifted by
+ * their length while they are on: the springs stand on the ground, and the sim's
+ * collision box (which does not change) is where the feet were.
+ */
+interface Shoe {
+  readonly limb: Limb;
+  readonly mesh: Object3D;
+}
 
 interface Limb {
   readonly mesh: Mesh;
@@ -184,6 +213,10 @@ interface Limb {
   readonly tip: Vector3;
   /** Pointing out of the joint along the limb (limb geometry space, unit). */
   readonly out: Vector3;
+  /** The middle of the free end's bottom face: the sole of a foot (limb geometry space). */
+  readonly sole: Vector3;
+  /** The rotation this frame's pose gave the limb (limb geometry space). */
+  readonly bend: Quaternion;
 }
 
 /** Swing cycle: slow raise, fast strike. 0..1 in, 0..1 out (1 = raised). */
@@ -202,6 +235,10 @@ const blendDir = (out: Vector3, a: Vector3, b: Vector3, t: number): Vector3 =>
 // Scratch, reused every frame.
 const qa = new Quaternion();
 const qb = new Quaternion();
+const qTilt = new Quaternion();
+const qYaw = new Quaternion();
+const tiltOffset = new Vector3();
+const tiltEuler = new Euler();
 const va = new Vector3();
 const vb = new Vector3();
 const vc = new Vector3();
@@ -217,6 +254,11 @@ export class PlayerModel {
   private readonly orient = new Group();
 
   private readonly limbs: Limb[] = [];
+  private readonly shoes: Shoe[] = [];
+  /** How far the springs hang below the sole, metres: the lift while they are on. */
+  private shoeDrop = 0;
+  /** The spring shoes are on this frame. */
+  private shoesOn = false;
   /** The arm on the character's right: the one that holds things. */
   private handArm: Limb | undefined;
   private offArm: Limb | undefined;
@@ -235,6 +277,9 @@ export class PlayerModel {
   private readonly restOut = new Map<Limb, Vector3>();
   private readonly bladeRest = new Quaternion();
   private readonly spear = new Quaternion();
+  private readonly rodBack = new Quaternion();
+  /** The forward lunge of the throw under way, 0..1. */
+  private lunge = 0;
   private readonly carryTurn = new Quaternion();
   private readonly aimRight = new Vector3();
   private readonly aimLeft = new Vector3();
@@ -403,11 +448,22 @@ export class PlayerModel {
     // grip; the arm's rotation is laid on top of it each frame.
     this.bladeRest.setFromUnitVectors(Z_AXIS, BLADE_REST_DIR);
     this.spear.setFromUnitVectors(Z_AXIS, SPEAR_DIR);
+    this.rodBack.setFromUnitVectors(Z_AXIS, ROD_BACK_DIR);
     // Carry's long axis is +X; across the chest is body Z.
     this.carryTurn.setFromAxisAngle(Y_AXIS, -Math.PI / 2);
 
     this.spin.add(this.holder);
     this.held = new HeldItemSlot(this.holder, items);
+
+    const shoeBounds = new Box3().setFromObject(items.assets.springShoe);
+    this.shoeDrop = Math.max(0, -shoeBounds.min.y);
+    for (const limb of this.limbs) {
+      if (limb.axis !== 1) continue;
+      const mesh = items.assets.springShoe.clone();
+      mesh.visible = false;
+      this.spin.add(mesh);
+      this.shoes.push({ limb, mesh });
+    }
   }
 
   static async load(
@@ -434,17 +490,44 @@ export class PlayerModel {
     renderX: number,
     renderY: number,
     renderZ: number,
+    /** How far the feet are lifted onto a board: the ground's angle is followed about the board's underside. */
+    rideLift = 0,
   ): void {
     // A rider who has come off lies on the ground, not hovering at torso height.
-    this.root.position.set(
-      renderX,
-      renderY - player.skateTilt * (this.pivotHeight - 0.3),
-      renderZ,
-    );
-
     const ragball = player.mode === PlayerMode.Ragball;
+    this.shoesOn = pose.held === ItemType.SpringShoes && !ragball;
+    const rootY = renderY - player.skateTilt * (this.pivotHeight - 0.3) + (this.shoesOn ? this.shoeDrop : 0);
+    this.root.position.set(renderX, rootY, renderZ);
+
+    this.climbW += Math.min(1, dt * 10) * ((player.climbing && !ragball ? 1 : 0) - this.climbW);
+    this.climbPhase = player.climb.travelled;
+    const wall = player.climb.rail.horizontalNormal(this.wallScratch);
+    if (this.climbW > 0.001) {
+      this.root.position.x -= wall.x * CLIMB_BODY_SHIFT * this.climbW;
+      this.root.position.z -= wall.z * CLIMB_BODY_SHIFT * this.climbW;
+    }
+
     this.tuck +=
       Math.min(1, dt * RETRACT_RATE) * ((ragball ? 1 : 0) - this.tuck);
+
+    // On a board the rider leans with it, onto the angle of the ground under the
+    // wheels: about the board's lateral and long axes, the whole body as one.
+    // Tilted about the point under the feet on the ground, not the body's centre.
+    const lean = ragball ? 0 : this.ride;
+    const pitch = player.skate.pitch * lean;
+    const roll = player.skate.roll * lean;
+    if (Math.abs(pitch) + Math.abs(roll) > 1e-4) {
+      qYaw.setFromAxisAngle(Y_MODEL, -player.skate.heading);
+      qTilt.setFromEuler(tiltEuler.set(roll, 0, pitch, "ZYX"));
+      qTilt.premultiply(qYaw);
+      qYaw.invert();
+      qTilt.multiply(qYaw);
+      this.root.quaternion.copy(qTilt);
+      tiltOffset.set(0, rootY - (renderY - rideLift), 0).applyQuaternion(qTilt);
+      this.root.position.set(renderX + tiltOffset.x, renderY - rideLift + tiltOffset.y, renderZ + tiltOffset.z);
+    } else {
+      this.root.quaternion.identity();
+    }
 
     if (ragball) {
       this.rotation.set(
@@ -473,6 +556,11 @@ export class PlayerModel {
           look +
           (turn - Math.PI * 2 * Math.round(turn / (Math.PI * 2))) * this.ride;
       }
+      if (this.climbW > 0.001) {
+        // Facing the rungs, not the camera: the head turns freely, the body does not.
+        const turn = Math.atan2(-wall.z, -wall.x) - facing;
+        facing += (turn - Math.PI * 2 * Math.round(turn / (Math.PI * 2))) * this.climbW;
+      }
       this.spin.rotation.set(0, -facing, player.skateTilt * 1.5);
     }
 
@@ -481,13 +569,15 @@ export class PlayerModel {
     // On a board there is no stride: the legs only move to push, and the arms pump with them.
     const riding = player.skating && !ragball;
     const gait = player.grounded && !riding ? Math.min(1, speed / 2) : 0;
-    const swing = riding
+    const walkSwing = riding
       ? player.skate.pushPhase > 0
         ? Math.sin(player.skate.pushPhase * Math.PI * 2) * 0.8
         : 0
       : player.grounded
         ? Math.sin(this.phase) * gait * 0.7
         : 0.3;
+    // Climbing: the legs step up the rungs one after the other.
+    const swing = walkSwing + (Math.sin(this.climbPhase * CLIMB_STRIDE) * 0.8 - walkSwing) * this.climbW;
     const active = 1 - this.tuck;
 
     // Two bounces per stride, one per footfall.
@@ -520,16 +610,36 @@ export class PlayerModel {
         qa.slerp(qb, posed);
       }
       deformLimb(limb, qa, this.tuck);
+      limb.bend.copy(qa);
       if (limb === this.handArm) this.armQuat.copy(qa);
       else if (limb === this.offArm) this.offQuat.copy(qa);
     }
 
     this.placeHolder(pose);
+    this.placeShoes();
+  }
+
+  /** Puts each shoe's sole on the bottom of its foot, turned with the leg. */
+  private placeShoes(): void {
+    for (const shoe of this.shoes) {
+      const shown = this.shoesOn && this.tuck < 0.3;
+      shoe.mesh.visible = shown;
+      if (!shown) continue;
+      const toBody = this.toBody.get(shoe.limb);
+      const fromBody = this.fromBody.get(shoe.limb);
+      if (toBody === undefined || fromBody === undefined) continue;
+      this.handPoint(shoe.limb, shoe.limb.bend, shoe.mesh.position, shoe.limb.sole);
+      shoe.mesh.quaternion.copy(shoe.limb.bend).premultiply(toBody).multiply(fromBody);
+    }
   }
 
   /** How far each arm is in its action pose rather than the walk, 0..1. */
   private rightPose = 0;
   private leftPose = 0;
+  /** How far into climbing the body is, 0..1, and how far up it has climbed (the cycle's phase). */
+  private climbW = 0;
+  private climbPhase = 0;
+  private readonly wallScratch = { x: 0, z: 0 };
 
   /**
    * Advances the action cycles and works out where each arm points. The
@@ -583,6 +693,7 @@ export class PlayerModel {
       this.kickKind === AvatarAction.Put
         ? swing
         : 0;
+    this.lunge = lunge;
     const bowlThrough = this.kickKind === AvatarAction.Bowl ? swing : 0;
     const lobThrough = this.kickKind === AvatarAction.Lob ? swing : 0;
     // Bowl and lob are two-handed: both arms take them.
@@ -615,8 +726,15 @@ export class PlayerModel {
     blendDir(aim, aim, THROW_AIM, lunge);
     this.logThrow(aim, 1, bowlThrough, lobThrough);
 
+    // Climbing: the hands take the rungs by turns, over the head.
+    const reach = 0.5 + 0.5 * Math.sin(this.climbPhase * CLIMB_STRIDE);
+    blendDir(vb, CLIMB_LOW, CLIMB_HIGH, reach);
+    blendDir(aim, aim, vb, this.climbW);
+
     // Left arm: only two-handed things move it.
     const left = mirror(this.aimLeft, CARRY_AIM, -1);
+    blendDir(vb, CLIMB_LOW, CLIMB_HIGH, 1 - reach);
+    blendDir(left, left, mirror(va, vb, -1), this.climbW);
     blendDir(vb, SCOOP_UP, SCOOP_DOWN, dip * (1 - lift));
     blendDir(left, left, mirror(vb, vb, -1), this.scoopWeight);
     this.logThrow(left, -1, bowlThrough, lobThrough);
@@ -630,8 +748,9 @@ export class PlayerModel {
         this.shakeWeight,
         lunge,
         both,
+        this.climbW,
       ) * active;
-    this.leftPose = Math.max(this.carryWeight, this.scoopWeight, both) * active;
+    this.leftPose = Math.max(this.carryWeight, this.scoopWeight, both, this.climbW) * active;
   }
 
   /** Lays the bowl and lob wind-ups and follow-throughs onto one arm's aim. */
@@ -665,12 +784,13 @@ export class PlayerModel {
     const arm = this.handArm;
     const style = this.held.show(pose.held, false);
     const shown =
-      arm !== undefined && style !== HoldStyle.Empty && this.tuck < 0.3;
+      arm !== undefined && style !== HoldStyle.Empty && this.tuck < 0.3 && this.climbW < 0.4;
     // A thrown stick or log is out of the hand for the start of the follow-through.
     const throwable =
-      style === HoldStyle.Blade ||
-      style === HoldStyle.Carry ||
-      style === HoldStyle.Ball;
+      (style === HoldStyle.Blade ||
+        style === HoldStyle.Carry ||
+        style === HoldStyle.Ball) &&
+      leavesHandOnThrow(pose.held);
     this.held.show(pose.held, shown && (!throwable || this.kick <= 0.35));
     if (!shown) return;
 
@@ -695,19 +815,18 @@ export class PlayerModel {
       this.holder.quaternion
         .copy(qa)
         .multiply(this.bladeRest)
-        .slerp(this.spear, this.chargeWeight);
+        .slerp(pose.held === ItemType.FishingRod ? this.rodBack : this.spear, this.chargeWeight);
+      // A cast whips the rod forward as it is let go.
+      if (pose.held === ItemType.FishingRod) this.holder.quaternion.slerp(this.spear, this.lunge);
     } else {
       this.holder.quaternion.copy(qa);
     }
+    this.held.settleRod(this.chargeWeight < 0.02 && this.lunge < 0.02);
   }
 
   /** The limb's free end after `rotation` (geometry space), in body space. */
-  private handPoint(limb: Limb, rotation: Quaternion, out: Vector3): Vector3 {
-    out.set(
-      limb.tip.x - limb.pivotX,
-      limb.tip.y - limb.pivotY,
-      limb.tip.z - limb.pivotZ,
-    );
+  private handPoint(limb: Limb, rotation: Quaternion, out: Vector3, at: Vector3 = limb.tip): Vector3 {
+    out.set(at.x - limb.pivotX, at.y - limb.pivotY, at.z - limb.pivotZ);
     out.applyQuaternion(rotation);
     out.x += limb.pivotX;
     out.y += limb.pivotY;
@@ -723,6 +842,11 @@ export class PlayerModel {
 
   set visible(value: boolean) {
     this.root.visible = value;
+  }
+
+  /** A named point on the item in the hand (the fishing rod's line tip), for the line to start from. */
+  heldAnchor(name: string): Object3D | undefined {
+    return this.held.anchor(name);
   }
 
   dispose(): void {
@@ -791,6 +915,9 @@ function buildLimb(
   if (tipCount > 0) tip.divideScalar(tipCount);
   else tip.set(pivot.x + outX * reach, pivot.y + outY * reach, pivot.z);
 
+  const sole = tip.clone();
+  if (!isArm) sole.x = pivot.x + reach;
+
   return {
     mesh,
     basePositions,
@@ -806,6 +933,8 @@ function buildLimb(
     sign: left ? 1 : -1,
     tip,
     out: new Vector3(outX, outY, 0),
+    sole,
+    bend: new Quaternion(),
   };
 }
 

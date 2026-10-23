@@ -1,4 +1,14 @@
-import { Box3, Group, Mesh, MeshLambertNodeMaterial, NearestFilter, Vector3, type Material, type Object3D } from "three/webgpu";
+import {
+  Box3,
+  Color,
+  Group,
+  Mesh,
+  MeshLambertNodeMaterial,
+  Object3D,
+  Vector3,
+  type Material,
+  type Texture,
+} from "three/webgpu";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 import { ROCK_RADIUS } from "@fgp/shared/items/rock";
@@ -7,9 +17,10 @@ import { TRAMPOLINE_HEIGHT } from "@fgp/shared/items/trampoline";
 import { SKATE_BOARD_LENGTH } from "@fgp/shared/sim/skate";
 
 import { litByBulbs } from "./bulbLights.ts";
+import { nearestify } from "./n64Texture.ts";
 import { createGooMaterial } from "./gooMaterial.ts";
 import { faceOutward } from "./meshOrientation.ts";
-import { buildCoil, readRopeParts, type RopeParts } from "./ropeView.ts";
+import { bulbGlassMaterial, buildCoil, readRopeParts, type RopeParts } from "./ropeView.ts";
 
 /**
  * The item meshes, loaded once and cloned per use: on the ground, in the
@@ -41,6 +52,19 @@ import { buildCoil, readRopeParts, type RopeParts } from "./ropeView.ts";
  *  - coal: a lump lying flat, centred, about 14cm across.
  *  - metal: a crushed block of cans, centred, about 16cm across.
  *  - candy: a chocolate bar, a rocket pop and a lollipop in a heap, centred, about 18cm across.
+ *  - toobifer (a 2x4), plywood (a sheet), wheel, ladder: as authored, centred, with their
+ *    longest side fitted to TOOBIFER_SIZE etc. (a 1m beam along Z, a 2.4m sheet lying
+ *    flat in XZ, a 60cm wheel on its X axis, a 3m ladder along Z). They are drawn far
+ *    smaller than they are, like the log, so they read as items.
+ *  - spring: standing on end, centred, 20cm tall.
+ *  - spring shoes: one shoe, as authored (no resizing). `springShoe` is the one on a foot: the
+ *    top face of its sole at the origin, facing up, with the spring hanging below it and the
+ *    toe along +X. `springShoeItem` is a pair-sized look for the slot and the ground: the
+ *    same shoe fitted to SPRING_SHOES_SIZE, centred.
+ *  - fishing rod: `fishingRod` is the item (slot, ground): lying along +Z, centred, ROD_ITEM_SIZE
+ *    long. `fishingRodHeld` is the one in the hand, HELD_ROD_LENGTH long: the Blade frame, the
+ *    handle's "hand_attachment_point" at the origin and the rod running out along +Z, with a
+ *    child named ROD_TIP_NAME where the line leaves it ("line_attachment_point").
  *  - goo: the puddle of it lying flat, centred, about 32cm across: the item as it
  *    looks in a slot or on the ground. gooBall: the ball of it in the hand, 16cm.
  */
@@ -56,6 +80,18 @@ const COAL_SIZE = 0.14;
 const METAL_SIZE = 0.16;
 const CANDY_SIZE = 0.18;
 const GOO_SIZE = 0.32;
+/** Longest side of the crafting materials as items, metres. */
+const TOOBIFER_SIZE = 0.5;
+const PLYWOOD_SIZE = 0.7;
+const WHEEL_SIZE = 0.3;
+const LADDER_SIZE = 0.9;
+const SPRING_SIZE = 0.2;
+const SPRING_SHOES_SIZE = 0.3;
+/** The fishing rod: its longest side as an item, and its whole length in the hand, metres. */
+const ROD_ITEM_SIZE = 0.9;
+const HELD_ROD_LENGTH = 2.2;
+/** The child of the held rod that sits where the fishing line leaves it. */
+export const ROD_TIP_NAME = "rod_tip";
 /** Diameter of the ball of goo in the hand, metres. */
 const GOO_BALL_DIAMETER = 0.16;
 /** Authored diameter of gooball.glb, units. */
@@ -105,6 +141,19 @@ export interface ItemAssets {
   readonly coal: Object3D;
   readonly metal: Object3D;
   readonly candy: Object3D;
+  readonly toobifer: Object3D;
+  readonly plywood: Object3D;
+  readonly wheel: Object3D;
+  readonly ladder: Object3D;
+  readonly spring: Object3D;
+  /** A spring shoe at its authored size, its sole's top face at the origin (see above): the one on the foot. */
+  readonly springShoe: Object3D;
+  /** The shoe fitted to a slot or the ground, centred. */
+  readonly springShoeItem: Object3D;
+  /** The fishing rod as an item: lying along +Z, centred. */
+  readonly fishingRod: Object3D;
+  /** The fishing rod in a hand (see the notes above); the line leaves from its ROD_TIP_NAME child. */
+  readonly fishingRodHeld: Object3D;
   /** Goo as an item: the flat puddle of it. */
   readonly goo: Object3D;
   /** Goo in the hand: a ball of it. */
@@ -139,13 +188,32 @@ function pixelLit(scene: Object3D): void {
   scene.traverse((object) => {
     if (!(object instanceof Mesh)) return;
     const swap = (source: Material | undefined): Material => {
-      const textured = source as (Material & { map?: { magFilter: number } | null }) | undefined;
+      const textured = source as (Material & { map?: Texture | null; color?: Color }) | undefined;
       const map = textured?.map ?? null;
-      if (map !== null) map.magFilter = NearestFilter;
-      return litByBulbs(new MeshLambertNodeMaterial({ map: map as never }));
+      if (map !== null) nearestify(map);
+      // A material with no texture keeps its own colour (the bulbs on the spring shoes).
+      const colour = map === null ? textured?.color : undefined;
+      return litByBulbs(new MeshLambertNodeMaterial(colour === undefined ? { map: map as never } : { color: colour }));
     };
     object.material = Array.isArray(object.material) ? object.material.map(swap) : swap(object.material);
   });
+}
+
+/**
+ * Where the fishing line leaves the rod, in the file's own frame. The file marks it with an
+ * empty named line_attachment_point; if that is still sitting at the file's origin (the
+ * handle's butt, where an unmoved empty ends up) the top of the rod is used instead.
+ */
+function rodLineAttachment(scene: Object3D): Vector3 {
+  const marked = scene.getObjectByName("line_attachment_point");
+  if (marked !== undefined && marked.position.lengthSq() > 1e-6) return marked.position.clone();
+  console.warn("fishinrod.glb: line_attachment_point is at the origin; using the top of the rod instead");
+  const rod = scene.getObjectByName("rod");
+  scene.updateMatrixWorld(true);
+  const bounds = new Box3().setFromObject(rod ?? scene);
+  const top = bounds.getCenter(new Vector3());
+  top.y = bounds.max.y;
+  return top;
 }
 
 /** Re-centres a wrapped file on the origin, whatever its own origin is. */
@@ -162,6 +230,20 @@ function fitScale(scene: Object3D, size: number): number {
   scene.updateMatrixWorld(true);
   const extent = new Box3().setFromObject(scene).getSize(new Vector3());
   return size / Math.max(extent.x, extent.y, extent.z, 1e-6);
+}
+
+/**
+ * Where the top face of the shoe's sole is, in the stood-up scene's own frame:
+ * the plank ("2x4") is the sole, so this is the middle of its top, found from its
+ * bounds rather than assumed.
+ */
+function shoeSoleTop(scene: Object3D): Vector3 {
+  scene.updateMatrixWorld(true);
+  const plank = scene.getObjectByName("2x4");
+  const bounds = new Box3().setFromObject(plank ?? scene);
+  const top = bounds.getCenter(new Vector3());
+  top.y = bounds.max.y;
+  return top;
 }
 
 export async function loadItemAssets(): Promise<ItemAssets> {
@@ -181,6 +263,13 @@ export async function loadItemAssets(): Promise<ItemAssets> {
     gooBallFile,
     metalFile,
     candyFile,
+    toobiferFile,
+    plywoodFile,
+    wheelFile,
+    ladderFile,
+    springFile,
+    springShoesFile,
+    rodFile,
   ] = await Promise.all([
     loader.loadAsync("/meshes/stick.glb"),
     loader.loadAsync("/meshes/log.glb"),
@@ -196,6 +285,13 @@ export async function loadItemAssets(): Promise<ItemAssets> {
     loader.loadAsync("/meshes/gooball.glb"),
     loader.loadAsync("/meshes/metal.glb"),
     loader.loadAsync("/meshes/candy.glb"),
+    loader.loadAsync("/meshes/toobifer.glb"),
+    loader.loadAsync("/meshes/plywood.glb"),
+    loader.loadAsync("/meshes/wheel.glb"),
+    loader.loadAsync("/meshes/ladder.glb"),
+    loader.loadAsync("/meshes/spring.glb"),
+    loader.loadAsync("/meshes/spring shoes.glb"),
+    loader.loadAsync("/meshes/fishinrod.glb"),
   ]);
 
   const stickScale = STICK_LENGTH / STICK_AUTHORED_LENGTH;
@@ -270,6 +366,79 @@ export async function loadItemAssets(): Promise<ItemAssets> {
   const candy = wrap(candyFile.scene, fitScale(candyFile.scene, CANDY_SIZE));
   recentre(candy, candyFile.scene);
 
+  // Wood pieces, left in their authored pose and fitted to size.
+  const wood = (file: { scene: Object3D }, size: number): Object3D => {
+    pixelLit(file.scene);
+    const outer = wrap(file.scene, fitScale(file.scene, size));
+    recentre(outer, file.scene);
+    return outer;
+  };
+  const toobifer = wood(toobiferFile, TOOBIFER_SIZE);
+  const plywood = wood(plywoodFile, PLYWOOD_SIZE);
+  const wheel = wood(wheelFile, WHEEL_SIZE);
+  const ladder = wood(ladderFile, LADDER_SIZE);
+
+  // The spring is authored Z-up, like the can: stood on end.
+  pixelLit(springFile.scene);
+  springFile.scene.rotation.x = -Math.PI / 2;
+  const spring = wrap(springFile.scene, fitScale(springFile.scene, SPRING_SIZE));
+  recentre(spring, springFile.scene);
+
+  // The shoe is authored Z-up with the sole's top face at the top of the wooden
+  // plank, the spring hanging below it. On a foot it is stood up and moved so that
+  // face is at the origin; as an item it is the same shoe, fitted and centred.
+  pixelLit(springShoesFile.scene);
+  const shoeItemScene = springShoesFile.scene.clone();
+  springShoesFile.scene.rotation.x = -Math.PI / 2;
+  const springShoe = wrap(springShoesFile.scene, 1);
+  springShoe.updateMatrixWorld(true);
+  const soleTop = shoeSoleTop(springShoesFile.scene);
+  springShoesFile.scene.position.set(-soleTop.x, -soleTop.y, -soleTop.z);
+  shoeItemScene.rotation.x = -Math.PI / 2;
+  const springShoeItem = wrap(shoeItemScene, fitScale(shoeItemScene, SPRING_SHOES_SIZE));
+  recentre(springShoeItem, shoeItemScene);
+
+  // The rod has a string of lights built into it. Its bulbs are lit glass like the bulbs of the
+  // lights themselves; everything else is lit like the props.
+  const rodGlass = new Map<Mesh, Material>();
+  rodFile.scene.traverse((object) => {
+    if (!(object instanceof Mesh) || Array.isArray(object.material)) return;
+    const glass = bulbGlassMaterial(object.material.name);
+    if (glass !== undefined) rodGlass.set(object, glass);
+  });
+  pixelLit(rodFile.scene);
+  for (const [mesh, glass] of rodGlass) mesh.material = glass;
+  rodFile.scene.traverse((object) => {
+    if (!(object instanceof Mesh)) return;
+    faceOutward(object.geometry);
+    object.castShadow = false;
+  });
+  const rodHand = rodFile.scene.getObjectByName("hand_attachment_point")?.position.clone() ?? new Vector3();
+  const rodTip = rodLineAttachment(rodFile.scene);
+  rodFile.scene.updateMatrixWorld(true);
+  const rodAuthored = new Box3().setFromObject(rodFile.scene).getSize(new Vector3()).y;
+
+  // In the hand: authored along +Y, turned onto +Z and scaled, with the handle's mark at the origin.
+  const rodHeldScene = rodFile.scene.clone();
+  const heldScale = HELD_ROD_LENGTH / Math.max(rodAuthored, 1e-6);
+  rodHeldScene.scale.setScalar(heldScale);
+  rodHeldScene.rotation.x = Math.PI / 2;
+  const handHeld = rodHand.clone().multiplyScalar(heldScale).applyEuler(rodHeldScene.rotation);
+  rodHeldScene.position.copy(handHeld).negate();
+  const tipMark = new Object3D();
+  tipMark.name = ROD_TIP_NAME;
+  tipMark.position.copy(rodTip).multiplyScalar(heldScale).applyEuler(rodHeldScene.rotation).sub(handHeld);
+  const fishingRodHeld = new Group();
+  fishingRodHeld.add(rodHeldScene, tipMark);
+
+  // As an item: lying along +Z like the ladder, fitted to size and centred.
+  const rodItemScene = rodFile.scene.clone();
+  rodItemScene.rotation.x = Math.PI / 2;
+  rodItemScene.scale.setScalar(fitScale(rodItemScene, ROD_ITEM_SIZE));
+  const fishingRod = new Group();
+  fishingRod.add(rodItemScene);
+  recentre(fishingRod, rodItemScene);
+
   // Slime has no texture of its own: it is the see-through goo material.
   const gooMaterial = createGooMaterial();
   const slime = (scene: Object3D): void => {
@@ -302,6 +471,15 @@ export async function loadItemAssets(): Promise<ItemAssets> {
     coal,
     metal,
     candy,
+    toobifer,
+    plywood,
+    wheel,
+    ladder,
+    spring,
+    springShoe,
+    springShoeItem,
+    fishingRod,
+    fishingRodHeld,
     goo,
     gooBall,
     ropeCoil,

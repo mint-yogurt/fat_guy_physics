@@ -421,7 +421,7 @@ function placeProp(
     (GRAVE_BOX.halfLength + TOMBSTONE_GAP) * scale + TOMBSTONE_HALF_THICKNESS[stone] * stoneScale;
   const sx = x - back * Math.cos(yaw);
   const sz = z + back * Math.sin(yaw);
-  const stoneSurface = generator.surfaceHeight(Math.floor(sx / VOXEL_SIZE), Math.floor(sz / VOXEL_SIZE));
+  const stoneSurface = generator.groundHeight(sx, sz) / VOXEL_SIZE;
   out.push({
     type: "prop",
     id: (id ^ 0x5eed5eed) >>> 0,
@@ -470,7 +470,8 @@ export function placeCell(
   const kind = pick(TABLES[biome], roll);
   if (kind === undefined) return -1;
 
-  const surface = generator.surfaceHeight(worldX, worldZ);
+  // Where things stand is the mesh's height there (smooth, in voxel units), not the rounded column.
+  const surface = generator.groundHeight((worldX + 0.5) * VOXEL_SIZE, (worldZ + 0.5) * VOXEL_SIZE) / VOXEL_SIZE;
   const id = treeHashAt(worldX, worldZ, seed);
   const before = out.length;
 
@@ -501,12 +502,8 @@ export function placeCell(
 }
 
 /**
- * What one chunk owns.
- *
- * Every vertical layer of a column is loaded at once, so without a
- * tie-breaker each layer would spawn its own copy of the same thing. A
- * column's contents belong to the single layer whose Y range contains the
- * surface voxel at its candidate point; every other layer skips it.
+ * What one ground tile owns: the contents of its column. (`cy` is always 0 now; a nonzero one
+ * owns nothing, as a safeguard against a stray layer spawning a second copy.)
  */
 export function placeVegetation(
   generator: TerrainGenerator,
@@ -518,6 +515,6 @@ export function placeVegetation(
 ): Placement[] {
   out.length = 0;
   const surface = placeCell(generator, cx, cz, seed, out);
-  if (surface < 0 || floorDiv(surface, CHUNK_SIZE) !== cy) out.length = 0;
+  if (surface < 0 || cy !== 0) out.length = 0;
   return out;
 }

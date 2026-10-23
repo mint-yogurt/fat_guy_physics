@@ -10,6 +10,7 @@ import {
   Vector3,
   Euler,
   PerspectiveCamera,
+  type Object3D,
   type WebGPURenderer,
 } from "three/webgpu";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -18,12 +19,14 @@ import {
   AvatarAction,
   CHUP_CYCLE_SECONDS,
   HoldStyle,
+  leavesHandOnThrow,
   SCOOP_CYCLE_SECONDS,
   SHAKE_CYCLE_SECONDS,
   THROW_FOLLOW_SECONDS,
   ThrowWatcher,
   type AvatarPose,
 } from "@fgp/shared/items/avatarPose";
+import { ItemType } from "@fgp/shared/items/inventory";
 import { placementOf } from "@fgp/shared/items/placement";
 
 import { HeldItemSlot, type HeldItemSources } from "./heldItems.ts";
@@ -130,6 +133,8 @@ export class ArmViewmodel {
   private readonly throws = new ThrowWatcher();
   private readonly swordQuat = new Quaternion();
   private readonly spearQuat = new Quaternion();
+  /** A fishing rod drawn back for a cast: tip up and back over the shoulder, towards the camera. */
+  private readonly rodBackQuat = new Quaternion();
 
   private readonly baseQuat = new Quaternion();
   private readonly poseQuat = new Quaternion();
@@ -227,6 +232,8 @@ export class ArmViewmodel {
       STICK_AXIS,
       new Vector3(0.15, 1, 0).normalize(),
     );
+    // Arm +X is camera up and arm +Y is forward, so -Y is back towards the camera.
+    this.rodBackQuat.setFromUnitVectors(STICK_AXIS, new Vector3(0.8, -0.45, 0).normalize());
 
     this.shoulder.scale.setScalar(ARM_SCALE);
     this.shoulder.position.copy(SHOULDER);
@@ -404,9 +411,10 @@ export class ArmViewmodel {
     // A thrown stick or log has left the hand for the first part of the
     // follow-through; the next one from the stack appears as it ends.
     const throwable =
-      style === HoldStyle.Blade ||
-      style === HoldStyle.Carry ||
-      style === HoldStyle.Ball;
+      (style === HoldStyle.Blade ||
+        style === HoldStyle.Carry ||
+        style === HoldStyle.Ball) &&
+      leavesHandOnThrow(held);
     this.held.show(held, !throwable || this.kick <= 0.35);
     if (style === HoldStyle.Carry) {
       this.holder.position.copy(LOG_REST);
@@ -419,8 +427,15 @@ export class ArmViewmodel {
       this.holder.quaternion.identity();
     } else {
       this.holder.position.copy(STICK_GRIP);
-      this.holder.quaternion.copy(this.swordQuat).slerp(this.spearQuat, draw);
+      this.holder.quaternion.copy(this.swordQuat);
+      if (held === ItemType.FishingRod) {
+        // A cast draws the rod back over the shoulder and whips it forward on release.
+        this.holder.quaternion.slerp(this.rodBackQuat, draw).slerp(this.spearQuat, lunge);
+      } else {
+        this.holder.quaternion.slerp(this.spearQuat, draw);
+      }
     }
+    this.held.settleRod(draw < 0.02 && lunge < 0.02);
 
     // Thumb folds up along the fingers (the chop) unless scooping, where it
     // opens back out a little as if to hold the scoop.
@@ -430,6 +445,14 @@ export class ArmViewmodel {
       .copy(THUMB_ROOT)
       .sub(WRIST)
       .add(new Vector3(THUMB_FOLD_SHIFT * fold, 0, 0));
+  }
+
+  /**
+   * A named point on the item in the hand (the fishing rod's line tip). The arm has its own
+   * scene in view space, so the point's world position is in the camera's frame.
+   */
+  heldAnchor(name: string): Object3D | undefined {
+    return this.held.anchor(name);
   }
 
   /** Draws the arm over whatever the main pass left, ignoring its depth. */

@@ -1,5 +1,6 @@
 import { createSphereCollision, sweepSphere, type SolidQuery } from "../sim/collision.ts";
 import { VOXEL_SIZE } from "../sim/constants.ts";
+import { solidContains, type OrientedSolid } from "../sim/sceneQuery.ts";
 import { groundTop } from "../sim/skate.ts";
 
 /**
@@ -143,15 +144,24 @@ export interface Trunk {
  */
 export class TrunkQuery implements SolidQuery {
   readonly trunks: Trunk[] = [];
+  /**
+   * Every placed building piece near, at rest or not, walkable or not (a
+   * ladder is not solid to the player but a snowball still hits it). Kept by
+   * the build system.
+   */
+  readonly solids: OrientedSolid[] = [];
 
   constructor(private readonly base: SolidQuery) {}
 
   isSolid(vx: number, vy: number, vz: number): boolean {
     if (this.base.isSolid(vx, vy, vz)) return true;
-    if (this.trunks.length === 0) return false;
+    if (this.trunks.length === 0 && this.solids.length === 0) return false;
     const px = (vx + 0.5) * VOXEL_SIZE;
     const py = (vy + 0.5) * VOXEL_SIZE;
     const pz = (vz + 0.5) * VOXEL_SIZE;
+    for (const solid of this.solids) {
+      if (solidContains(solid, px, py, pz)) return true;
+    }
     for (const trunk of this.trunks) {
       if (py < trunk.y0 || py > trunk.y1) continue;
       const dx = px - trunk.x;

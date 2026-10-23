@@ -176,6 +176,29 @@ export const TERRAIN = {
   },
 } as const;
 
+// --- the ground's surface -------------------------------------------------
+
+/**
+ * How the ground looks: a low-poly heightfield whose lattice spacing is `GROUND_STEP`
+ * (groundField.ts), textured with big tiling images (grass, dirt, snow), N64 style.
+ * Frequencies are noise cycles per voxel unit (0.1 m), like TERRAIN's.
+ */
+export const GROUND = {
+  /** Metres of ground one repeat of a ground texture covers. Big, so the pixels stay chunky. */
+  textureTileMeters: 6.4,
+  /** Where grass gives way to dirt: a slow noise field, thresholded. */
+  dirtFrequency: 0.011, // ~9 m patches
+  dirtThreshold: 0.12,
+  dirtEdge: 0.1,
+  /** Slope (rise over run) at which grass starts turning to dirt, and is all dirt. */
+  slopeDirtStart: 0.55,
+  slopeDirtFull: 1.1,
+  /** How far Halloween's ground is drained of colour (0 = untouched, 1 = grey). */
+  halloweenDesaturation: 0.7,
+  /** Halloween's ground is also darker: a night-time soil. */
+  halloweenDarkening: 0.55,
+} as const;
+
 // --- per-region spawns ----------------------------------------------------
 
 export interface BiomeSection {

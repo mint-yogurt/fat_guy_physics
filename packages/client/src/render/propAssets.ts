@@ -5,7 +5,6 @@ import {
   Group,
   Mesh,
   MeshLambertNodeMaterial,
-  NearestFilter,
   SRGBColorSpace,
   TextureLoader,
   type Material,
@@ -20,6 +19,7 @@ import {
   type PropKind,
 } from "@fgp/shared/worldgen/props";
 import { litByBulbs } from "./bulbLights.ts";
+import { nearestify } from "./n64Texture.ts";
 import { hasTopFace, splitTopFace } from "./containerLook.ts";
 
 /**
@@ -98,9 +98,8 @@ async function loadMap(
       // glTF's UV origin is the top-left, which is what flipY=false means.
       texture.flipY = false;
       texture.colorSpace = SRGBColorSpace;
-      // Pixel art: nearest on magnification, or it smears at arm's length.
-      texture.magFilter = NearestFilter;
-      return texture;
+      // Pixel art, N64 style: nearest, no mipmaps.
+      return nearestify(texture);
     });
     cache.set(file, pending);
   }
@@ -146,7 +145,7 @@ async function loadTemplate(
         new MeshLambertNodeMaterial({
           color: new Color(look?.color ?? 0xffffff),
           map:
-            embedded ??
+            (embedded === null ? null : nearestify(embedded)) ??
             (file === undefined ? null : await loadMap(file, textures)),
           // Some of these files come out of Blender inside out, and a doubled
           // face costs nothing on a mesh this small.

@@ -12,6 +12,7 @@ import {
   PerspectiveCamera,
   Quaternion,
   Scene,
+  SRGBColorSpace,
   TextureLoader,
   Vector3,
   type Texture,
@@ -58,6 +59,7 @@ import {
   ItemType,
   itemTypeFromName,
 } from "@fgp/shared/items/inventory";
+import { createFishingFrame, Fishing } from "@fgp/shared/items/fishing";
 import { PICKUP_REACH, PickupField, type Pickup } from "@fgp/shared/items/pickupField";
 import {
   CONTAINER_ITEMS,
@@ -67,8 +69,11 @@ import {
   inContainerReach,
   isContainerKind,
 } from "@fgp/shared/items/container";
-import { CraftingBench } from "@fgp/shared/items/crafting";
+import { CraftingBench, RecipeBook } from "@fgp/shared/items/crafting";
 import { PlacementPlanner, placementOf, type PlacementPlan } from "@fgp/shared/items/placement";
+import { BuildField, createBuildHit, pieceSpecOf } from "@fgp/shared/items/building";
+import { PiecePlanner, aimAtSurface, createSurfaceAim } from "@fgp/shared/items/buildPlan";
+import { PlacementOrientation } from "@fgp/shared/items/placementControl";
 import { ItemCursor } from "@fgp/shared/items/itemCursor";
 import {
   PUMP_BUFFER_SECONDS,
@@ -83,6 +88,7 @@ import {
   ropeSpecFor,
   RopeField,
   BallRopeBody,
+  PlayerRopeBody,
   XMAS_LIGHTS,
   type RopeBody,
   type Rope,
@@ -90,6 +96,7 @@ import {
   type RopeTie,
   type RopeVec,
 } from "@fgp/shared/items/rope";
+import { SpringStride } from "@fgp/shared/items/springShoes";
 import {
   createSnowballHit,
   SNOW_UNIT_RADIUS,
@@ -100,6 +107,14 @@ import {
   type Snowball,
 } from "@fgp/shared/items/snowball";
 import { MapData } from "@fgp/shared/map/mapData";
+import {
+  applyPlayer,
+  applyWorld,
+  capturePlayer,
+  captureWorld,
+  worldRevision,
+  type WorldParts,
+} from "@fgp/shared/save/gameSave";
 import { SceneSolidQuery, type OrientedBody } from "@fgp/shared/sim/sceneQuery";
 import {
   CHUNK_METERS,
@@ -116,7 +131,7 @@ import { Atmosphere } from "./render/atmosphere.ts";
 import { InputState } from "./input/inputState.ts";
 import { Leaves } from "./render/leaves.ts";
 import { createPieceHit, LogSystem } from "./physics/logSystem.ts";
-import { PieceRopeBody } from "./physics/ropeBodies.ts";
+import { BuildPieceRopeBody, PieceRopeBody } from "./physics/ropeBodies.ts";
 import { ThrownSticks } from "./physics/thrownSticks.ts";
 import { TrampolineSystem } from "./physics/trampolineSystem.ts";
 import { SKATE_BOARD_HEIGHT } from "@fgp/shared/sim/skate";
@@ -124,6 +139,7 @@ import { LooseBoard } from "@fgp/shared/sim/looseBoard";
 import { LooseBoardsView, SkateboardView } from "./render/skateboardView.ts";
 import { TreeLightsView } from "./render/treeLights.ts";
 import { RopesView } from "./render/ropeView.ts";
+import { FishingView } from "./render/fishingView.ts";
 import { SnowballsView, SnowPuffs } from "./render/snowballView.ts";
 import { GOO_SPRAY_COLORS, GooStains } from "./render/gooMaterial.ts";
 import { VesselsView } from "./render/vesselView.ts";
@@ -139,7 +155,9 @@ import {
   type PropDamageSource,
 } from "@fgp/shared/sim/propDamage";
 import { DEBUG } from "./debug.ts";
-import { loadItemAssets } from "./render/itemAssets.ts";
+import { BrowserSaveStore } from "./save/browserSaveStore.ts";
+import { SaveManager } from "./save/saveManager.ts";
+import { loadItemAssets, ROD_TIP_NAME } from "./render/itemAssets.ts";
 import type { HeldItemSources } from "./render/heldItems.ts";
 import { PhysicsWorld } from "./physics/physicsWorld.ts";
 import { CameraPerspective, PlayerCamera } from "./render/playerCamera.ts";
@@ -149,12 +167,15 @@ import { PropRenderer } from "./render/propRenderer.ts";
 import { PlayerModel } from "./render/playerModel.ts";
 import { ArmViewmodel } from "./render/armViewmodel.ts";
 import { createRenderer, installResizeHandler, isRenderable } from "./render/renderer.ts";
+import { LowResPass } from "./render/n64Pass.ts";
+import { nearestify } from "./render/n64Texture.ts";
+import { RenderSettingsStore } from "./render/renderSettings.ts";
 import { CRUMB_BURST, flakeRgb, GOO_BURST, Snow, SnowFlakeBurst } from "./render/snow.ts";
 import { Shatter } from "./render/shatter.ts";
 import { FlyingChunks } from "./render/flyingChunks.ts";
 import { loadTreeAssets } from "./render/treeAssets.ts";
 import { TreeRenderer } from "./render/treeRenderer.ts";
-import { createVoxelMaterial } from "./render/voxelMaterial.ts";
+import { createTerrainMaterial } from "./render/terrainMaterial.ts";
 import { WorldRenderer } from "./render/worldRenderer.ts";
 import { GameAudio } from "./audio/gameAudio.ts";
 import {
@@ -168,6 +189,8 @@ import { ControlHints } from "./ui/controlHints.ts";
 import { Hotbar } from "./ui/hotbar.ts";
 import { InventoryScreen } from "./ui/inventoryScreen.ts";
 import { PlacementPreview } from "./render/placementPreview.ts";
+import { PieceMeshes } from "./render/pieceMesh.ts";
+import { BuildSystem } from "./physics/buildSystem.ts";
 import { MapView } from "./ui/mapView.ts";
 import { TrickBanner } from "./ui/trickBanner.ts";
 import { FrameStats, Hud } from "./ui/hud.ts";
@@ -180,19 +203,16 @@ const SEED = 1337;
 const SPAWN_CLEARANCE = 2;
 
 /**
- * Scoop tuning, from src/main.cpp. The anchor epsilons are the interesting
- * ones: re-raycasting every tick while the player holds still would walk the
- * dig point deeper along the view ray, drilling a tunnel instead of
- * hollowing out one spot. So the first tick of a gesture raycasts, and
- * subsequent ticks reuse that hit point until the eye moves 5cm or the aim
- * turns ~5.7 degrees.
+ * Scoop tuning, from src/main.cpp. The scoop acts on trees (knocks lights and foliage off),
+ * snowbanks and snowballs; it does not dig the ground. The first tick of a gesture raycasts
+ * and subsequent ticks reuse that hit point until the eye moves 5cm or the aim turns ~5.7
+ * degrees, so holding still scoops one spot rather than walking along the view ray.
  */
-/** One scoop per swing of the arms, so the dirt goes when the hands dip. */
-const DIG_TICK_SECONDS = SCOOP_CYCLE_SECONDS;
-const DIG_REACH_METERS = 5;
-const DIG_RADIUS_METERS = 0.35;
-const DIG_REANCHOR_POSITION = 0.05;
-const DIG_REANCHOR_DIRECTION = 0.995;
+/** One scoop per swing of the arms. */
+const SCOOP_TICK_SECONDS = SCOOP_CYCLE_SECONDS;
+const SCOOP_REACH_METERS = 5;
+const SCOOP_REANCHOR_POSITION = 0.05;
+const SCOOP_REANCHOR_DIRECTION = 0.995;
 
 /** Two chups per swing cycle, as the C++ build had it. */
 const CHUP_TICK_SECONDS = CHUP_CYCLE_SECONDS / 2;
@@ -298,8 +318,8 @@ const HALLOWEEN_AMBIENCE_MAX_SECONDS = 70;
 const TRAMPOLINE_PICKUP_REACH = 4;
 /** How far away a tied string of xmas lights can be picked up from, metres. */
 const ROPE_PICKUP_REACH = 4;
-/** How far in front of the eye the loose end of a string hovers when there is nothing to tie it to, metres. */
-const ROPE_HOVER_DISTANCE = 2.5;
+/** A held string lets go if it is stretched to this many times its length (a respawn, a teleport). */
+const ROPE_SNAP_RATIO = 1.7;
 
 /** Field of view added at full skate speed, degrees, for a sense of speed. */
 const SKATE_FOV_BOOST = 10;
@@ -349,8 +369,15 @@ function requireElement<T extends Element>(selector: string): T {
   return el;
 }
 
+/** A ground texture: loaded like any other, but its colours are sRGB as painted. */
+async function loadGroundTexture(url: string): Promise<Texture> {
+  const map = await loadTexture(url);
+  map.colorSpace = SRGBColorSpace;
+  return map;
+}
+
 function loadTexture(url: string): Promise<Texture> {
-  return new TextureLoader().loadAsync(url);
+  return new TextureLoader().loadAsync(url).then(nearestify);
 }
 
 /**
@@ -370,6 +397,21 @@ async function start(): Promise<void> {
   const appearance = await askAppearance(requireElement<HTMLDivElement>("#charcreate"), () =>
     audio.play("menuAccept", { variance: 1 }),
   );
+
+  // Singleplayer saves live in this browser (see save/). `?save=0` plays without
+  // reading or writing one; `?reset=1` throws the saved game away and starts over.
+  const urlParams = new URLSearchParams(window.location.search);
+  const saving = urlParams.get("save") !== "0";
+  const saveStore = new BrowserSaveStore();
+  if (saving && urlParams.get("reset") === "1") {
+    await saveStore.clear();
+    urlParams.delete("reset");
+    const query = urlParams.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${query === "" ? "" : `?${query}`}`);
+  }
+  const [playerSave, worldSave] = saving
+    ? await Promise.all([saveStore.loadPlayer(), saveStore.loadWorld()])
+    : [undefined, undefined];
 
   const canvas = requireElement<HTMLCanvasElement>("#viewport");
   const bundle = await createRenderer(canvas);
@@ -398,11 +440,23 @@ async function start(): Promise<void> {
   // the fade it exists to hide.
   const camera = new PerspectiveCamera(90, window.innerWidth / window.innerHeight, 0.1, 400);
 
+  // The N64 picture: the scene is drawn small and scaled up (render/n64Pass.ts). The picture's
+  // shape, not the window's, sets the camera's aspect (the 4:3 / 16:9 option).
+  const renderSettings = new RenderSettingsStore();
+  const lowRes = new LowResPass(renderer, renderSettings, (aspect) => {
+    camera.aspect = aspect;
+    camera.updateProjectionMatrix();
+  });
+
   // assets/ is served from the repo root via Vite's publicDir, so these paths
   // mirror the C++'s asset layout rather than being a second copy.
   const cobble = await loadTexture("/textures/cobble.png");
-  const voxelMaterial = createVoxelMaterial(cobble);
-  const material = voxelMaterial.material;
+  const terrainMaterial = createTerrainMaterial({
+    grass: await loadGroundTexture("/textures/grass2_TWP.png"),
+    dirt: await loadGroundTexture("/textures/dirt1_twp.png"),
+    snow: await loadGroundTexture("/textures/snow_64x64.png"),
+  });
+  const material = terrainMaterial.material;
   const bushTexture = await loadTexture("/billboard/bush.png");
   const leafIcon = await loadTexture("/icons/leaf.png");
   const itemAssets = await loadItemAssets();
@@ -426,7 +480,7 @@ async function start(): Promise<void> {
   const worldRenderer = new WorldRenderer(scene, material, treeRenderer, propRenderer, bushTexture);
   hud.set("WORKERS", String(source.workerCount));
 
-  const atmosphere = new Atmosphere(scene, voxelMaterial, hemisphere, sun, radius);
+  const atmosphere = new Atmosphere(scene, terrainMaterial, hemisphere, sun, radius);
   const snow = new Snow(scene);
   /** The same flakes as the weather, thrown out where a snowman is hit. */
   const flakeBurst = new SnowFlakeBurst(scene);
@@ -465,7 +519,9 @@ async function start(): Promise<void> {
   const pickupRenderer = new PickupRenderer(scene, itemAssets, { [ItemType.Leaf]: leafIcon }, propAssets);
   const trampolines = new TrampolineField();
   const trampolineSystem = new TrampolineSystem(scene, itemAssets, trampolines);
-  const thrown = new ThrownSticks(scene, itemAssets, world, pickups, trampolines);
+  // Building pieces: the sim's field of them (saved, climbed, hit); BuildSystem below makes them physical.
+  const buildField = new BuildField();
+  const thrown = new ThrownSticks(scene, itemAssets, world, pickups, trampolines, buildField);
   thrown.onHit = (x, y, z, hit, propId) => {
     audio.play("stickTick", {
       gain: hearing(x, y, z),
@@ -496,12 +552,46 @@ async function start(): Promise<void> {
   const snowPuffs = new SnowPuffs(scene);
   /** Xmas lights tied between two things, and the first end of one being tied. */
   const ropes = new RopeField();
-  const ropesView = new RopesView(scene, itemAssets.ropeParts, XMAS_LIGHTS.segments);
+  const ropesView = new RopesView(scene, itemAssets.ropeParts);
   const treeLights = new TreeLightsView(scene, itemAssets.ropeParts);
   treeRenderer.lights = treeLights;
+  /** The fishing rod's cast and line, and the world the rod sees this frame (its settings: items/fishing.ts). */
+  const fishing = new Fishing();
+  const fishingFrame = createFishingFrame();
+  const fishingInput = { active: false, cast: false, reel: false };
+  const fishingView = new FishingView(scene, itemAssets.ropeParts, fishing);
+  /** Where the line leaves the rod as drawn, world space, as of the last frame; unset until the rod has been seen. */
+  const rodTip = new Vector3();
+  let rodTipSeen = false;
   let ropeFirst: RopeTie | undefined;
   /** Strings run together into the one being placed: right mouse adds one. */
   let ropeStrings = 1;
+  /** The player's hand as the free end of the string being placed. */
+  const handBody = new PlayerRopeBody(player, elasticColliders[0]);
+  /**
+   * While one end is tied, the string is a real rope from there to the player's
+   * hand, as long as the strings run together reach: it hangs, drags what it is
+   * tied to, and pulls the player up short.
+   */
+  let ropeLive: Rope | undefined;
+  const handScratch: RopeVec = { x: 0, y: 0, z: 0 };
+  /** (Re)lays the live rope from the first tie to the hand at the current number of strings, keeping its shape. */
+  const runLiveRope = (): void => {
+    if (ropeFirst === undefined) return;
+    const spec = ropeSpecFor(XMAS_LIGHTS, ropeStrings);
+    handBody.tiePoint(handScratch);
+    const rope = ropes.add(
+      spec,
+      ropeFirst,
+      { x: handScratch.x, y: handScratch.y, z: handScratch.z, body: handBody },
+      ropeMaxReach(spec),
+    );
+    if (ropeLive !== undefined) {
+      rope.seedFrom(ropeLive);
+      ropes.remove(ropeLive);
+    }
+    ropeLive = rope;
+  };
   const ropeHit: RopeHit = { distance: 0 };
   const ropeScratch: RopeVec = { x: 0, y: 0, z: 0 };
   const snowballHit = createSnowballHit();
@@ -532,12 +622,49 @@ async function start(): Promise<void> {
   const groundAt = (x: number, z: number): number =>
     Math.max(terrainAt(x, z), trampolines.topAt(x, z) ?? -Infinity);
 
-  // Debug start: a trampoline in the inventory to place. See debug.ts.
-  if (DEBUG) {
+  // Bring back the last session, before the first chunk is asked for: the world's
+  // edits must be in before terrain streams, and the player's spot decides which
+  // terrain that is.
+  // The bodies and meshes that make the building pieces physical; thrown things hit them through the trunk query.
+  const pieceMeshes = new PieceMeshes(itemAssets);
+  const buildSystem = new BuildSystem(
+    buildField,
+    world,
+    sceneQuery,
+    scene,
+    pieceMeshes,
+    Math.max(8, (radius - 1.5) * CHUNK_METERS),
+    trunkQuery.solids,
+  );
+  player.rails = buildField;
+  const worldParts: WorldParts = { world, containers, trampolines, pieces: buildField, pickups };
+  if (worldSave !== undefined) applyWorld(worldSave, worldParts, groundAt, performance.now() / 1000);
+  /** Which items the player has held, hence which recipes they know. */
+  const recipes = new RecipeBook();
+  if (playerSave !== undefined) applyPlayer(playerSave, player, inventory, recipes);
+  const saveManager = saving
+    ? new SaveManager(saveStore, {
+        capturePlayer: () => capturePlayer(player, inventory, recipes),
+        captureWorld: () => captureWorld(worldParts),
+        worldRevision: () => worldRevision(worldParts),
+      })
+    : undefined;
+  hud.set("SAVE", saving ? (playerSave === undefined ? "new game" : "continued") : "off (?save=0)");
+
+  // Debug start: a trampoline in the inventory to place. See debug.ts. Only for a
+  // new game: a continued one already has whatever it had when it was saved.
+  if (DEBUG && playerSave === undefined) {
+    // The building pieces first, so they are on the hotbar (slots 2-6) to try straight away.
+    inventory.tryAdd(ItemType.Ladder, 6);
+    inventory.tryAdd(ItemType.Plywood, 12);
+    inventory.tryAdd(ItemType.Log, 10);
+    inventory.tryAdd(ItemType.Toobifer, 12);
+    inventory.tryAdd(ItemType.Wheel, 4);
     inventory.tryAdd(ItemType.Trampoline);
     inventory.tryAdd(ItemType.Skateboard);
     inventory.tryAdd(ItemType.Snowball, 20);
     inventory.tryAdd(ItemType.XmasLights, 10);
+    inventory.tryAdd(ItemType.FishingRod);
     inventory.tryAdd(ItemType.Rock, 20);
     inventory.tryAdd(ItemType.MountainLightning, 10);
     inventory.tryAdd(ItemType.Eggnog, 10);
@@ -545,11 +672,12 @@ async function start(): Promise<void> {
     inventory.tryAdd(ItemType.Goo, 10);
     inventory.tryAdd(ItemType.Metal, 10);
     inventory.tryAdd(ItemType.Candy, 10);
+    inventory.tryAdd(ItemType.SpringShoes);
     inventory.tryAdd(ItemType.PresentSmall, 2);
     inventory.tryAdd(ItemType.PresentBig, 2);
     inventory.tryAdd(ItemType.CandyBucket, 2);
-    hud.set("DEBUG", "ON");
   }
+  if (DEBUG) hud.set("DEBUG", "ON");
 
   /** Volume 0..1 for a sound at a point: full beside the player, fading to nothing at HEARING_METERS. */
   const hearing = (x: number, y: number, z: number): number => {
@@ -571,7 +699,7 @@ async function start(): Promise<void> {
   };
 
   /** The crafting inputs and the stack on the mouse; both belong to the inventory screen. */
-  const crafting = new CraftingBench();
+  const crafting = new CraftingBench(recipes);
   const itemCursor = new ItemCursor();
   const inventoryScreen = new InventoryScreen(
     requireElement<HTMLDivElement>("#inventory"),
@@ -605,7 +733,16 @@ async function start(): Promise<void> {
   );
   /** Where a held placeable would go and whether it can, and the see-through copy that shows it. */
   const planner = new PlacementPlanner(world, trampolines);
-  const placementPreview = new PlacementPreview(scene, heldSources);
+  const piecePlanner = new PiecePlanner(world, buildField);
+  const placementPreview = new PlacementPreview(scene, { ...heldSources, pieces: pieceMeshes });
+  /** The player's own turn of what they are placing (scroll steps it, R and the mouse turn it freely). */
+  const orientation = new PlacementOrientation();
+  const surfaceAim = createSurfaceAim();
+  const buildHit = createBuildHit();
+  let orientedItem: ItemType | undefined;
+  /** A short click on a log places it; a held one bowls (a log has both uses on the left button). */
+  const TAP_PLACE_CHARGE = 0.12;
+  let tapPlace = false;
   const reachableContainers: Prop[] = [];
   /** The container the player can open: the one under the crosshair if it is in reach, else the nearest. */
   const containerInReach = (preferredId: number): Prop | undefined => {
@@ -645,6 +782,14 @@ async function start(): Promise<void> {
       if (trampolines.place(plan.x, plan.y, plan.z) === undefined) return false;
       inventory.tryConsumeSelected();
       audio.play("trampolineSet", { pitch: -3 });
+      return true;
+    }
+    if (pieceSpecOf(type) !== undefined) {
+      const spec = pieceSpecOf(type);
+      if (spec === undefined || !inventory.tryConsumeSelected()) return false;
+      // A piece that grips (a ladder) is held where it is put; the rest are set down to settle under physics.
+      buildField.place(type, plan.x, plan.y, plan.z, { x: plan.qx, y: plan.qy, z: plan.qz, w: plan.qw }, spec.grips);
+      audio.play("trampolineSet", { pitch: type === ItemType.Ladder ? 1 : -1, variance: 1 });
       return true;
     }
     const container = containerKindOfItem(type);
@@ -917,6 +1062,7 @@ async function start(): Promise<void> {
     .then((created) => {
       physics = created;
       logs = new LogSystem(created, world, sceneQuery, scene, dropItem, itemAssets);
+      buildSystem.attachPhysics(created, logs);
       logs.onImpact = (x, y, z, strength) => {
         audio.play("logImpact", {
           gain: hearing(x, y, z) * Math.min(1, 0.3 + strength / 12),
@@ -953,8 +1099,7 @@ async function start(): Promise<void> {
   const playerInput = createPlayerInput();
 
   installResizeHandler(bundle, (w, h) => {
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
+    lowRes.resize(w, h);
   });
 
   // Nothing is awaited before the loop starts. The initial load is just the
@@ -983,6 +1128,9 @@ async function start(): Promise<void> {
   let spawned = false;
   /** Seconds left in which a landing still counts as timed with a jump press. */
   let jumpBuffer = 0;
+  const springStride = new SpringStride();
+  /** The spring shoes are the selected item this frame. */
+  let springShoesOn = false;
 
   // Sound: things that happen inside the sim are noticed by watching their counters.
   const stride = new StrideTracker();
@@ -1138,8 +1286,13 @@ async function start(): Promise<void> {
   let shakeRattle = 0;
   const prompt = requireElement<HTMLDivElement>("#prompt");
   const nearTrees: Tree[] = [];
-  let digCooldown = 0;
-  let digAnchored = false;
+  let scoopCooldown = 0;
+  /** For {@link handsSpent}: what was held last frame, and in which slot. */
+  let lastHeldType: ItemType | undefined;
+  let lastHeldSlot = 0;
+  /** The held stack ran out mid-press: no scooping or chupping until the buttons are released. */
+  let handsSpent = false;
+  let scoopAnchored = false;
   let anchorOriginX = 0;
   let anchorOriginY = 0;
   let anchorOriginZ = 0;
@@ -1180,7 +1333,7 @@ async function start(): Promise<void> {
       camera,
       atmosphere,
       snow,
-      voxelMaterial,
+      terrainMaterial,
       get logs(): LogSystem | undefined {
         return logs;
       },
@@ -1229,15 +1382,30 @@ async function start(): Promise<void> {
     // The inventory screen takes the mouse and the keys: no looking, moving, swinging or aiming.
     const active = input.locked && !mapView.open && !inventoryScreen.open;
 
+    // What is in the hand, for the placement controls: scroll steps the turn of a placeable and
+    // R held turns it freely with the mouse (R is the ragball key otherwise).
+    const heldForPlacing = inventory.selectedItem()?.type;
+    const placingNow = placementOf(heldForPlacing) !== undefined;
+    if (heldForPlacing !== orientedItem) {
+      orientedItem = heldForPlacing;
+      orientation.reset();
+    }
     if (active) {
-      player.look(input.consumeMouseX(), input.consumeMouseY());
+      if (placingNow && input.isDown("KeyR")) {
+        orientation.drag(input.consumeMouseX(), input.consumeMouseY());
+      } else {
+        player.look(input.consumeMouseX(), input.consumeMouseY());
+      }
+      if (placingNow && wheel !== 0) {
+        orientation.step(Math.sign(wheel) * Math.max(1, Math.round(Math.abs(wheel) / 100)));
+      }
     }
 
     for (let slot = 0; slot < HOTBAR_SLOTS; slot++) {
       if (input.wasPressed(`Digit${String(slot + 1)}`)) inventory.selectSlot(slot);
     }
 
-    if (input.wasPressed("KeyR")) {
+    if (input.wasPressed("KeyR") && !placingNow) {
       const modeBefore = player.mode;
       player.toggleMode(sceneQuery);
       if (player.mode !== modeBefore) {
@@ -1264,6 +1432,7 @@ async function start(): Promise<void> {
     // Still "skating" while down after a bail, though the board is gone from
     // the hotbar by then: the rider's fall plays out on the skate state.
     const boardEquipped = inventory.selectedItem()?.type === ItemType.Skateboard;
+    springShoesOn = inventory.selectedItem()?.type === ItemType.SpringShoes;
     player.skating = boardEquipped || player.skate.isDown;
     const skateView = player.skating && player.mode === PlayerMode.Walking;
     if (skateView !== wasSkateView) {
@@ -1396,15 +1565,36 @@ async function start(): Promise<void> {
       // Landing on a mat gives back the speed it was landed with; a jump
       // timed with the landing (space held, or pressed just before) adds
       // a little. See items/trampoline.ts.
+      const pumping = player.mode === PlayerMode.Walking && (input.isDown("Space") || jumpBuffer > 0);
       const bounced = trampolines.afterPlayerStep(
         player,
         wasOnMat,
         preVy,
         FIXED_TIMESTEP,
         playerInput.jumpPressed,
-        player.mode === PlayerMode.Walking && (input.isDown("Space") || jumpBuffer > 0),
+        pumping,
       );
-      if (bounced > 0) {
+      // Spring shoes turn the step into a bound, and add to a mat's rebound.
+      // See items/springShoes.ts.
+      const sprung =
+        springShoesOn && player.mode === PlayerMode.Walking && !player.skating
+          ? springStride.afterPlayerStep(
+              player,
+              FIXED_TIMESTEP,
+              {
+                wasGrounded,
+                preVy,
+                moving: Math.hypot(playerInput.moveX, playerInput.moveZ) > 0.1,
+                jumped: playerInput.jumpPressed,
+                pumping,
+                matRebound: bounced,
+              },
+              player.jumpSpeed,
+            )
+          : 0;
+      if (sprung > 0) {
+        audio.play("trampolineBounce", { gain: 0.3 * Math.min(1, 0.4 + sprung / 16), pitch: 7, variance: 1 });
+      } else if (bounced > 0) {
         audio.play("trampolineBounce", { gain: 0.5 * Math.min(1, 0.4 + bounced / 20) });
       } else if (!wasGrounded && player.grounded) {
         // A bail has its own sound; the landing that caused it is not another.
@@ -1477,7 +1667,7 @@ async function start(): Promise<void> {
     }
     if (player.skate.pushes !== seenPushes) {
       seenPushes = player.skate.pushes;
-      audio.play("skatePush", { gain: 0.7, variance: 1 });
+      audio.play("skatePush", { gain: 0.35, variance: 1 });
     }
     if (player.skate.bails !== seenBails) {
       seenBails = player.skate.bails;
@@ -1516,7 +1706,11 @@ async function start(): Promise<void> {
     const ejected = player.skate.ejected;
     if (ejected !== undefined) {
       player.skate.ejected = undefined;
-      if (boardEquipped) inventory.tryConsumeSelected();
+      if (boardEquipped) {
+        inventory.tryConsumeSelected();
+        // Back to bare hands (hotbar 1) rather than an empty slot.
+        inventory.selectSlot(0);
+      }
       looseBoards.push(new LooseBoard(ejected));
     }
     for (let i = looseBoards.length - 1; i >= 0; i--) {
@@ -1632,8 +1826,19 @@ async function start(): Promise<void> {
       player.frontX,
       player.frontY,
       player.frontZ,
-      DIG_REACH_METERS,
+      SCOOP_REACH_METERS,
       hit,
+    );
+    // Placed building pieces, for aiming a placement at them and for picking them up.
+    buildField.raycast(
+      eyeX,
+      eyeY,
+      eyeZ,
+      player.frontX,
+      player.frontY,
+      player.frontZ,
+      SCOOP_REACH_METERS,
+      buildHit,
     );
     logs?.raycast(
       eyeX,
@@ -1642,7 +1847,7 @@ async function start(): Promise<void> {
       player.frontX,
       player.frontY,
       player.frontZ,
-      hit.kind === HitKind.None ? DIG_REACH_METERS : hit.distance,
+      hit.kind === HitKind.None ? SCOOP_REACH_METERS : hit.distance,
       pieceHit,
     );
     // A felled piece in front of whatever the scene ray found is what the
@@ -1657,40 +1862,51 @@ async function start(): Promise<void> {
       player.frontX,
       player.frontY,
       player.frontZ,
-      onPiece ? pieceHit.distance : hit.kind === HitKind.None ? DIG_REACH_METERS : hit.distance,
+      onPiece ? pieceHit.distance : hit.kind === HitKind.None ? SCOOP_REACH_METERS : hit.distance,
       snowballHit,
     );
     const onBall = snowballHit.ball !== undefined;
     const aimed = hit.kind !== HitKind.None && !onPiece && !onBall;
     const heldType = inventory.selectedItem()?.type;
 
+    // An empty hotbar slot has bare hands, like slot 1. But when the last of an
+    // item is used up with a button still down (the last trampoline placed with
+    // the left one), that same press must not start digging: wait for release.
+    if (heldType === undefined && lastHeldType !== undefined && inventory.selectedSlot === lastHeldSlot) {
+      handsSpent = true;
+    }
+    if (!input.isMouseDown(0) && !input.isMouseDown(2)) handsSpent = false;
+    lastHeldType = heldType;
+    lastHeldSlot = inventory.selectedSlot;
+    const handsFree = inventory.isUnarmedSelected && !handsSpent;
+
     // Walking only: there is no hand free to swing while tucked into a ball.
     // Scoop and chup are the Unarmed slot's actions: holding an item means
     // your hands are full. It is the whole of the tool system for now, and
     // the natural place future tools hook in.
-    const canDig =
+    const canScoop =
       active &&
       player.mode === PlayerMode.Walking &&
-      inventory.isUnarmedSelected &&
+      handsFree &&
       input.isMouseDown(0);
 
-    if (canDig) {
-      digCooldown -= rawDt;
-      if (digCooldown <= 0 && snowballHit.ball !== undefined) {
+    if (canScoop) {
+      scoopCooldown -= rawDt;
+      if (scoopCooldown <= 0 && snowballHit.ball !== undefined) {
         hitSnowball(snowballHit.ball);
-        digAnchored = false;
-        digCooldown = DIG_TICK_SECONDS;
-      } else if (digCooldown <= 0) {
+        scoopAnchored = false;
+        scoopCooldown = SCOOP_TICK_SECONDS;
+      } else if (scoopCooldown <= 0) {
         const sameAnchor =
-          digAnchored &&
+          scoopAnchored &&
           Math.hypot(eyeX - anchorOriginX, eyeY - anchorOriginY, eyeZ - anchorOriginZ) <=
-            DIG_REANCHOR_POSITION &&
+            SCOOP_REANCHOR_POSITION &&
           player.frontX * anchorDirX + player.frontY * anchorDirY + player.frontZ * anchorDirZ >=
-            DIG_REANCHOR_DIRECTION;
+            SCOOP_REANCHOR_DIRECTION;
 
         if (!sameAnchor) {
           if (aimed) {
-            digAnchored = true;
+            scoopAnchored = true;
             anchorOriginX = eyeX;
             anchorOriginY = eyeY;
             anchorOriginZ = eyeZ;
@@ -1705,11 +1921,11 @@ async function start(): Promise<void> {
             anchorPropId = hit.propId;
             anchorTreePart = hit.treePart;
           } else {
-            digAnchored = false;
+            scoopAnchored = false;
           }
         }
 
-        if (digAnchored && !anchorOnProp && !onPiece) {
+        if (scoopAnchored && !anchorOnProp && !onPiece) {
           if (anchorTreeId >= 0) {
             // A scoop anywhere on the tree shakes its xmas lights loose.
             const shaken = world.knockLights(anchorTreeId, worldRenderer);
@@ -1733,33 +1949,24 @@ async function start(): Promise<void> {
                 );
               }
             }
-          } else {
-            world.digSphere(
-              anchorCenterX,
-              anchorCenterY,
-              anchorCenterZ,
-              DIG_RADIUS_METERS,
-              worldRenderer,
-            );
-            audio.play("hit4", { variance: 2, gain: 0.8 });
           }
-        } else if (digAnchored && anchorOnProp && !onPiece) {
-          // Digging at a prop's centre would hollow the ground beside it, so
-          // a scoop does nothing to one -- except a snowbank, which is there
+          // Scooping bare ground does nothing: there is no digging in this game.
+        } else if (scoopAnchored && anchorOnProp && !onPiece) {
+          // A scoop does nothing to a prop -- except a snowbank, which is there
           // to be scooped.
           const kind = world.getProp(anchorPropId)?.kind;
           if (kind !== undefined && (PROP_METRICS[kind].scoopable === true || isBreakable(kind))) {
             harvestPropAt(anchorPropId, anchorCenterX, anchorCenterY, anchorCenterZ, "scoop");
           }
         }
-        digCooldown = DIG_TICK_SECONDS;
+        scoopCooldown = SCOOP_TICK_SECONDS;
       }
     } else {
       // Clamped at zero rather than left to run negative, so a
       // release-then-repress cannot fire a queued burst. Releasing also
       // drops the anchor: the next press always starts a fresh gesture.
-      digCooldown = 0;
-      digAnchored = false;
+      scoopCooldown = 0;
+      scoopAnchored = false;
     }
 
     // Chup is right mouse, and unlike the scoop it re-raycasts every tick:
@@ -1770,7 +1977,7 @@ async function start(): Promise<void> {
     const holdingStick = heldType === ItemType.Stick;
     const canChup =
       walking &&
-      ((inventory.isUnarmedSelected && input.isMouseDown(2)) ||
+      ((handsFree && input.isMouseDown(2)) ||
         (holdingStick && input.isMouseDown(0) && throwCharge === 0));
     if (canChup) {
       chupCooldown -= rawDt;
@@ -1796,6 +2003,7 @@ async function start(): Promise<void> {
           const chopX = tree?.x ?? hit.centerX;
           const chopZ = tree?.z ?? hit.centerZ;
           const chop = world.chopTree(hit.treeId, hit.centerY, worldRenderer);
+          if (chop.felled) buildSystem.disturb(chopX, hit.centerY, chopZ, (tree?.trunkRadiusMeters ?? 0.5) + 1);
           if (chop.landed) {
             audio.play("chopHit", { variance: 2 });
             if (chop.felled) audio.play("treeBreak");
@@ -1861,13 +2069,17 @@ async function start(): Promise<void> {
       }
     }
     let threw = false;
+    tapPlace = false;
     if (walking && throwButton >= 0 && input.isMouseDown(throwButton)) {
       if (throwCharge === 0) throwSlot = inventory.selectedSlot;
       // Never exactly zero once started, so a click shorter than a frame
       // still throws (weakly) on release.
       throwCharge = Math.max(1e-3, Math.min(1, throwCharge + rawDt / THROW_CHARGE_SECONDS));
     } else if (throwCharge > 0 && throwKind !== AvatarAction.Charge) {
-      if (inventory.tryConsumeSelected()) {
+      if (holdingLog && throwKind === AvatarAction.Bowl && throwCharge < TAP_PLACE_CHARGE) {
+        // A tap, not a throw: the log is placed (below) instead of bowled.
+        tapPlace = true;
+      } else if (inventory.tryConsumeSelected()) {
         if (throwKind === AvatarAction.Put) putSnowball(throwCharge, heldType);
         else if (holdingSnowball) rollSnowball(throwCharge, heldType);
         else throwLog(throwKind === AvatarAction.Bowl, throwCharge);
@@ -1913,28 +2125,67 @@ async function start(): Promise<void> {
 
     pickups.update(rawDt, now, groundAt, trampolines.restitutionAt.bind(trampolines));
 
+    // --- fishing rod: left mouse casts (hold to throw farther), right mouse reels in ---
+    // The sim lives in items/fishing.ts, with the rod's settings. The line leaves from the tip as it
+    // was drawn last frame, or from a guess in front of the eye until the rod has been on show.
+    const holdingRod = heldType === ItemType.FishingRod;
+    fishingFrame.tipX = rodTipSeen ? rodTip.x : eyeX + player.frontX * 1.2;
+    fishingFrame.tipY = rodTipSeen ? rodTip.y : eyeY + 0.3 + player.frontY * 1.2;
+    fishingFrame.tipZ = rodTipSeen ? rodTip.z : eyeZ + player.frontZ * 1.2;
+    fishingFrame.playerX = player.x;
+    fishingFrame.playerY = player.y;
+    fishingFrame.playerZ = player.z;
+    fishingFrame.frontX = player.frontX;
+    fishingFrame.frontY = player.frontY;
+    fishingFrame.frontZ = player.frontZ;
+    fishingInput.active = walking && holdingRod;
+    fishingInput.cast = input.isMouseDown(0);
+    fishingInput.reel = input.isMouseDown(2);
+    const fishingEvents = fishing.update(rawDt, fishingInput, fishingFrame, groundAt, pickups, inventory);
+    if (fishingEvents.cast) audio.play("whiff", { pitch: -3, gain: 0.8, variance: 1 });
+    if (fishingEvents.landed) audio.play("itemDrop", { variance: 1 });
+    if (fishingEvents.hooked) audio.play("ropeTie", { pitch: 7 });
+    if (fishingEvents.caught) audio.play("pickupAlt", { variance: 1 });
+    else if (fishingEvents.full) audio.play("craftError", { gain: 0.7 });
+
     // --- placing: a see-through copy of the held item stands where left mouse
     // would put it, green if it can go there and red if not ---
     const placement = placementOf(heldType);
     let plan: PlacementPlan | undefined;
-    if (
-      walking &&
-      heldType !== undefined &&
-      placement !== undefined &&
-      hit.kind !== HitKind.None &&
-      !onPiece
-    ) {
-      plan = planner.plan(
-        placement,
-        eyeX + player.frontX * hit.distance,
-        eyeZ + player.frontZ * hit.distance,
-        player,
-      );
-      placementPreview.show(heldType, plan);
-    } else {
-      placementPreview.hide();
+    if (walking && heldType !== undefined && placement !== undefined) {
+      if (placement.piece !== undefined) {
+        // A building piece goes against whatever surface is aimed at, at any angle.
+        aimAtSurface(
+          world,
+          hit,
+          buildHit,
+          eyeX,
+          eyeY,
+          eyeZ,
+          player.frontX,
+          player.frontY,
+          player.frontZ,
+          surfaceAim,
+        );
+        if (surfaceAim.valid) {
+          plan = piecePlanner.plan(placement.piece, surfaceAim, player, player.frontX, player.frontZ, orientation);
+        }
+      } else if (hit.kind !== HitKind.None && !onPiece) {
+        plan = planner.plan(
+          placement,
+          eyeX + player.frontX * hit.distance,
+          eyeZ + player.frontZ * hit.distance,
+          player,
+          orientation.spin,
+        );
+      }
     }
-    if (plan !== undefined && heldType !== undefined && input.wasMousePressed(0)) {
+    if (plan !== undefined && heldType !== undefined) placementPreview.show(heldType, plan);
+    else placementPreview.hide();
+    hud.set("PLACE", plan === undefined ? "--" : plan.valid ? "ok" : plan.block);
+    // A log is also bowled with the left button, so it is placed with a quick tap of it.
+    const placeClick = heldType === ItemType.Log ? tapPlace : input.wasMousePressed(0);
+    if (plan !== undefined && heldType !== undefined && placeClick) {
       if (!plan.valid || !placeHeld(heldType, plan)) audio.play("craftError", { gain: 0.7 });
     }
 
@@ -1942,7 +2193,6 @@ async function start(): Promise<void> {
     // Like a tool gun: the end goes on whatever the crosshair is on, which
     // can be a thing that moves (a rolled snowball, a felled piece), and the
     // string is spent once both ends are tied. Players will be tie points too.
-    let ropeText = "";
     const holdingLights = heldType === ItemType.XmasLights;
     if (!holdingLights || !walking) ropeFirst = undefined;
     const lightsHeld = holdingLights ? (inventory.selectedItem()?.count ?? 0) : 0;
@@ -1964,6 +2214,15 @@ async function start(): Promise<void> {
         ropeFirst = undefined;
       }
     }
+    if (ropeLive !== undefined && ropeFirst !== undefined) {
+      // Evicted by newer strings, or stretched out of all reason (a respawn): let go.
+      handBody.tiePoint(handScratch);
+      const gap = Math.hypot(handScratch.x - ropeFirst.x, handScratch.y - ropeFirst.y, handScratch.z - ropeFirst.z);
+      if (!ropes.ropes.includes(ropeLive) || gap > ropeLive.length * ROPE_SNAP_RATIO) {
+        ropeFirst = undefined;
+        audio.play("craftError", { gain: 0.7 });
+      }
+    }
     if (ropeFirst === undefined) ropeStrings = 1;
     let ropeAimed = false;
     let ropeDistance = -1;
@@ -1980,45 +2239,38 @@ async function start(): Promise<void> {
           : hit.kind !== HitKind.None
             ? hit.distance
             : -1;
+      // A placed building piece nearer than all of that is what the string goes on.
+      const onBuilt =
+        buildHit.piece !== undefined && (ropeDistance < 0 || buildHit.distance < ropeDistance);
+      if (onBuilt) ropeDistance = buildHit.distance;
+      const tieBody = (): RopeBody | undefined => {
+        if (onBuilt && buildHit.piece !== undefined) {
+          return new BuildPieceRopeBody(buildSystem, buildField, buildHit.piece, ropeX, ropeY, ropeZ);
+        }
+        if (onBall && snowballHit.ball !== undefined) {
+          return new BallRopeBody(snowballHit.ball, ropeX, ropeY, ropeZ);
+        }
+        if (onPiece && pieceHit.piece !== undefined && physics !== undefined) {
+          return new PieceRopeBody(physics, pieceHit.piece, ropeX, ropeY, ropeZ);
+        }
+        return undefined;
+      };
       if (ropeDistance >= 0) {
         ropeAimed = true;
-        const back = onBall || onPiece ? 0 : ROPE_TIE_STANDOFF;
+        const back = onBall || onPiece || onBuilt ? 0 : ROPE_TIE_STANDOFF;
         ropeX = eyeX + player.frontX * (ropeDistance - back);
         ropeY = eyeY + player.frontY * (ropeDistance - back);
         ropeZ = eyeZ + player.frontZ * (ropeDistance - back);
       }
 
-      // The loose end follows the aim: on the surface being looked at when it
-      // is within reach, otherwise hovering out in front, never further from
-      // the first tie than the string reaches.
+      // With one end tied, the other is in the hand (the live rope), and the
+      // second tie goes on whatever is aimed at, if the string reaches that far.
+      const chainSpec = ropeSpecFor(XMAS_LIGHTS, ropeStrings);
       let ropeSpan = 0;
       let onSurface = false;
-      const chainSpec = ropeSpecFor(XMAS_LIGHTS, ropeStrings);
-      if (ropeFirst !== undefined) {
-        const reach = ropeMaxReach(chainSpec);
-        const surfaceSpan = ropeAimed
-          ? Math.hypot(ropeX - ropeFirst.x, ropeY - ropeFirst.y, ropeZ - ropeFirst.z)
-          : Infinity;
-        onSurface = ropeAimed && surfaceSpan <= reach;
-        if (!onSurface) {
-          const out = Math.min(ROPE_HOVER_DISTANCE, ropeAimed ? ropeDistance : Infinity);
-          ropeX = eyeX + player.frontX * out;
-          ropeY = eyeY + player.frontY * out;
-          ropeZ = eyeZ + player.frontZ * out;
-          const gap = Math.hypot(ropeX - ropeFirst.x, ropeY - ropeFirst.y, ropeZ - ropeFirst.z);
-          if (gap > reach) {
-            const k = reach / gap;
-            ropeX = ropeFirst.x + (ropeX - ropeFirst.x) * k;
-            ropeY = ropeFirst.y + (ropeY - ropeFirst.y) * k;
-            ropeZ = ropeFirst.z + (ropeZ - ropeFirst.z) * k;
-          }
-        }
+      if (ropeFirst !== undefined && ropeAimed) {
         ropeSpan = Math.hypot(ropeX - ropeFirst.x, ropeY - ropeFirst.y, ropeZ - ropeFirst.z);
-        ropeText = onSurface
-          ? `${ropeSpan.toFixed(1)}m` + (ropeStrings > 1 ? `  ${ropeStrings} strings` : "")
-          : ropeAimed
-            ? `too far to tie  ${surfaceSpan.toFixed(1)}m`
-            : "";
+        onSurface = ropeSpan <= ropeMaxReach(chainSpec);
       }
 
       const tieLeft = input.wasMousePressed(0);
@@ -2027,29 +2279,19 @@ async function start(): Promise<void> {
         // Run another string on, to reach further. Nothing is tied by this.
         if (lightsHeld > ropeStrings && ropeStrings < ROPE_MAX_STRINGS) {
           ropeStrings++;
+          runLiveRope();
           audio.play("ropeTie", { variance: 0.5, pitch: 3 });
         } else {
           audio.play("craftError", { gain: 0.7 });
         }
       } else if (tieLeft && ropeFirst === undefined && ropeAimed) {
-        let body: RopeBody | undefined;
-        if (onBall && snowballHit.ball !== undefined) {
-          body = new BallRopeBody(snowballHit.ball, ropeX, ropeY, ropeZ);
-        } else if (onPiece && pieceHit.piece !== undefined && physics !== undefined) {
-          body = new PieceRopeBody(physics, pieceHit.piece, ropeX, ropeY, ropeZ);
-        }
-        ropeFirst = { x: ropeX, y: ropeY, z: ropeZ, body };
+        ropeFirst = { x: ropeX, y: ropeY, z: ropeZ, body: tieBody() };
         ropeStrings = 1;
+        runLiveRope();
         audio.play("ropeTie", { variance: 0.5 });
       } else if (tieLeft && ropeFirst !== undefined) {
         if (onSurface) {
-          let body: RopeBody | undefined;
-          if (onBall && snowballHit.ball !== undefined) {
-            body = new BallRopeBody(snowballHit.ball, ropeX, ropeY, ropeZ);
-          } else if (onPiece && pieceHit.piece !== undefined && physics !== undefined) {
-            body = new PieceRopeBody(physics, pieceHit.piece, ropeX, ropeY, ropeZ);
-          }
-          const tie: RopeTie = { x: ropeX, y: ropeY, z: ropeZ, body };
+          const tie: RopeTie = { x: ropeX, y: ropeY, z: ropeZ, body: tieBody() };
           ropes.add(chainSpec, ropeFirst, tie, planRope(chainSpec, ropeSpan).length);
           inventory.tryConsumeSelected(ropeStrings);
           ropeFirst = undefined;
@@ -2060,16 +2302,17 @@ async function start(): Promise<void> {
           audio.play("craftError", { gain: 0.7 });
         }
       }
-      if (ropeFirst !== undefined) {
-        ropesView.showPreview(ropeFirst, ropeX, ropeY, ropeZ, chainSpec.segments);
-      } else {
-        ropesView.showPreview(undefined, 0, 0, 0);
-      }
-    } else {
-      ropesView.showPreview(undefined, 0, 0, 0);
+    }
+    // Nothing tied (cancelled, put away, done): no rope in the hand.
+    if (ropeFirst === undefined && ropeLive !== undefined) {
+      ropes.remove(ropeLive);
+      ropeLive = undefined;
     }
     ropesView.sync(ropes);
-    ropesView.publishLights(eyeX, eyeY, eyeZ, () => treeLights.offerLights());
+    ropesView.publishLights(eyeX, eyeY, eyeZ, () => {
+      treeLights.offerLights();
+      fishingView.offerLights();
+    });
 
     // --- pick up: E, on whatever is under the crosshair or at your feet ---
     const target: Pickup | undefined = active
@@ -2108,6 +2351,17 @@ async function start(): Promise<void> {
       snowballHit.distance <= PICKUP_REACH
         ? snowballHit.ball
         : undefined;
+    // ...and so is a placed building piece (a ladder, a plank), when it is the thing under the crosshair.
+    const pieceTarget =
+      active &&
+      target === undefined &&
+      matTarget === undefined &&
+      rockTarget === undefined &&
+      buildHit.piece !== undefined &&
+      buildHit.distance <= PICKUP_REACH + 0.9 &&
+      (hit.kind === HitKind.None || buildHit.distance <= hit.distance)
+        ? buildHit.piece
+        : undefined;
     // ...and so is a tied string of xmas lights, when nothing else is nearer.
     let ropeTarget: Rope | undefined;
     if (
@@ -2115,6 +2369,7 @@ async function start(): Promise<void> {
       target === undefined &&
       matTarget === undefined &&
       rockTarget === undefined &&
+      pieceTarget === undefined &&
       ropeFirst === undefined
     ) {
       const reach =
@@ -2184,6 +2439,17 @@ async function start(): Promise<void> {
           audio.play("craftError", { gain: 0.7 });
           pickupCooldown = PICKUP_FULL_REPEAT_SECONDS;
         }
+      } else if (pieceTarget !== undefined) {
+        if (inventory.tryAdd(pieceTarget.spec.item)) {
+          buildField.remove(pieceTarget);
+          // Whatever was resting on it settles again.
+          buildSystem.disturb(pieceTarget.x, pieceTarget.y, pieceTarget.z, pieceTarget.solid.reach);
+          audio.play("pickupAlt", { variance: 1 });
+          pickupCooldown = PICKUP_REPEAT_SECONDS;
+        } else {
+          audio.play("craftError", { gain: 0.7 });
+          pickupCooldown = PICKUP_FULL_REPEAT_SECONDS;
+        }
       } else if (containerTarget !== undefined && isContainerKind(containerTarget.kind) && containerEmpty) {
         // Only an empty one comes along; a full one is opened with right mouse.
         if (inventory.tryAdd(CONTAINER_ITEMS[containerTarget.kind])) {
@@ -2217,19 +2483,22 @@ async function start(): Promise<void> {
           ? `E  pick up ${itemDisplayName(ItemType.Trampoline)}`
           : rockTarget !== undefined
             ? `E  pick up ${itemDisplayName(itemOfBall(rockTarget) ?? ItemType.Rock)}`
-            : ropeTarget !== undefined
+            : pieceTarget !== undefined
+              ? `E  pick up ${itemDisplayName(pieceTarget.spec.item)}`
+              : ropeTarget !== undefined
               ? `E  pick up ${itemDisplayName(ItemType.XmasLights)}`
               : containerTarget !== undefined && isContainerKind(containerTarget.kind)
                 ? containerEmpty
                   ? `RMB  open   E  pick up ${CONTAINER_NAMES[containerTarget.kind]}`
                   : "RMB  open"
-                : ropeText;
+                : "";
     if (prompt.textContent !== promptText) prompt.textContent = promptText;
     prompt.hidden = promptText === "";
 
     pickupRenderer.sync(pickups, now);
     trampolineSystem.sync(physics);
     hotbar.sync(inventory);
+    recipes.observe(inventory);
     const heldNow = inventory.selectedItem();
     itemControls.set(
       heldNow?.type,
@@ -2241,19 +2510,28 @@ async function start(): Promise<void> {
         : undefined,
     );
 
+    // Before the log system: it keeps the terrain bodies, and building pieces falling ask it for theirs.
+    buildSystem.update(rawDt, player.x, player.y, player.z);
     logs?.update(player.x, player.y, player.z);
 
     avatarPose.held = heldType;
     avatarPose.action = canChup
       ? AvatarAction.Chup
-      : canDig
+      : canScoop
         ? AvatarAction.Scoop
         : throwCharge > 0
           ? throwKind
-          : shaking
-            ? AvatarAction.Shake
-            : AvatarAction.Idle;
-    avatarPose.charge = throwCharge;
+          : fishing.charge > 0
+            ? AvatarAction.Charge
+            : shaking
+              ? AvatarAction.Shake
+              : AvatarAction.Idle;
+    avatarPose.charge = throwCharge > 0 ? throwCharge : fishing.charge;
+    if (fishingEvents.cast) {
+      // The cast is the spear throw's lunge, with the rod staying in the hand.
+      avatarPose.throwSeq = (avatarPose.throwSeq + 1) & 0xff;
+      avatarPose.thrown = AvatarAction.Charge;
+    }
     if (threw) {
       avatarPose.throwSeq = (avatarPose.throwSeq + 1) & 0xff;
       avatarPose.thrown = throwKind;
@@ -2273,7 +2551,7 @@ async function start(): Promise<void> {
     snowballsView.sync(snowballs, flyingSnow.flying, alpha);
     vesselsView.sync(vessels.flying, alpha);
 
-    playerModel.update(player, avatarPose, rawDt, renderX, renderY + rideLift, renderZ);
+    playerModel.update(player, avatarPose, rawDt, renderX, renderY + rideLift, renderZ, rideLift);
     // Hidden in first person: inside the head is all you would see.
     playerModel.visible = playerCamera.perspective !== CameraPerspective.FirstPerson;
     // The arm is the first-person stand-in for it: only while walking, since
@@ -2297,6 +2575,23 @@ async function start(): Promise<void> {
       (Math.min(1, skateSpeed / SKATE_FOV_SPEED) * SKATE_FOV_BOOST - playerCamera.fovBoost) *
       Math.min(1, rawDt * 4);
     playerCamera.sync(camera, player, sceneQuery, renderX, cameraY, renderZ);
+
+    // The fishing line starts at the rod's tip as drawn: on the arm in first person (which is drawn
+    // in the camera's own space), on the model otherwise.
+    camera.updateMatrixWorld();
+    const rodAnchor = !holdingRod
+      ? undefined
+      : arm.visible
+        ? arm.heldAnchor(ROD_TIP_NAME)
+        : playerModel.visible
+          ? playerModel.heldAnchor(ROD_TIP_NAME)
+          : undefined;
+    if (rodAnchor !== undefined) {
+      rodAnchor.getWorldPosition(rodTip);
+      if (arm.visible) rodTip.applyMatrix4(camera.matrixWorld);
+    }
+    rodTipSeen = rodAnchor !== undefined;
+    fishingView.update(rodAnchor !== undefined ? rodTip : undefined, groundAt);
 
     // After the camera, because the snow's billboards are built from the
     // camera basis and its box is centred on the camera.
@@ -2330,6 +2625,7 @@ async function start(): Promise<void> {
     let rocksLoaded = 0;
     for (const ball of snowballs.balls) if (itemOfBall(ball) === ItemType.Rock) rocksLoaded++;
     hud.set("ROCKS", String(rocksLoaded));
+    hud.set("PIECES", `${String(buildField.pieces.length)} (${String(buildSystem.bodyCount)} bodies)`);
     hud.set(
       "AIM",
       onPiece
@@ -2350,6 +2646,10 @@ async function start(): Promise<void> {
           }`
         : "--",
     );
+    if (saveManager !== undefined) {
+      saveManager.update(rawDt);
+      hud.set("SAVE", saveManager.status);
+    }
     hud.set("FPS", stats.fps.toFixed(0));
     hud.set("WORST", `${stats.worstMs.toFixed(1)}ms`);
     hud.set(
@@ -2363,8 +2663,10 @@ async function start(): Promise<void> {
     mouseHint.hidden = mouseText === "";
     if (mapView.open) mapView.render(mapData, player.x, player.z, player.frontX, player.frontZ);
 
+    lowRes.begin();
     renderer.render(scene, camera);
     arm.render(renderer, camera);
+    lowRes.present();
     hotbar.render(renderer, now);
     inventoryScreen.render(renderer, now);
     input.endFrame();
@@ -2376,9 +2678,12 @@ async function start(): Promise<void> {
   // worlds at once.
   import.meta.hot?.dispose(() => {
     void renderer.setAnimationLoop(null);
+    saveManager?.save(true);
+    saveManager?.dispose();
     input.dispose();
     playerModel.dispose();
     arm.dispose();
+    lowRes.dispose();
     hotbar.dispose();
     inventoryScreen.dispose();
     flyingChunks.clear();

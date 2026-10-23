@@ -139,6 +139,20 @@ export class HotbarItems {
       content.add(assets.metal.clone());
     } else if (type === ItemType.Candy) {
       content.add(assets.candy.clone());
+    } else if (type === ItemType.Toobifer) {
+      content.add(assets.toobifer.clone());
+    } else if (type === ItemType.Plywood) {
+      content.add(assets.plywood.clone());
+    } else if (type === ItemType.Wheel) {
+      content.add(assets.wheel.clone());
+    } else if (type === ItemType.Ladder) {
+      content.add(assets.ladder.clone());
+    } else if (type === ItemType.Spring) {
+      content.add(assets.spring.clone());
+    } else if (type === ItemType.SpringShoes) {
+      content.add(assets.springShoeItem.clone());
+    } else if (type === ItemType.FishingRod) {
+      content.add(assets.fishingRod.clone());
     } else if (type === ItemType.Goo) {
       content.add(assets.goo.clone());
     } else if (type === ItemType.XmasLights) {

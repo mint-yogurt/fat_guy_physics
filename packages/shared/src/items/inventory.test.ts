@@ -36,3 +36,17 @@ describe("inventory stacks", () => {
     expect(inventory.selectedItem()).toBeUndefined();
   });
 });
+
+describe("bare hands", () => {
+  it("are what an empty hotbar slot does, not only slot 0", () => {
+    const inventory = new Inventory();
+    inventory.setSlot(3, { type: ItemType.Rock, count: 1 });
+    inventory.selectSlot(2);
+    expect(inventory.isUnarmedSelected).toBe(true);
+    inventory.selectSlot(3);
+    expect(inventory.isUnarmedSelected).toBe(false);
+    // Using up the last one leaves the hands bare again.
+    inventory.tryConsumeSelected();
+    expect(inventory.isUnarmedSelected).toBe(true);
+  });
+});

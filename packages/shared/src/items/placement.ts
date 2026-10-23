@@ -1,6 +1,8 @@
 import { VOXEL_SIZE } from "../sim/constants.ts";
 import type { Prop, Tree } from "../sim/world.ts";
 import { PROP_METRICS } from "../worldgen/props.ts";
+import { quatFromYaw, createQuat } from "../sim/rotation.ts";
+import { PIECE_SPECS, type PieceSpec } from "./building.ts";
 import { CONTAINER_ITEMS, CONTAINER_KINDS, type ContainerKind } from "./container.ts";
 import { ItemType } from "./inventory.ts";
 import { TRAMPOLINE_HEIGHT, TRAMPOLINE_RADIUS, type TrampolineField } from "./trampoline.ts";
@@ -13,17 +15,18 @@ import { TRAMPOLINE_HEIGHT, TRAMPOLINE_RADIUS, type TrampolineField } from "./tr
  * cannot, and left mouse commits it only when it is green. This file is the
  * rules, so a server can ask the same question.
  *
- * To make a new item placeable (a log, a plywood sheet, a 2x4):
+ * To make a new item placeable on the ground (a mat, a gift):
  *  1. add a {@link PlacementSpec} to {@link PLACEMENTS}: its footprint, height,
  *     and whether it looks back at you;
  *  2. add a ghost builder for it in render/placementPreview.ts;
  *  3. add a case to `placeHeld` in main.ts that does the placing.
  * Nothing else changes: the aiming, the green/red test and the preview follow.
  *
- * Every placeable is a footprint (a disc or a rectangle, spun by a yaw) with a
- * height, standing on the highest ground under it. That is enough for a mat, a
- * present, a plank on the flat; a thing that leans or lies at an angle (a log
- * against a wall) will want an oriented plan rather than a yaw.
+ * Such a placeable is a footprint (a disc or a rectangle, spun by a yaw) with a
+ * height, standing on the highest ground under it. A thing that lies or leans
+ * at any angle against any surface (a ladder, a log, a plank) is a building
+ * piece instead (items/building.ts): its row here is made from its piece spec,
+ * and it is planned by items/buildPlan.ts, not by {@link PlacementPlanner}.
  */
 
 export interface PlacementSpec {
@@ -44,6 +47,13 @@ export interface PlacementSpec {
    * players, still see it carried.
    */
   readonly hideHeldInFirstPerson: boolean;
+  /**
+   * Set for a building piece (a ladder, a plank): it is not a footprint on the
+   * ground but a shape put against whatever surface is aimed at, at any angle
+   * (items/building.ts, planned by items/buildPlan.ts). The other fields are
+   * then only a rough footprint, for anything that wants one.
+   */
+  readonly piece?: PieceSpec;
 }
 
 function containerSpec(kind: ContainerKind): PlacementSpec {
@@ -74,6 +84,19 @@ export const PLACEMENTS: Partial<Record<ItemType, PlacementSpec>> = {
   },
 };
 for (const kind of CONTAINER_KINDS) PLACEMENTS[CONTAINER_ITEMS[kind]] = containerSpec(kind);
+for (const piece of Object.values(PIECE_SPECS)) {
+  PLACEMENTS[piece.item] = {
+    halfX: piece.size[0] / 2,
+    halfZ: piece.size[2] / 2,
+    round: piece.round,
+    height: piece.size[1],
+    maxGap: 0,
+    facesPlayer: false,
+    // A log is also thrown, so it stays in the hand.
+    hideHeldInFirstPerson: piece.item !== ItemType.Log,
+    piece,
+  };
+}
 
 /** The placement rules of a held item, or undefined if it is not placed. */
 export function placementOf(type: ItemType | undefined): PlacementSpec | undefined {
@@ -94,14 +117,26 @@ export type PlacementBlock =
   | "player";
 
 export interface PlacementPlan {
-  /** The centre of the footprint, on its base. */
+  /**
+   * Where it goes. A footprint (a mat, a gift) is placed by the centre of its
+   * base, on the ground; a building piece by the centre of the whole shape.
+   */
   x: number;
   y: number;
   z: number;
-  /** Turn about the vertical axis, radians (three.js `rotation.y`). */
+  /** Turn about the vertical axis, radians (three.js `rotation.y`): all a footprint has. */
   yaw: number;
+  /** The full rotation, a unit quaternion: a footprint's is its yaw, a piece's is whatever it was aimed at. */
+  qx: number;
+  qy: number;
+  qz: number;
+  qw: number;
   valid: boolean;
   block: PlacementBlock;
+}
+
+export function createPlacementPlan(): PlacementPlan {
+  return { x: 0, y: 0, z: 0, yaw: 0, qx: 0, qy: 0, qz: 0, qw: 1, valid: false, block: "none" };
 }
 
 /** The slice of the player a placement keeps clear. */
@@ -134,7 +169,8 @@ const TREE_SEARCH_MARGIN = 3;
  * again.
  */
 export class PlacementPlanner {
-  private readonly result: PlacementPlan = { x: 0, y: 0, z: 0, yaw: 0, valid: false, block: "none" };
+  private readonly result: PlacementPlan = createPlacementPlan();
+  private readonly turn = createQuat();
   private readonly trees: Tree[] = [];
   private readonly props: Prop[] = [];
 
@@ -143,11 +179,14 @@ export class PlacementPlanner {
     private readonly trampolines: Pick<TrampolineField, "items">,
   ) {}
 
-  /** Plans `spec` centred on the aimed point (aimX, aimZ). */
-  plan(spec: PlacementSpec, aimX: number, aimZ: number, player: PlacementPlayer): PlacementPlan {
+  /**
+   * Plans `spec` centred on the aimed point (aimX, aimZ), turned a further
+   * `spin` radians (the player's own turn of it, items/placementControl.ts).
+   */
+  plan(spec: PlacementSpec, aimX: number, aimZ: number, player: PlacementPlayer, spin = 0): PlacementPlan {
     const { world } = this;
     const plan = this.result;
-    const yaw = spec.facesPlayer ? Math.atan2(player.x - aimX, player.z - aimZ) : 0;
+    const yaw = (spec.facesPlayer ? Math.atan2(player.x - aimX, player.z - aimZ) : 0) + spin;
     // three.js turns +X to (cos, -sin) about Y.
     const cos = Math.cos(yaw);
     const sin = Math.sin(yaw);
@@ -209,6 +248,11 @@ export class PlacementPlanner {
     plan.y = base;
     plan.z = aimZ;
     plan.yaw = yaw;
+    quatFromYaw(yaw, this.turn);
+    plan.qx = this.turn.x;
+    plan.qy = this.turn.y;
+    plan.qz = this.turn.z;
+    plan.qw = this.turn.w;
     plan.valid = block === "none";
     plan.block = block;
     return plan;

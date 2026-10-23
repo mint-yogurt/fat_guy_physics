@@ -3,6 +3,12 @@
 A multiplayer physics sandbox that runs in the browser — no download. See
 [DESIGN.md](DESIGN.md) for the design.
 
+> **Old version note.** Voxels belonged to an earlier version of this game and
+> are **not** being done. There is no voxel ground and no digging: the ground
+> is a smooth low-poly heightfield mesh (see [The ground](#the-ground)).
+> Explosions and big impacts may carve craters out of it later, but not as
+> voxels, and that is not promised.
+
 ## Running it
 
 Needs Node 20+.
@@ -20,7 +26,8 @@ npm run build       # static bundle into packages/client/dist
 
 ### Controls
 
-Click to capture the mouse. WASD walk, Space jump, left mouse scoops, right
+Click to capture the mouse. WASD walk, Space jump, left mouse scoops (trees,
+snowbanks and snowballs; it does nothing to bare ground), right
 mouse **chups** (not "chops" -- chup is the game's word for it), E picks up
 the item under the crosshair (hold it to hoover up a pile), R toggles
 Ragball, V first/third person, `-`/`=` FOV, 1-8 hotbar, I inventory.
@@ -29,6 +36,14 @@ With a stick equipped: left mouse swings it like a sword (a swing is a chup,
 so it fells trees too), hold right mouse to charge a spear throw and release
 to throw. With xmas lights equipped: left mouse ties the first end, then the
 other; right mouse runs another string on to reach further; E cancels.
+
+With anything that can be placed equipped (a mat, a gift, a ladder, a log, a
+plank, a sheet of plywood, a wheel): left mouse places it, the **scroll wheel**
+turns it 45 degrees a notch, and holding **R** while moving the mouse turns it
+freely (R is the Ragball key when nothing placeable is in hand). A log is also
+bowled with left mouse, so a quick *tap* places it and *holding* bowls it. To
+climb a ladder, walk into it facing it and keep W down; W and S go up and down,
+look anywhere, Space jumps off.
 
 ### On-screen UI
 
@@ -40,7 +55,7 @@ Only the hotbar and what is relevant right now are shown:
   "hold" marks the ones that charge). The table is `controlHintsFor` in
   [`controlHints.ts`](packages/client/src/ui/controlHints.ts): a new item with
   a button action adds a case there.
-- **Tab** toggles the debug readout (top left: FPS, position, chunk counts and
+- **Tab** toggles the debug readout (top left: FPS, position, tile counts and
   so on). It is hidden by default.
 - While the mouse is free, a small "click to capture mouse" notice (or the
   reason pointer lock was refused) shows at the top. Esc still releases the
@@ -56,7 +71,15 @@ Only the hotbar and what is relevant right now are shown:
 ### URL flags
 
 - `?gl` — force the WebGL2 backend instead of WebGPU.
-- `?radius=N` — override the chunk load radius (default 12 chunks, about 38 m).
+- `?radius=N` — override the load radius in ground tiles (3.2 m each; default 12,
+  about 38 m).
+- `?res=480` — hi-res mode for the N64 look (`240`, the default, or `480`); remembered
+  in `localStorage`. `?aspect=4:3|16:9|window` picks the picture shape, also remembered
+  (see [Graphics](#graphics-the-n64-look)).
+- `?save=0` — play without reading or writing the saved game (see [Saving](#saving)).
+- `?reset=1` — throw the saved game away and start over (the flag removes itself
+  from the address bar). Also how to get the debug kit back: it is only granted to a
+  new game.
 
 ## Packages
 
@@ -72,13 +95,14 @@ npm workspaces under `packages/`:
 
 ## Status
 
-Done: chunked terrain streamed through a worker pool, player controller and
+Done: a smooth heightfield ground streamed in tiles through a worker pool, player controller and
 collision, Jolt rigid bodies, trees you can fell and chup down into logs,
 sticks and leaves, item pickups with E, a held stick you can swing or
 throw, held items and their actions on the third-person character as well
 as in first person, items and hotbar, player
 rig and character create, biome field with ground colour, sky, light and
-snow, per-region terrain height (rolling hills, cliffs, tiered bluffs), and
+snow, per-region terrain height (rolling hills, cliffs, tiered bluffs), the
+N64 look, ground textures, and
 scattered props: snowmen, presents, tombstones and graves, and a
 first-person arm that scoops and chops, and xmas lights: a tool-gun style
 rope you tie to the world, with glowing bulbs that light their surroundings,
@@ -92,7 +116,20 @@ round them), the grave-topsoil tool, post-processing, multiplayer.
 - What the new items are for: **coal**, **metal**, **candy**, **goo**,
   **eggnog** and **mowden lightning** are in the game and in the Christmas
   loot (except goo, which is in no loot table yet), but only the can, goo and
-  eggnog do anything, and none is an ingredient yet (crafting has no recipes).
+  eggnog do anything, and only the can (-> metal) is an ingredient yet.
+- The ladder (`ladder.glb`) is an item with no use yet; so are toobifers
+  (2x4s), plywood, wheels and springs, beyond being crafting materials.
+- **Spring shoes wear out**: they should break after a limited number of
+  bounds. `SpringStride.bounds` already counts them and `wornOut` reads
+  `SPRING_SHOES_LIFETIME`, which is infinite, so nothing breaks yet. Still to
+  do: pick the lifetime, remember the wear on the item (a stack is only
+  type + count today, so a worn pair needs somewhere to keep it), a break
+  event with a sound and a puff, and a wear readout on the slot. The pair is
+  also stackable like any item, which a pair with wear should not be.
+- Crafting UI: putting one material in the boxes should list everything it can
+  make from the recipes the player knows, with what each needs. For now the
+  result box shows one recipe and a small `1/4` button cycles the rest
+  (stub, see `items/crafting.ts`).
 - Harvesting snow in the Christmas region, and snowball item controls
   (throw, roll like the log item).
 - A visible map-viewing animation while the player is looking at the map
@@ -107,20 +144,109 @@ All three go into the inventory (hotbar slots 2-8, then the 24-slot backpack).
 
 ### Placing things
 
-The trampoline and the containers are placed with **left mouse**. While one is
+Everything that can be placed is placed with **left mouse**. While one is
 held, a see-through copy of it stands where it would go: **green** if it can be
 put there, **red** if not (solid ground or a wall would be inside it, the
 ground drops away too far under it, a mat, prop or tree is in the way, or you
 are standing where it would go). A red click only plays the error sound. The
 hand is shown empty in first person while you hold one (the ghost says where it
-goes); third person, and so other players, still see it carried.
+goes); third person, and so other players, still see it carried. (A log keeps
+it in the hand: it is thrown too.)
+
+**Turning what you place.** The scroll wheel steps its spin by 45 degrees (it
+snaps to the grid first, so corners come out square). Hold **R** and move the
+mouse to turn it freely: sideways spins it, up and down tilts it (the camera
+holds still while R is down). The free turn is slightly sticky at multiples of
+15 degrees, so level and square are easy to find by hand. The turn starts over
+when you pick another item. A mat or a gift only spins (about up); a building
+piece spins about whatever surface it is laid on and tilts away from it (see
+[Building](#building)). The state is `shared/items/placementControl.ts`
+(`PlacementOrientation`).
 
 The rules are in `shared/items/placement.ts` (`PLACEMENTS` has one row per
 placeable: footprint, height, how far the ground may fall away, whether it
 faces you, whether to hide it in the first-person hand), the ghost in
-`client/render/placementPreview.ts`. To make a new item placeable (logs,
-plywood, 2x4s) add a row, a ghost builder, and a case in `placeHeld` in
-`main.ts`; the aiming, the green/red test and the preview follow.
+`client/render/placementPreview.ts`. To make a new item placeable on the
+ground (a mat, a gift) add a row, a ghost builder, and a case in `placeHeld` in
+`main.ts`; the aiming, the green/red test and the preview follow. A thing that
+is laid against surfaces at any angle (a ladder, a plank) is a building piece,
+below, and needs neither the ghost nor the case.
+
+### Building
+
+Ladders, logs, 2x4s (`toobifer`), sheets of plywood and wheels are **building
+pieces**: put anywhere there is a surface, at any angle, left in the world, and
+built up into structures. This is the start of the "build with physics" system,
+shaped so more pieces and fasteners can be added without special cases.
+
+**Nothing is attached at authored points.** A piece is a box or a cylinder with
+a pose, and anything touching anything is joined by the touching, found from the
+shapes. A new piece is a row in `PIECE_SPECS` (`shared/items/building.ts`) and a
+mesh row in `client/render/pieceMesh.ts`; it already stacks on, leans against and
+hangs off everything else, including pieces that do not exist yet.
+
+**Placing one.** You aim at a surface (terrain, a trunk, a prop or another piece);
+the piece is laid with its *contact face* on it (a ladder's back, a plank's
+underside, a log's side), its long way along the surface (up a wall; the way you
+face on a floor), then spun and tilted by your turn of it, then slid out until
+it just touches the aimed point whatever angle it ended up at: a tilted ladder
+touches the wall with its top edge, it does not sink in. The whole volume is
+tested for room (ground, trunk, prop, another piece or you in it makes it red).
+`shared/items/buildPlan.ts` is all of that; nothing in it knows what a ladder is.
+
+**Two states.** A piece that *grips* (a ladder) is **fixed** where you put it:
+a static body, held for as long as something it touches is held (the ground, a
+trunk, a prop, a loose piece at rest, or a fixed piece that is itself held). Chop
+the tree it hangs on or pick up what it hangs on, and it
+comes away and falls (`BuildField.looseOnes`, looked at once a second and straight
+after any chop or pickup nearby). A **loose** piece (a log, a plank, plywood,
+a wheel) is a Jolt rigid body: it drops, tumbles, lands and sleeps where it
+stops, so a plank put on two logs is a plank on two logs, and it falls if
+something under it goes. Only a piece at rest can be stood on (as with felled
+logs). Walkable pieces are never thinner than 10cm so a foot cannot slip through
+(`MIN_SOLID_THICKNESS`): plywood is a chunky slab and the mesh is stretched to match.
+E picks a piece up again (and wakes whatever was resting on it).
+
+**Hitting them.** Every piece near you is solid to things in flight, walkable or
+not: thrown snowballs, rocks, cans, goo and the xmas lights' string stop on a
+ladder or drape over a plank (`TrunkQuery.solids`, filled by the build system), and
+a thrown stick bounces off one. Xmas lights tie to a piece at the spot aimed at
+(`BuildPieceRopeBody`): the end goes where the piece goes, a loose piece is pulled
+and turned by the string, and a fixed one stays put.
+
+**Climbing.** A *rail* (`shared/sim/climb.ts`) is a line the player can hold: a
+climbable piece's long axis, today a ladder's. Walk into a ladder facing it with
+W held (within about a metre, in front of it) and you take hold: from then you
+move only up and down it (W and S, 2.6 m/s), the body drawn in to the rungs and
+the camera free (first or third person). Space lets go with a small hop away from
+it and normal air control, so jumping to a ledge half way up works; going down the
+bottom puts you on the ground; going up the top hops you over onto whatever
+ledge is there (forward and up). Ladders are not solid to walk through; you walk
+into one to take hold. A tilted ladder works (anything steeper than 30 degrees
+from flat). The climb is `Player.updateClimbing` and shares the walk's collision
+sweep, so walls and ledges still stop you. The third-person pose (hands
+reaching by turns, legs stepping) is in `playerModel.ts`.
+
+**Where the code is.**
+
+- `shared/items/building.ts` — `PIECE_SPECS` (size, contact face, long axis,
+  `grips`, `walkable`, `climbable`, density), `BuildField` (the pieces, ray casts,
+  what is held up, save/restore), `PieceJoint` (reserved for fasteners).
+- `shared/items/buildPlan.ts` — `aimAtSurface`, `PiecePlanner`.
+- `shared/items/placementControl.ts` — the spin and tilt.
+- `shared/sim/climb.ts`, `Player.climb` / `Player.rails` — rails and climbing.
+- `shared/sim/rotation.ts` — quaternions and 3x3 turns; `sceneQuery.ts`
+  `OrientedSolid` / `SceneSolidQuery.pieces` — pieces the player collides with.
+- `client/physics/buildSystem.ts` — the Jolt bodies, meshes, anchoring and
+  waking; `physicsWorld.ts` `spawnPiece`; `render/pieceMesh.ts` — real-size meshes.
+- `main.ts`: `buildField` / `buildSystem` (before the save block), the aim and
+  `placeHeld` in the placing block, the E pickup, `orientation` at the top of the frame.
+
+**Next (not built yet):** duct tape and nails as fasteners (a `PieceJoint` makes a
+loose piece part of a fixed structure, with a break strength; `sim/elastic.ts` is
+the model for a tape that stretches before it tears), edge-to-edge snapping
+(a piece aimed near another's end or edge goes flush beside it, so a ladder
+extends a ladder), and a free/snap toggle for position.
 
 ### Inventory, crafting and containers
 
@@ -134,8 +260,56 @@ screen puts the stack and the crafting boxes back in the inventory (or drops
 what does not fit).
 
 The pane above the grid is **crafting**, `_ + _ = _`: a box is added whenever
-the last one is filled, for recipes with many ingredients. **Stub:** there are
-no recipes, so the result box never fills (`RECIPES` in `items/crafting.ts`).
+the last one is filled, for recipes with many ingredients. Put the materials in
+the boxes and the product shows in the result box (its count in the corner).
+Click the result to craft once: the material is used up and the product lands
+on the mouse; click again to craft more (it stacks on the mouse, up to 255), or
+press **ALL** under it to craft as many as the boxes pay for. Put the stack in a
+slot, or just close the screen and it goes to the first free space (it is
+dropped if there is none). The boxes must hold exactly a recipe's ingredients,
+at least as many as it asks for; extra material just stays in its box.
+
+Recipes are **learned**: one is known once every item it *takes* has been in
+your inventory at least once (what it makes does not matter), and only known
+recipes show up. What you have held is saved with the player. When the boxes
+match several known recipes (a log is 4 sticks, 2 toobifers, 1 plywood or 4
+wheels) the result shows the first, and a small `1/4` button beside it steps
+through the rest; that is a stopgap for a proper list of everything a material
+can make (see TODO). Recipes are the `RECIPES` table in `items/crafting.ts`:
+
+| Takes | Makes |
+|---|---|
+| 1 log | 4 sticks, or 2 toobifers, or 1 plywood, or 4 wheels |
+| 4 toobifers + 5 sticks | 1 ladder |
+| 2 sticks + 1 plywood + 4 wheels | 1 skateboard |
+| 1 mowden lightning | 1 metal |
+| 2 metal | 1 spring |
+| 1 toobifer + 1 xmas lights + 2 springs | 1 pair of spring shoes |
+| 1 stick + 1 wheel + 3 xmas lights | 1 fishing rod |
+
+**Spring shoes** (`spring_shoes`) are worn while they are the selected hotbar
+item: one shoe (`spring shoes.glb`, not resized) is snapped by the top face of
+its sole onto the bottom of each foot of the character, and follows the leg;
+the springs hang below the foot, so the model stands that much higher while
+they are on (the collision box does not change). They work like a trampoline
+does, energy in = energy out (`items/springShoes.ts`, called from the substep
+loop in `main.ts`):
+
+- walking, every step is a small leap; stopped, nothing happens;
+- every landing rebounds at 0.9 of its landing speed, and a landing in the
+  middle of a stride adds a little (up to a cap), so a run of bounds climbs;
+  a landing timed with a jump (space held, or pressed just before) adds more,
+  up to a higher cap;
+- a jump from standing is 1.7 times a plain one;
+- a drop from height comes back up nearly as high, past the caps, because that
+  energy came from the fall; landing on a trampoline mat adds a quarter to the
+  mat's own rebound.
+
+The **spring** is a plain ingredient: held, and nothing else.
+
+The hotbar's **empty slots act like slot 1, bare hands** (scoop, chup); only
+slot 1 shows the icon. When the last of a stack is used up while a mouse button
+is still down, nothing is scooped until the button is released.
 
 **Containers** are the Present (`present_1.glb`) and the Gift (`present_2.glb`)
 in Christmas, and the Candy Bucket in Halloween, all rare finds. Aim at one
@@ -246,8 +420,7 @@ the actions:
   show the mass of the one you aim at):
   - It lies perfectly still until something moves it, and stays where it
     lands or is left; it is never forgotten. It is drawn on its flat side, and
-    stays on a slope a snowball would roll down. Dig the ground from under
-    it and it falls.
+    stays on a slope a snowball would roll down.
   - **E** picks it up (any rock in reach under the crosshair), and ropes tied
     to it let go.
   - Walk into one and you shove it, but it only gets a share of your speed
@@ -282,7 +455,7 @@ the actions:
   green hard-edged square chunks, like the crumbs of a broken house
   (`GOO_BURST` in `snow.ts`, the green of `gooMaterial.ts`).
   Goo is the same, except it is thrown at 4 to 11 m/s (hardly 12 m), splats at
-  2.5 m/s (1.5 shaken), and leaves a big glossy stain (radius 1.1 m, 1.8 shaken)
+  2.5 m/s (1.5 shaken), and leaves a big stain (radius 1.1 m, 1.8 shaken)
   on whatever it hit, flat on that surface, lasting 90 s (28 at a time). Goo
   has two meshes: `goo.glb`, the puddle, in a slot, a container or on the ground,
   and `gooball.glb` in the hand. The slime look is a new see-through material
@@ -342,20 +515,25 @@ power will be variants of it.
 **Using it.** Equip it (under `DEBUG`, which is on by default, you start with
 10 alongside the trampoline and skateboard), then **left mouse** ties the
 first end to whatever the crosshair is on, and **left mouse again** ties the
-other. One string is used up. Between the clicks the string is held out
-from the first tie to the loose end, which follows your aim: on the surface
-you are looking at while that is within reach, otherwise hovering about 2.5 m
-in front of you, never further from the first tie than the string reaches
-(it stretches taut and the prompt says "too far"). You can only tie the end
-to a surface in reach, not to the air. A string reaches up to 5 m between its
-ends, with no minimum (tied end to end it lies in a heap). It is cut a hair
+other. One string is used up. Between the clicks the string is a real rope
+from the first tie to your hand: it hangs and drags on the ground, and when
+you walk to the end of it (5 m a string) it stretches and pulls. Tied to a
+rock or a rolled snowball it hauls that along behind you (a heavy one slows
+you down); tied to something that cannot move (the ground, a tree, a
+snowman) it holds you back, giving about a third again its length before it
+goes hard like a wall (`PlayerRopeBody` in `items/rope.ts`). If you are flung
+or teleported so far that it would stretch to 1.7 times its length (a respawn),
+it lets go. You can only tie the second end to a surface within the string's
+reach, not to the air. A string reaches up to 5 m between its ends, with no
+minimum (tied end to end it lies in a heap). A placed string is cut a hair
 shorter than the gap (`slack` in `RopeSpec`, -1%), so it is stretched like
-elastic and hangs with only a little sag.
+elastic and hangs with only a little sag. There is no length readout: the
+rope shows how far it goes.
 
 **Running strings on.** With more strings in the stack, **right mouse**
 (after the first end is tied) adds another string to the one being placed:
 reach goes up by 5 m each time, up to 6 strings (30 m), as far as the stack
-goes. This ties nothing; it is one longer rope, with 9 more segments per
+goes. This ties nothing and the rope in your hand keeps its shape; it is one longer rope, with 9 more segments per
 string, that is tied at the end with left mouse and uses up all its strings
 ([`ropeSpecFor`](packages/shared/src/items/rope.ts)). **E**, with one end tied,
 cancels the placement (nothing is spent until both ends are tied; strings
@@ -417,13 +595,12 @@ the bulbs hang down (they sit 120 degrees apart in the file).
 unlit in a bright colour with a soft additive halo sprite round it. On top of
 that, [`bulbLights.ts`](packages/client/src/render/bulbLights.ts) lets the
 bulbs light their surroundings: each frame the 32 bulbs nearest the eye
-(within 45 m) go into one pool of shader uniforms, and the terrain shader
+(within 45 m) go into one pool of shader uniforms, and the ground shader
 and every Lambert material (trees, props, the player model, the arm; wrapped
 with `litByBulbs()`) add a soft coloured pool of light on top of their own
 lighting, red, green or blue, 1.8 m across with a smooth falloff that wraps
 round the far side like vertex lighting did. It is additive, so it shows at
-night and barely in daylight. The post-processing (bloom, colour bleed) is
-still to come and will sit on top. Tuning knobs: `BULB_LIGHT_RADIUS`,
+night and barely in daylight. Bloom and colour bleed are not done. Tuning knobs: `BULB_LIGHT_RADIUS`,
 `BULB_LIGHT_INTENSITY`, `MAX_BULB_LIGHTS` in `bulbLights.ts`; `BULB_COLORS`,
 `LIGHT_COLORS`, `HALO_SIZE`, `HALO_STRENGTH` in `ropeView.ts`.
 
@@ -439,8 +616,109 @@ than floating off it (`HUG`, `STRING_LENGTH`, `LOW`/`HIGH` to tune), and its bul
 tied string's. **The first chup that lands on the trunk, or scoop (left mouse, unarmed) anywhere on the tree,** knocks every string
 off: one `xmas_lights` pickup each, flung towards the swinger like the
 sticks, and the tree remembers (`World.chopTree` returns `lightsDropped`;
-the tree is not lit again when its chunk reloads, and a tree that streams in
+the tree is not lit again when its tile reloads, and a tree that streams in
 already cut has none). Pick them up with E like any item.
+
+### Fishing rod
+
+`fishing_rod` (mesh `assets/meshes/fishinrod.glb`). Craft it from 1 stick + 1
+wheel + 3 xmas lights. Equipped, **left mouse casts: hold to charge, let go to
+throw** (the longer the hold, the farther it lands and the higher it arcs, and a
+dashed line shows the path and a ring where it will come down); **right mouse
+reels in** (held; let go and the hook stays where it is; right mouse while
+charging cancels the cast). The line is a string of xmas lights drawn at 0.6
+of their thickness, from the rod's tip to a red-and-white bobber.
+
+Until the physics engine is done the rod only does one job: the hook snags a
+dropped item (a pickup) it flies onto or is reeled over, drags it along the
+ground, and an item reeled all the way in goes into the inventory, the same as
+pressing E on it (if the inventory is full it is let go at your feet). The
+hook flies and slides over the terrain only: trees, props, felled logs, rolled
+balls and water do not stop or catch it yet, and the line is a drawn curve (it
+hangs by how slack it is, and is kept off the ground), not a simulated rope.
+Walking away from a hook that is out drags it after you at the line's limit.
+Putting the rod away winds the line up and lets go of anything on the hook.
+
+**Settings** are the `FISHING` object in `packages/shared/src/items/fishing.ts`
+(a `FishingSettings`; change a number there, nothing else needs touching):
+
+| Setting | Default | What it does |
+|---|---|---|
+| `maxLineLength` | 15 m | **The farthest a cast can land and the farthest the hook may ever be from the rod.** Set to the reach of three strings of xmas lights (`ropeMaxReach(ropeSpecFor(XMAS_LIGHTS, 3))`, 3 x 9 segments x 5/9 m), so it follows if the lights change. A full cast lands at 0.97 of it. |
+| `chargeSeconds` | 1.1 | Hold time for a full cast |
+| `minCastFraction` | 0.15 | How far a tap goes, as a fraction of `maxLineLength` |
+| `arcLow`, `arcHigh` | 0.1, 0.55 rad | Launch angle added to where you are looking, for a tap and for a full charge (look higher to lob higher; distance comes from the charge alone) |
+| `minLaunchAngle`, `maxLaunchAngle` | 0.12, 1.2 rad | Clamp on the launch angle |
+| `gravity` | 9.8 | For the hook in flight |
+| `reelSpeed` | 6.5 m/s | How fast the hook comes in |
+| `hookRadius` | 0.55 m | How near an item the hook snags it |
+| `catchRadius` | 1.4 m | Reeled this close to you, the catch is taken |
+| `hookRestHeight` | 0.12 m | How high the hook rides above the ground |
+| `lineScale` | 0.6 | Line thickness against the xmas lights' |
+| `previewWhenIdle` | false | Also show the aim line (at the shortest cast) while the rod is held but not charging |
+
+The rest of the look is in `client/src/render/itemAssets.ts`: `HELD_ROD_LENGTH`
+(2.2 m in the hand) and `ROD_ITEM_SIZE` (on the ground and in a slot). The file's
+`hand_attachment_point` is where the hand closes (the rod is held in the Blade
+style, like the stick; a cast reuses the spear throw's wind-up and lunge, but
+the rod stays in the hand; the charge draws it back over the shoulder towards you, the release whips it forward). The held rod is rolled about its length every frame so the reel hangs underneath at rest (`HeldItemSlot.settleRod`; the roll is held during a cast so the rod swings as one piece). **`line_attachment_point` in the file is still at
+the model's origin (the handle's butt)**, so the game falls back to the top of
+the rod and logs a console warning; move that empty to the tip in the .glb and
+it is used as is. The sim is `items/fishing.ts` (`Fishing`, tested in
+`fishing.test.ts`); the line, bobber and aim dashes are `render/fishingView.ts`;
+`main.ts` feeds it mouse input and the rod tip's world position (read off the
+held mesh by name, `ROD_TIP_NAME`, in the first-person arm or the third-person
+model).
+
+### The ground
+
+There are no voxels and no digging (voxels were an earlier version of the game and
+are not coming back). The ground is a smooth low-poly **heightfield mesh**: a
+lattice with a vertex every 0.8 m (`GROUND_STEP` in
+[`groundField.ts`](packages/shared/src/worldgen/groundField.ts)), cut into 3.2 m
+tiles that stream in and out around the player (`?radius=N` tiles). The world is one
+layer of tiles high. Hills, cliffs and bluffs are the same shape as before, only
+smooth; a cliff is a steep ramp over about one cell. The unarmed scoop no longer
+touches bare ground: it acts on trees, snowbanks and snowballs only.
+
+Collision still thinks in 10 cm cells: the solid test samples the smooth mesh at
+cell centres. Trees, props and building pieces stand on the mesh height. Open
+graves have real pits: a tile that contains one is meshed on a finer 0.2 m lattice
+with the ground lowered to the grave box's floor
+([`gravePits.ts`](packages/shared/src/worldgen/gravePits.ts)).
+
+**Textures** (`assets/textures`, 64x64, blended per vertex between regions): the
+Plain region uses `grass2_TWP.png` with `dirt1_twp.png` patches (slow noise, and
+steep slopes, go dirt); Halloween uses the same two drained of colour and darkened;
+Christmas is `snow_64x64.png` alone. One texture repeat covers
+`GROUND.textureTileMeters` (6.4 m). That, the dirt patch size and threshold, the
+slope thresholds and Halloween's desaturation and darkening are all in `GROUND` in
+[`generationSheet.ts`](packages/shared/src/worldgen/generationSheet.ts); the shape
+of the land is `TERRAIN` there.
+
+Explosions and large impacts may one day carve craters out of the ground, but not
+as voxels: the seam is documented in `groundField.ts` (an additive height term).
+That is a possible future feature, not a plan.
+
+### Graphics: the N64 look
+
+The 3D scene is drawn at a low internal resolution (default 240 lines, so 320x240
+at 4:3) into a render target and scaled up to the window with nearest sampling,
+with a light horizontal smear and a 5-bit-per-channel ordered dither
+([`n64Pass.ts`](packages/client/src/render/n64Pass.ts),
+[`n64Dither.ts`](packages/client/src/render/n64Dither.ts)). The HUD, the 3D
+hotbar and the inventory items are drawn at full resolution on top.
+
+- `?res=480` (hi-res; `240` or `480`) and `?aspect=4:3|16:9|window` set the picture
+  and are remembered in `localStorage`. A 4:3 picture in a wider window gets black
+  bars. They live in [`renderSettings.ts`](packages/client/src/render/renderSettings.ts);
+  a future in-game settings menu will call the same store.
+- Textures are Nearest with no mipmaps (`nearestify` in `render/n64Texture.ts`); the
+  ground uses the N64's 3-point filter (`n64Sample`).
+- Fog is short, starting at about 25% of its far distance (presets in
+  [`atmosphere.ts`](packages/client/src/render/atmosphere.ts)).
+- No PS1-style vertex wobble or affine texture warp: the N64 did not have them.
+- Goo has no sun specular or reflection; it is Lambert and looks unlit.
 
 ### The generation sheet
 
@@ -449,7 +727,9 @@ one file to tune the world from. It has a section for each region:
 
 - what spawns there, each as `common`, `uncommon` or `rare`
   (`BIOME_SHEET`);
-- how hilly, cliffy or flat the ground is (`TERRAIN`);
+- how hilly, cliffy or flat the ground is (`TERRAIN`), and what it looks like:
+  texture size, dirt patches, slope thresholds, Halloween's drained colour
+  (`GROUND`; see [The ground](#the-ground));
 - per-object rows (`OBJECT_SHEET`): what swinging at a snowman gets you, what
   a container holds, how flat the ground must be under it;
 - `lootTable` per region: what turns up in its containers and in its
@@ -527,8 +807,90 @@ in its middle, stocked from the same table like every other present; it is there
 from the start, behind the walls. The item and container odds are the `interior`
 row in `OBJECT_SHEET`.
 
+### Saving
+
+Close the tab and come back: you are where you were, with what you had, and the
+world is as you left it. Two saves, because they have different owners:
+
+- **Player save** — position, facing, hotbar slot in hand, the whole inventory.
+  Small; written to `localStorage` (`fgp.save.player`), which is the write that
+  reliably lands while a tab is closing. (Name, face and colours are already kept
+  by character create, `fgp.appearance`.)
+- **World save** — only what players *changed*: the world itself is generated from
+  the seed, so a save is the difference. Trees felled or stripped of leaves and lights; props picked up,
+  placed, damaged or broken (snowmen, gingerbread houses, snowbanks); what is in
+  each container (an emptied one stays empty); placed trampolines; placed building
+  pieces (where each came to rest, and whether it is fixed); items lying on the
+  ground (the first 500). Written to IndexedDB, which has room for it beyond
+  `localStorage`'s limit. The ground itself is never saved (it cannot be changed). Old
+  saves that still have a list of dug holes load fine; that field is ignored.
+
+The same machinery fixes something that used to be lost *within* a session: a felled
+tree or a picked-up prop is now kept when its tile streams out and back in.
+
+**When it writes.** Every 10 s the player; the world only if it changed (a
+`World.editRevision` counter, plus container/trampoline/pickup counts), and at least
+once a minute regardless. And on `pagehide` / the tab going hidden. The HUD's `SAVE`
+line shows the last write, or `FAILED` (private window, full disk) which it retries.
+
+A restored position is clamped to `WORLD_CEILING_METERS` (16 m): the world is one
+layer of ground tiles with no vertical stacking.
+
+**Where the code is.**
+
+- `shared/src/save/snapshot.ts` — the save types and `sanitizePlayerSave` /
+  `sanitizeWorldSave`. Everything read from storage goes through these: unknown item
+  names are dropped (items are saved by *name*, so reordering `ItemType` is safe),
+  numbers are range-checked, a save from a newer game or another seed is refused. A
+  corrupt save loses data; it cannot crash the game. `SAVE_VERSION` is the migration
+  hook: bump it and convert old shapes in the sanitizer.
+- `shared/src/save/gameSave.ts` — `capturePlayer` / `applyPlayer`, `captureWorld` /
+  `applyWorld`, `worldRevision`. No DOM, no storage: the server calls the same.
+  `World.exportEdits` / `importEdits` hold the world's part (tree and prop edits); `ContainerField.exportAll`
+  / `restore` the containers.
+- `shared/src/save/saveStore.ts` — the `SaveStore` interface (load/save a player and a
+  world) and `MemorySaveStore` for tests. Loads never throw.
+- `client/src/save/` — `browserSaveStore.ts` (localStorage + IndexedDB),
+  `saveManager.ts` (timer and page-hide), `identity.ts` (player token, below).
+- Hook points in `main.ts`: the load/apply block just before the debug kit, and
+  `saveManager.update` in the frame loop.
+
+**Adding something that should persist.** If it lives in `World` already (a new prop
+state), add its map to `exportEdits`/`importEdits` and the type in `snapshot.ts`, bump
+`revision` where it changes, and sanitize it. If it is a new field on the client (like
+containers or trampolines), add it to `WorldSave`, `captureWorld`, `applyWorld` and
+`worldRevision`. Always with a round-trip case in `save/save.test.ts`.
+
+**What is not saved** (yet): tied strings of xmas lights, felled logs and other
+Jolt bodies, rolled snowballs, moved rocks, anything in flight, the explored-area
+map, skateboard state mid-trick. Things that are regenerated (the ground, trees,
+untouched props) are not saved because they do not need to be.
+
+**Multiplayer, next.** The plan this is shaped for:
+
+- *Identity* is a random 128-bit token the browser makes on first visit and keeps in
+  `localStorage` (`client/src/save/identity.ts`; not an IP, which is shared and
+  changes, and not a cookie). The server stores only a hash of it, and only ever
+  receives it over `wss://`, never in a URL. It is not used by singleplayer. Clearing
+  site data makes a new player; an export code / account is the planned answer.
+- *Same formats, different store.* The server implements `SaveStore` per connection
+  (a file or SQLite) and runs `captureWorld`/`applyWorld` on the one shared world, so
+  everyone joins into the same built-up map. The client then holds no save:
+  the server owns inventories and the world, and checks everything a client sends
+  (the sanitizers are the first line of that).
+- Singleplayer stays as it is: the browser is both player and server.
+
 ### Known gaps
 
+- Saving: see "What is not saved" under [Saving](#saving).
+- Building: no fasteners yet (nothing joins a loose piece to a fixed one), no
+  snapping of position to another piece's edge or end, and no
+  sound for a piece hitting something. A piece that is being shoved by the player
+  does not move: pieces are solid only once at rest, and the player does not push
+  a Jolt body. A ladder cannot be climbed down from the top (you take hold from
+  below, facing it), and the piece check treats unloaded tiles as air, so it waits
+  for the world to finish loading. A piece falls when its support is chopped or
+  picked up only at the next check (up to a second).
 - Rocks: they are shoved by walkers, swings and other rolling balls, but not
   yet by thrown sticks, thrown logs (Jolt bodies), a flying snowball or a
   trampoline; they are spheres, so one never tips or rests on a corner; and
@@ -538,7 +900,7 @@ row in `OBJECT_SHEET`.
 - Gingerbread houses are never walked into: they are a solid box until they
   explode, and a flying snowball or thrown log can pass through the gaps in it.
   The container inside cannot be reached before then.
-- Graves: an open one has a pit cut for it, but a covered one is left as solid
+- Graves: an open one has a pit (a finer 0.2 m mesh with the ground lowered to the box floor), but a covered one is left as solid
   ground under its topsoil (a hole there would be a trapdoor on the mound).
   The pit is cut when the topsoil comes off, which does not exist yet.
 - Prop sizes and which way a mesh faces are first guesses (see the `scale`
@@ -547,7 +909,9 @@ row in `OBJECT_SHEET`.
   fixed lighting, not tied to the biome. Which face of the palm is the inside is
   unrecorded in the mesh: if the fingers curl backwards on the scoop, flip
   `PALM_SIGN`.
-- Xmas lights: no tying to players, a
+- Xmas lights: no tying to other players (the held end is the local player's
+  hand), a string tied to a prop (snowman, house) holds you but does not move
+  it, a
   tied string's anchor on a chopped tree stays in the air, no wiring for power
   yet, and no looser elastic variant yet (the elastic law and colliders are
   general, but only players bump a string: snowballs, logs, thrown things do
@@ -557,9 +921,10 @@ row in `OBJECT_SHEET`.
   do not take the bulb light, and the glow does not twinkle or follow
   day/night. They are not yet placed as loot in the Christmas region
   (`generationSheet.ts`), only strung on trees.
-- The load cap is now five vertical chunks, for the cliffs and bluffs.
-
-- Terrain voxels are not checked for support, so cut-away ground can float.
+- The ground: collision samples the smooth mesh in 10 cm cells, so a slope
+  feels very slightly stepped underfoot. The N64 3-point texture filter is only
+  on the ground; other materials use plain nearest sampling. Cliffs are steep
+  ramps over about one 0.8 m cell, not true vertical walls.
 - Debris particles are not in yet.
 - Face textures exist but character create's face option does nothing.
 - The walking collider is an AABB, not a swept capsule.
@@ -580,7 +945,7 @@ row in `OBJECT_SHEET`.
 - A thrown or swung stick has nothing to hurt yet: there are no creatures.
 - There is no drop action (items only land on the ground when the inventory
   is too full to take back a stack), no split-stack or shift-click, and the
-  crafting result box is a stub.
+  crafting list UI is a stub (the `1/4` cycle button).
 - The default load radius is unmeasured on real hardware; check FPS before
   trusting it.
 

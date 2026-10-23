@@ -45,10 +45,24 @@ export const ItemType = {
   Metal: 15,
   /** Held, and nothing else: clicks do nothing. */
   Candy: 16,
+  /**
+   * Crafting materials and products (items/crafting.ts). Held, and nothing else:
+   * clicks do nothing. A 2x4 is a "toobifer".
+   */
+  Toobifer: 17,
+  Plywood: 18,
+  Wheel: 19,
+  Ladder: 20,
+  /** Crafting material (2 metal), and nothing else: clicks do nothing. */
+  Spring: 21,
+  /** Worn while selected: bounding steps and big jumps; see items/springShoes.ts. */
+  SpringShoes: 22,
+  /** Cast with left mouse (hold to throw farther), reeled in with right; see items/fishing.ts. */
+  FishingRod: 23,
 } as const;
 export type ItemType = (typeof ItemType)[keyof typeof ItemType];
 
-export const ITEM_TYPE_COUNT = 17;
+export const ITEM_TYPE_COUNT = 24;
 
 export const ITEM_NAMES = [
   "stick",
@@ -68,6 +82,13 @@ export const ITEM_NAMES = [
   "goo",
   "metal",
   "candy",
+  "toobifer",
+  "plywood",
+  "wheel",
+  "ladder",
+  "spring",
+  "spring_shoes",
+  "fishing_rod",
 ] as const;
 
 /**
@@ -141,8 +162,12 @@ export class Inventory implements ItemGrid {
     return this.selected;
   }
 
+  /**
+   * Bare hands: slot 0, or any slot with nothing in it. An empty hotbar slot
+   * does what Unarmed does (scoop, chup); only the icon stays on slot 0.
+   */
   get isUnarmedSelected(): boolean {
-    return this.selected === 0;
+    return this.selected === 0 || this.slots[this.selected] === undefined;
   }
 
   selectSlot(index: number): void {

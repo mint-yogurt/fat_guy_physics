@@ -4,7 +4,7 @@
  * happens with the flag off. Flip the constant, or override per load with
  * `?debug=0` / `?debug=1`.
  *
- * With it on: the player starts with a trampoline, a skateboard, a stack of snowballs and ten xmas lights in their inventory.
+ * With it on: the player starts with building pieces (ladders, plywood, logs, 2x4s, wheels) on the hotbar, and a trampoline, a skateboard, a stack of snowballs, ten xmas lights and more in their inventory.
  */
 const DEBUG_DEFAULT = true;
 

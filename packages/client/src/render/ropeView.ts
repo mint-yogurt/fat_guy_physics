@@ -39,7 +39,7 @@ import { bulbLights } from "./bulbLights.ts";
 /** How long one section is as authored, metres. */
 const AUTHORED_SECTION = 0.1;
 /** The lights are drawn this much thicker than modelled, so they read at a distance. */
-const THICKNESS = 1.6;
+export const ROPE_THICKNESS = 1.6;
 
 const SECTION_NAMES = ["green", "red", "blue"] as const;
 
@@ -139,13 +139,31 @@ export function readRopeParts(scene: Object3D): RopeParts {
 
     const sprite = new Sprite(haloMaterial(halo, LIGHT_COLORS[name]));
     sprite.position.copy(glowCenter);
-    sprite.scale.setScalar(HALO_SIZE / THICKNESS);
+    sprite.scale.setScalar(HALO_SIZE / ROPE_THICKNESS);
     sprite.castShadow = false;
     bulb.add(sprite);
 
     return { wire, bulb, bulbDirection, glowCenter, lightColor: new Color(LIGHT_COLORS[name]) };
   });
   return { units };
+}
+
+const glassMaterials = new Map<string, Material>();
+
+/**
+ * The lit glass for a bulb material from some other file (`bulb_red`, `bulb_green` or
+ * `bulb_blue`), or undefined for any other material: the same look as the bulbs of the
+ * lights, for a model that has bulbs built into it.
+ */
+export function bulbGlassMaterial(materialName: string): Material | undefined {
+  const name = materialName.replace(/^bulb_/, "");
+  if (name === materialName || !(name in BULB_COLORS)) return undefined;
+  let glass = glassMaterials.get(name);
+  if (glass === undefined) {
+    glass = new MeshBasicMaterial({ color: BULB_COLORS[name as keyof typeof BULB_COLORS], toneMapped: false });
+    glassMaterials.set(name, glass);
+  }
+  return glass;
 }
 
 interface Segment {
@@ -200,6 +218,7 @@ function placeSegment(
   by: number,
   bz: number,
   towards: Vector3,
+  thickness: number,
 ): void {
   const dx = bx - ax;
   const dy = by - ay;
@@ -225,8 +244,8 @@ function placeSegment(
 
   root.quaternion.copy(base);
   root.position.set((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2);
-  segment.wire.scale.set(THICKNESS, THICKNESS, length / AUTHORED_SECTION);
-  segment.bulb.scale.setScalar(THICKNESS);
+  segment.wire.scale.set(thickness, thickness, length / AUTHORED_SECTION);
+  segment.bulb.scale.setScalar(thickness);
 }
 
 /** A row of lights, one per segment of a rope. */
@@ -234,7 +253,15 @@ export class RopeChain {
   readonly root = new Group();
   private readonly segments: Segment[] = [];
 
-  constructor(parts: RopeParts, count: number) {
+  /**
+   * `thickness` is how much bigger than modelled the wire and bulbs are drawn; the fishing
+   * line passes a smaller one than the xmas lights it is made of.
+   */
+  constructor(
+    parts: RopeParts,
+    count: number,
+    private readonly thickness = ROPE_THICKNESS,
+  ) {
     for (let i = 0; i < count; i++) {
       const segment = createSegment(parts, i);
       this.segments.push(segment);
@@ -258,27 +285,7 @@ export class RopeChain {
         p[a + 4] ?? 0,
         p[a + 5] ?? 0,
         DOWN,
-      );
-    }
-  }
-
-  /** Taut and straight between two points. */
-  stretch(ax: number, ay: number, az: number, bx: number, by: number, bz: number): void {
-    const n = this.segments.length;
-    for (let i = 0; i < n; i++) {
-      const segment = this.segments[i];
-      if (segment === undefined) continue;
-      const t0 = i / n;
-      const t1 = (i + 1) / n;
-      placeSegment(
-        segment,
-        ax + (bx - ax) * t0,
-        ay + (by - ay) * t0,
-        az + (bz - az) * t0,
-        ax + (bx - ax) * t1,
-        ay + (by - ay) * t1,
-        az + (bz - az) * t1,
-        DOWN,
+        this.thickness,
       );
     }
   }
@@ -306,7 +313,7 @@ export class RopeChain {
       if (!segment.root.visible) continue;
       glowAt
         .copy(segment.glowCenter)
-        .multiplyScalar(THICKNESS)
+        .multiplyScalar(this.thickness)
         .applyQuaternion(segment.root.quaternion)
         .add(segment.root.position);
       const { r, g, b } = segment.lightColor;
@@ -314,7 +321,10 @@ export class RopeChain {
     }
   }
 
-  /** Along a row of points, bulbs facing `outward(midpoint)`. */
+  /**
+   * Along a row of points, bulbs facing `outward(midpoint)`. Segments past the end of the
+   * row are hidden, so a chain built for the longest run can be drawn shorter.
+   */
   along(points: readonly Vector3[], outward: (mid: Vector3, out: Vector3) => void): void {
     const mid = new Vector3();
     const out = new Vector3();
@@ -322,10 +332,14 @@ export class RopeChain {
       const segment = this.segments[i];
       const a = points[i];
       const b = points[i + 1];
-      if (segment === undefined || a === undefined || b === undefined) continue;
+      if (segment === undefined) continue;
+      if (a === undefined || b === undefined) {
+        segment.root.visible = false;
+        continue;
+      }
       mid.addVectors(a, b).multiplyScalar(0.5);
       outward(mid, out);
-      placeSegment(segment, a.x, a.y, a.z, b.x, b.y, b.z, out);
+      placeSegment(segment, a.x, a.y, a.z, b.x, b.y, b.z, out, this.thickness);
     }
   }
 }
@@ -363,17 +377,14 @@ export function buildCoil(parts: RopeParts): Object3D {
   return coil;
 }
 
-/** Every tied rope in the world, plus the one being tied. */
+/** Every rope in the world, tied or held in a hand. */
 export class RopesView {
   private readonly chains = new Map<number, RopeChain>();
   private readonly alive = new Set<number>();
-  private preview: RopeChain | undefined;
-  private previewSegments = 0;
 
   constructor(
     private readonly scene: Scene,
     private readonly parts: RopeParts,
-    private readonly segments: number,
   ) {}
 
   sync(field: RopeField): void {
@@ -395,38 +406,11 @@ export class RopesView {
     }
   }
 
-  /** The string held out from its first tie to where the player is aiming, or nothing. */
-  showPreview(
-    from: { x: number; y: number; z: number } | undefined,
-    toX: number,
-    toY: number,
-    toZ: number,
-    segments = this.segments,
-  ): void {
-    if (from === undefined) {
-      if (this.preview !== undefined) this.preview.root.visible = false;
-      return;
-    }
-    if (this.preview !== undefined && this.previewSegments !== segments) {
-      // Another string was run on: a longer chain.
-      this.scene.remove(this.preview.root);
-      this.preview = undefined;
-    }
-    if (this.preview === undefined) {
-      this.preview = new RopeChain(this.parts, segments);
-      this.previewSegments = segments;
-      this.scene.add(this.preview.root);
-    }
-    this.preview.root.visible = true;
-    this.preview.stretch(from.x, from.y, from.z, toX, toY, toZ);
-  }
-
-  /** Hands every tied (and being-tied) bulb to the glow pool, nearest the eye first. */
+  /** Hands every bulb to the glow pool, nearest the eye first. */
   publishLights(eyeX: number, eyeY: number, eyeZ: number, extra?: () => void): void {
     bulbLights.begin(eyeX, eyeY, eyeZ);
     extra?.();
     for (const chain of this.chains.values()) chain.offerLights();
-    this.preview?.offerLights();
     bulbLights.commit();
   }
 
@@ -435,7 +419,5 @@ export class RopesView {
     bulbLights.commit();
     for (const chain of this.chains.values()) this.scene.remove(chain.root);
     this.chains.clear();
-    if (this.preview !== undefined) this.scene.remove(this.preview.root);
-    this.preview = undefined;
   }
 }

@@ -1,7 +1,6 @@
 import initJolt from "jolt-physics";
 import type Jolt from "jolt-physics";
 
-import { FLOATS_PER_VERTEX } from "@fgp/shared/voxel/vertexLayout";
 
 /**
  * Rigid-body physics: the Emscripten build of the same Jolt the native
@@ -126,21 +125,21 @@ export class PhysicsWorld {
   }
 
   /**
-   * Adds a static body for one chunk, built from its greedy mesh.
+   * Adds a static body for one ground tile, built from its triangles.
    *
-   * `vertices` is the interleaved layout the mesher emits, with positions
-   * chunk-local, so the body is placed at the chunk's world origin.
+   * `positions` is a flat x, y, z list, three corners per triangle, with x and z tile-local
+   * (so the body is placed at the tile's world origin) and y absolute.
    */
   addTerrainBody(
     key: number,
     originX: number,
     originY: number,
     originZ: number,
-    vertices: Float32Array,
+    positions: Float32Array,
     vertexCount: number,
   ): void {
     if (this.terrainBodies.has(key)) return;
-    // An empty chunk (solid rock or open air) has nothing to collide with.
+    // A tile with no triangles has nothing to collide with.
     if (vertexCount < 3) return;
 
     const J = this.jolt;
@@ -151,11 +150,11 @@ export class PhysicsWorld {
     for (let t = 0; t < triangleCount; t++) {
       const triangle = triangles.at(t);
       for (let corner = 0; corner < 3; corner++) {
-        const base = (t * 3 + corner) * FLOATS_PER_VERTEX;
+        const base = (t * 3 + corner) * 3;
         const v = triangle.get_mV(corner);
-        v.x = vertices[base] ?? 0;
-        v.y = vertices[base + 1] ?? 0;
-        v.z = vertices[base + 2] ?? 0;
+        v.x = positions[base] ?? 0;
+        v.y = positions[base + 1] ?? 0;
+        v.z = positions[base + 2] ?? 0;
       }
     }
 
@@ -393,6 +392,67 @@ export class PhysicsWorld {
     const handle = id.GetIndexAndSequenceNumber();
     this.bodies.set(handle, id);
     return handle;
+  }
+
+  /**
+   * A building piece: a box, or a cylinder along its own Y, at a pose. Static
+   * for a piece gripped to the world (it still has to be there for everything
+   * else to land on) and dynamic for one that rests, which starts asleep if
+   * `awake` is false -- a piece loaded from a save, or set down on solid
+   * ground, has no reason to be falling.
+   *
+   * Continuous collision is on for dynamic ones: a sheet of plywood is a few
+   * centimetres thick, and falling it would step clean through the terrain's
+   * (infinitely thin) surface between two ticks.
+   */
+  spawnPiece(
+    round: boolean,
+    halfX: number,
+    halfY: number,
+    halfZ: number,
+    x: number,
+    y: number,
+    z: number,
+    rotation: readonly [number, number, number, number],
+    mass: number,
+    dynamic: boolean,
+    awake: boolean,
+  ): BodyHandle | undefined {
+    const J = this.jolt;
+    const rounding = Math.min(0.02, halfX * 0.5, halfY * 0.5, round ? 1 : halfZ * 0.5);
+    const shape = round
+      ? new J.CylinderShapeSettings(halfY, halfX, rounding).Create()
+      : new J.BoxShapeSettings(new J.Vec3(halfX, halfY, halfZ), rounding).Create();
+    if (shape.HasError()) return undefined;
+    const creation = new J.BodyCreationSettings(
+      shape.Get(),
+      new J.RVec3(x, y, z),
+      new J.Quat(rotation[0], rotation[1], rotation[2], rotation[3]),
+      dynamic ? J.EMotionType_Dynamic : J.EMotionType_Static,
+      dynamic ? LAYER_DYNAMIC : LAYER_STATIC,
+    );
+    if (dynamic) {
+      creation.mOverrideMassProperties = J.EOverrideMassProperties_CalculateInertia;
+      creation.mMassPropertiesOverride.mMass = mass;
+      creation.mMotionQuality = J.EMotionQuality_LinearCast;
+      creation.mLinearDamping = 0.05;
+      creation.mAngularDamping = 0.2;
+    }
+    creation.mFriction = 0.7;
+    creation.mRestitution = 0.05;
+    const body = this.bodyInterface.CreateBody(creation);
+    J.destroy(creation);
+    const id = body.GetID();
+    this.bodyInterface.AddBody(id, dynamic && awake ? J.EActivation_Activate : J.EActivation_DontActivate);
+    const handle = id.GetIndexAndSequenceNumber();
+    this.bodies.set(handle, id);
+    return handle;
+  }
+
+  /** Wakes a sleeping body: what it rests on changed. */
+  activate(handle: BodyHandle): void {
+    const id = this.bodies.get(handle);
+    if (id !== undefined) this.bodyInterface.ActivateBody(id);
   }
 
   /** Writes a body's velocity into the caller's array as [vx,vy,vz, wx,wy,wz]. */

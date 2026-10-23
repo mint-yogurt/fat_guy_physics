@@ -10,7 +10,6 @@ import {
 
 import type { Tree } from "@fgp/shared/sim/world";
 import { Biome } from "@fgp/shared/voxel/biomeTint";
-import { Material, MATERIAL_COLORS } from "@fgp/shared/voxel/voxel";
 import { AUTUMN_FOLIAGE_COLOR } from "@fgp/shared/worldgen/generationSheet";
 import { metricsFor, TreeSpecies } from "@fgp/shared/worldgen/trees";
 
@@ -80,17 +79,9 @@ interface Instance {
   ownedTrunk: BufferGeometry | undefined;
 }
 
-function tint(material: Material): number {
-  const base = material * 3;
-  const r = MATERIAL_COLORS[base] ?? 1;
-  const g = MATERIAL_COLORS[base + 1] ?? 1;
-  const b = MATERIAL_COLORS[base + 2] ?? 1;
-  return (
-    (Math.round(r * 255) << 16) |
-    (Math.round(g * 255) << 8) |
-    Math.round(b * 255)
-  );
-}
+/** Flat tints the tree meshes' textures are multiplied by. */
+const WOOD_TINT = 0x5c3d26;
+const LEAF_TINT = 0x407a2b;
 
 export class TreeRenderer {
   private readonly instances = new Map<number, Instance>();
@@ -119,7 +110,7 @@ export class TreeRenderer {
     this.trunkMaterial = litByBulbs(
       new MeshLambertNodeMaterial({
         map,
-        color: tint(Material.Wood),
+        color: WOOD_TINT,
         // The slicer caps a cut, but the authored trunks are not all closed
         // meshes (branch ends, the base), so the inside stays drawn.
         side: DoubleSide,
@@ -130,7 +121,7 @@ export class TreeRenderer {
     );
     this.trunkMaterials = [this.trunkMaterial, this.stumpMaterial];
     this.foliageMaterial = litByBulbs(
-      new MeshLambertNodeMaterial({ map, color: tint(Material.Leaf) }),
+      new MeshLambertNodeMaterial({ map, color: LEAF_TINT }),
     );
     // The same leaves, recoloured: the texture is a placeholder, so the
     // autumn look is the tint alone.

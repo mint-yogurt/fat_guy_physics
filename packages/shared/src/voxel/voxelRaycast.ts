@@ -21,10 +21,17 @@ export interface VoxelHit {
   z: number;
   /** Distance along the ray at which the voxel was entered, in metres. */
   distance: number;
+  /**
+   * The face of the voxel the ray came in through, as the unit normal pointing
+   * back out of it (one axis, +-1). Straight up when the ray started inside it.
+   */
+  nx: number;
+  ny: number;
+  nz: number;
 }
 
 export function createVoxelHit(): VoxelHit {
-  return { hit: false, x: 0, y: 0, z: 0, distance: 0 };
+  return { hit: false, x: 0, y: 0, z: 0, distance: 0, nx: 0, ny: 1, nz: 0 };
 }
 
 // Per-axis scratch, module-level so the hot path allocates nothing. Safe to
@@ -90,6 +97,7 @@ export function raycastVoxel(
   }
 
   let t = 0;
+  let entered = -1;
   while (t <= maxDistanceMeters) {
     if (query.isSolid(voxel[0] ?? 0, voxel[1] ?? 0, voxel[2] ?? 0)) {
       out.hit = true;
@@ -97,6 +105,9 @@ export function raycastVoxel(
       out.y = voxel[1] ?? 0;
       out.z = voxel[2] ?? 0;
       out.distance = t;
+      out.nx = entered === 0 ? -(step[0] ?? 0) : 0;
+      out.ny = entered === 1 ? -(step[1] ?? 0) : entered < 0 ? 1 : 0;
+      out.nz = entered === 2 ? -(step[2] ?? 0) : 0;
       return out;
     }
 
@@ -104,6 +115,7 @@ export function raycastVoxel(
     if ((tMax[1] ?? 0) < (tMax[axis] ?? 0)) axis = 1;
     if ((tMax[2] ?? 0) < (tMax[axis] ?? 0)) axis = 2;
 
+    entered = axis;
     voxel[axis] = (voxel[axis] ?? 0) + (step[axis] ?? 0);
     t = tMax[axis] ?? 0;
     tMax[axis] = (tMax[axis] ?? 0) + (tDelta[axis] ?? 0);

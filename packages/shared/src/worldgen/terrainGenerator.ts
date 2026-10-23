@@ -1,19 +1,17 @@
 import FastNoiseLite from "fastnoise-lite";
 
-import { CHUNK_SIZE } from "../sim/constants.ts";
+import { VOXEL_SIZE } from "../sim/constants.ts";
 import { BiomeField, createBiomeWeights, type BiomeWeights } from "./biome.ts";
-import { TERRAIN } from "./generationSheet.ts";
-import { carveGrave } from "./graveCarve.ts";
-import { placeCell, type Placement } from "./spawns.ts";
-import { Material } from "../voxel/voxel.ts";
-import type { VoxelGrid } from "../voxel/voxelGrid.ts";
+import { GROUND, TERRAIN } from "./generationSheet.ts";
+import { groundHeightDirect } from "./groundField.ts";
 
 /**
  * Heightmap terrain generation, ported from src/voxel/TerrainGenerator.cpp.
  *
- * 2D fractal noise picks a surface height per (x,z) column; everything below
- * is solid and banded by depth, everything above is air. No caves or
- * overhangs at generation time -- excavation carves those later.
+ * 2D fractal noise picks a ground height per (x,z). The ground is no longer voxels: this is
+ * the height function the ground lattice samples (groundField.ts), with `surfaceHeight` the
+ * old whole-voxel version, kept because placement still measures slope in it and the C++
+ * golden data tests it.
  *
  * With `biomes` off this is a deliberately faithful port of the original
  * generator, shortcomings included, so it can still be diffed against the
@@ -23,9 +21,8 @@ import type { VoxelGrid } from "../voxel/voxelGrid.ts";
  * With `biomes` on (production), the biome field takes over the shape of the
  * ground. Each region has its own height function -- rolling hills, flats
  * and cliffs, or flats/hills/tiered bluffs, all tuned in the TERRAIN section
- * of generationSheet.ts -- blended by region weight. The same field recolours
- * terrain and drives sky, light and weather. Chunks also have the pits of
- * open graves cut into them.
+ * of generationSheet.ts -- blended by region weight. The same field retextures
+ * the ground and drives sky, light and weather.
  *
  * The `fastnoise-lite` npm package is the official JS port of the same
  * FastNoiseLite header the C++ uses. Substituting a different noise
@@ -81,10 +78,11 @@ export class TerrainGenerator {
   private readonly plainStyle: FastNoiseLite;
   private readonly plainHills: FastNoiseLite;
   private readonly bluffMask: FastNoiseLite;
+  /** Where the ground is dirt instead of grass. */
+  private readonly dirtPatches: FastNoiseLite;
 
   /** Scratch for surfaceHeight and the grave search. One generator per thread. */
   private readonly weights = createBiomeWeights();
-  private readonly placementScratch: Placement[] = [];
 
   /**
    * `biomes` exists for the golden-data tests, which assert vertex buffers
@@ -113,6 +111,7 @@ export class TerrainGenerator {
     this.plainStyle = makeNoise(seed, 0x301, TERRAIN.plain.styleFrequency, 2);
     this.plainHills = makeNoise(seed, 0x302, TERRAIN.plain.hillFrequency, 2);
     this.bluffMask = makeNoise(seed, 0x303, TERRAIN.plain.bluffMaskFrequency, 2);
+    this.dirtPatches = makeNoise(seed, 0x401, GROUND.dirtFrequency, 2);
   }
 
   /**
@@ -133,13 +132,43 @@ export class TerrainGenerator {
       const n = this.noise.GetNoise(worldX, worldZ);
       return BASE_HEIGHT + Math.trunc(n * AMPLITUDE);
     }
+    return TERRAIN.baseHeight + Math.round(this.offsetVoxels(worldX, worldZ));
+  }
 
+  /** Height above `baseHeight` in voxel units, unrounded: the biome-weighted blend of the regions' shapes. */
+  private offsetVoxels(worldX: number, worldZ: number): number {
     const w = this.biomeField.sample(worldX, worldZ, this.weights);
     let offset = 0;
     if (w.christmas > 0) offset += w.christmas * this.christmasOffset(worldX, worldZ);
     if (w.halloween > 0) offset += w.halloween * this.halloweenOffset(worldX, worldZ);
     if (w.plain > 0) offset += w.plain * this.plainOffset(worldX, worldZ);
-    return TERRAIN.baseHeight + Math.round(offset);
+    return offset;
+  }
+
+  /**
+   * The ground's height in metres at a world position in metres, smooth: the same field as
+   * {@link surfaceHeight} without the rounding to whole voxels. The ground lattice
+   * (groundField.ts) samples this at its vertices.
+   */
+  smoothHeight(xMeters: number, zMeters: number): number {
+    const vx = xMeters / VOXEL_SIZE;
+    const vz = zMeters / VOXEL_SIZE;
+    if (!this.biomes) return (BASE_HEIGHT + this.noise.GetNoise(vx, vz) * AMPLITUDE) * VOXEL_SIZE;
+    return (TERRAIN.baseHeight + this.offsetVoxels(vx, vz)) * VOXEL_SIZE;
+  }
+
+  /**
+   * Where the mesh really is at (x, z), in metres: the lattice's triangles, not the smooth
+   * field. This is what anything planted on the ground should stand on.
+   */
+  groundHeight(xMeters: number, zMeters: number): number {
+    return groundHeightDirect(this, xMeters, zMeters);
+  }
+
+  /** 0 = grass, 1 = dirt, from a slow noise field; slope is added by the caller. */
+  dirtPatch(xMeters: number, zMeters: number): number {
+    const n = this.dirtPatches.GetNoise(xMeters / VOXEL_SIZE, zMeters / VOXEL_SIZE);
+    return smoothstep(GROUND.dirtThreshold - GROUND.dirtEdge, GROUND.dirtThreshold + GROUND.dirtEdge, n);
   }
 
   /** Gentle rolling hills, barely roughened. */
@@ -202,84 +231,5 @@ export class TerrainGenerator {
       return out;
     }
     return this.biomeField.sample(worldX, worldZ, out);
-  }
-
-  private static materialForDepth(depthBelowSurface: number): Material {
-    if (depthBelowSurface === 0) return Material.Dirt;
-    if (depthBelowSurface <= 15) return Material.Gravel;
-    if (depthBelowSurface <= 24) return Material.Rock;
-    return Material.Granite;
-  }
-
-  /**
-   * Fills `grid` (a 32-cube chunk grid) for the chunk at the given chunk
-   * coordinate.
-   *
-   * Loop order is z-outer/x-inner over columns with the y fill innermost,
-   * matching the chunk's `x + 32y + 1024z` layout: the surface height is
-   * computed once per column rather than once per voxel.
-   */
-  generate(grid: VoxelGrid, chunkX: number, chunkY: number, chunkZ: number): void {
-    const originX = chunkX * CHUNK_SIZE;
-    const originY = chunkY * CHUNK_SIZE;
-    const originZ = chunkZ * CHUNK_SIZE;
-    const cells = grid.cells;
-    const tint = grid.columnTint;
-
-    for (let z = 0; z < CHUNK_SIZE; ++z) {
-      const worldZ = originZ + z;
-      for (let x = 0; x < CHUNK_SIZE; ++x) {
-        const worldX = originX + x;
-        const height = this.surfaceHeight(worldX, worldZ);
-        const columnBase = x + CHUNK_SIZE * CHUNK_SIZE * z;
-
-        // Per column, not per voxel: the field is a function of (x,z) only,
-        // and sampling it 32 times down a column would triple generation
-        // cost for an identical answer.
-        if (tint !== undefined) {
-          tint[x + CHUNK_SIZE * z] = this.biomes ? this.biomeField.tintAt(worldX, worldZ) : 0;
-        }
-
-        for (let y = 0; y < CHUNK_SIZE; ++y) {
-          const worldY = originY + y;
-          cells[columnBase + CHUNK_SIZE * y] =
-            worldY >= height
-              ? Material.Air
-              : TerrainGenerator.materialForDepth(height - worldY - 1);
-        }
-      }
-    }
-
-    if (this.biomes) this.carveOpenGraves(grid, chunkX, chunkY, chunkZ);
-  }
-
-  /**
-   * Digs the pits for open graves whose boxes reach into this chunk.
-   *
-   * The graves are found the way World finds them -- from the candidate
-   * point of each chunk column -- and a grave is at most ~1.3 m across
-   * against a 3.2 m column, so only the 3x3 columns around this one can
-   * hold a grave that touches it. Covered graves are left as solid ground:
-   * the topsoil hides the box anyway, and a hole under a mound the player
-   * can walk across would be a trapdoor.
-   */
-  private carveOpenGraves(grid: VoxelGrid, chunkX: number, chunkY: number, chunkZ: number): void {
-    const found = this.placementScratch;
-    for (let dz = -1; dz <= 1; dz++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        found.length = 0;
-        placeCell(this, chunkX + dx, chunkZ + dz, this.seed, found);
-        for (const placement of found) {
-          if (placement.type !== "prop" || placement.kind !== "grave" || placement.topsoil) continue;
-          carveGrave(
-            grid.cells,
-            chunkX * CHUNK_SIZE,
-            chunkY * CHUNK_SIZE,
-            chunkZ * CHUNK_SIZE,
-            placement,
-          );
-        }
-      }
-    }
   }
 }

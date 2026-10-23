@@ -56,9 +56,53 @@ export interface YawBox {
   sin: number;
 }
 
+/**
+ * A box or a cylinder turned any which way: a placed building piece (a plank,
+ * a sheet of plywood, a log). `axes` is its rotation as sim/rotation.ts'
+ * column-major matrix, so entries 0-2 are the piece's own X in the world, 3-5
+ * its Y and 6-8 its Z. A box has half sizes along each of its axes; a
+ * cylinder runs along its own Y with radius `halfX` and half length `halfY`.
+ * `reach` is the radius of the sphere round the whole thing, a quick no.
+ */
+export interface OrientedSolid {
+  readonly round: boolean;
+  x: number;
+  y: number;
+  z: number;
+  halfX: number;
+  halfY: number;
+  halfZ: number;
+  reach: number;
+  readonly axes: Float64Array;
+}
+
+/** Whether world point (px, py, pz) is inside `solid`, grown by `margin` metres on every side. */
+export function solidContains(solid: OrientedSolid, px: number, py: number, pz: number, margin = 0): boolean {
+  const dx = px - solid.x;
+  const dy = py - solid.y;
+  const dz = pz - solid.z;
+  const reach = solid.reach + margin;
+  if (dx * dx + dy * dy + dz * dz > reach * reach) return false;
+  const a = solid.axes;
+  const lx = dx * (a[0] ?? 0) + dy * (a[1] ?? 0) + dz * (a[2] ?? 0);
+  const ly = dx * (a[3] ?? 0) + dy * (a[4] ?? 0) + dz * (a[5] ?? 0);
+  const lz = dx * (a[6] ?? 0) + dy * (a[7] ?? 0) + dz * (a[8] ?? 0);
+  if (solid.round) {
+    const radius = solid.halfX + margin;
+    return Math.abs(ly) <= solid.halfY + margin && lx * lx + lz * lz <= radius * radius;
+  }
+  return (
+    Math.abs(lx) <= solid.halfX + margin &&
+    Math.abs(ly) <= solid.halfY + margin &&
+    Math.abs(lz) <= solid.halfZ + margin
+  );
+}
+
 export class SceneSolidQuery implements SolidQuery {
   /** Mutated in place by whoever owns the bodies; never reallocated. */
   readonly bodies: OrientedBody[] = [];
+  /** Placed building pieces that are at rest and can be walked on; owned and rebuilt by the build system. */
+  readonly pieces: OrientedSolid[] = [];
   /** Walls near the player (a gingerbread house's); owned and rebuilt by main, like `statics`. */
   readonly boxes: YawBox[] = [];
   /**
@@ -78,6 +122,7 @@ export class SceneSolidQuery implements SolidQuery {
       this.bodies.length === 0 &&
       this.statics.length === 0 &&
       this.boxes.length === 0 &&
+      this.pieces.length === 0 &&
       this.mounds.count === 0
     ) {
       return false;
@@ -92,9 +137,17 @@ export class SceneSolidQuery implements SolidQuery {
       insideAny(this.bodies, px, py, pz) ||
       insideAny(this.statics, px, py, pz) ||
       insideAnyBox(this.boxes, px, py, pz) ||
+      insideAnySolid(this.pieces, px, py, pz) ||
       this.mounds.contains(px, py, pz)
     );
   }
+}
+
+function insideAnySolid(solids: readonly OrientedSolid[], px: number, py: number, pz: number): boolean {
+  for (const solid of solids) {
+    if (solidContains(solid, px, py, pz)) return true;
+  }
+  return false;
 }
 
 function insideAnyBox(boxes: readonly YawBox[], px: number, py: number, pz: number): boolean {

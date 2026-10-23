@@ -1,4 +1,4 @@
-import { Color, Group, Sprite, SpriteMaterial, type Object3D, type Texture } from "three/webgpu";
+import { Color, Group, Quaternion, Sprite, SpriteMaterial, Vector3, type Object3D, type Texture } from "three/webgpu";
 
 import { HoldStyle, holdStyleOf } from "@fgp/shared/items/avatarPose";
 import type { ContainerKind } from "@fgp/shared/items/container";
@@ -13,7 +13,7 @@ import type { PropTemplates } from "./propAssets.ts";
  * third-person character. Each is built in metres, in a frame set by its
  * hold style, with its origin at the point the hand closes on:
  *
- *  - Blade: the shaft runs along +Z from the grip, business end out.
+ *  - Blade: the shaft runs along +Z from the grip, business end out (a stick, the fishing rod).
  *  - Carry: the long axis runs along +X, centred.
  *  - Pinch: a small thing at the origin, facing the camera.
  *  - Ball: a sphere centred on the origin, in the fist.
@@ -73,6 +73,18 @@ function iconSprite(sources: HeldItemSources, type: ItemType, size: number, fall
   const sprite = new Sprite(material);
   sprite.scale.setScalar(size);
   return sprite;
+}
+
+/**
+ * A crafting material cradled in both arms. The meshes are authored with their
+ * long side on Z (the wheel round its X axis), and Carry wants it along X.
+ */
+function carriedAlongX(mesh: Object3D): Object3D {
+  const carry = new Group();
+  const copy = mesh.clone();
+  copy.rotation.y = Math.PI / 2;
+  carry.add(copy);
+  return carry;
 }
 
 const BUILDERS: Record<ItemType, Builder> = {
@@ -150,6 +162,20 @@ const BUILDERS: Record<ItemType, Builder> = {
     ball.add(mesh);
     return ball;
   },
+  [ItemType.Toobifer]: ({ assets }) => carriedAlongX(assets.toobifer),
+  [ItemType.Plywood]: ({ assets }) => carriedAlongX(assets.plywood),
+  [ItemType.Wheel]: ({ assets }) => carriedAlongX(assets.wheel),
+  [ItemType.Ladder]: ({ assets }) => carriedAlongX(assets.ladder),
+  [ItemType.Spring]: ({ assets }) => {
+    const ball = new Group();
+    const mesh = assets.spring.clone();
+    mesh.scale.multiplyScalar(HELD_COAL_SCALE);
+    ball.add(mesh);
+    return ball;
+  },
+  // On the feet, not in a hand: see playerModel.ts.
+  [ItemType.SpringShoes]: () => new Group(),
+  [ItemType.FishingRod]: ({ assets }) => assets.fishingRodHeld.clone(),
   // In the hand it is a ball of it; as an item (slot, ground) it is the puddle.
   [ItemType.Goo]: ({ assets }) => {
     const ball = new Group();
@@ -169,6 +195,14 @@ const BUILDERS: Record<ItemType, Builder> = {
   [ItemType.Leaf]: (sources) => iconSprite(sources, ItemType.Leaf, HELD_LEAF_SIZE, 0x4e8c2b),
 };
 
+const rollParent = new Quaternion();
+const rollAxis = new Vector3();
+const rollReel = new Vector3();
+const rollWanted = new Vector3();
+const rollCross = new Vector3();
+const WORLD_DOWN = new Vector3(0, -1, 0);
+const Z_UNIT = new Vector3(0, 0, 1);
+
 /**
  * One view's held items: builds each item's mesh the first time it is held,
  * under `parent`, and shows whichever is held now.
@@ -181,6 +215,39 @@ export class HeldItemSlot {
     private readonly parent: Object3D,
     private readonly sources: HeldItemSources,
   ) {}
+
+  /** The part of the shown item's mesh called `name` (the fishing rod's line tip), if it is on show. */
+  anchor(name: string): Object3D | undefined {
+    if (this.shown === undefined) return undefined;
+    const object = this.built.get(this.shown);
+    return object?.visible === true ? object.getObjectByName(name) : undefined;
+  }
+
+  /**
+   * Rolls the fishing rod about its own length so its reel hangs underneath, however the arm
+   * has turned it. Call once the holder has been posed for the frame. The rod is built with its
+   * reel on its local +X and its length along +Z; the rod's group is rolled about that Z.
+   * "Under" is down in the scene the holder is in: the world in third person, the camera's
+   * view space (the arm's own scene) in first person.
+   *
+   * Only `resting` frames set the roll. Drawn back for a cast the rod swings through straight
+   * up, where "under" flips to the other side, so the roll is held and the rod turns as one piece.
+   */
+  settleRod(resting: boolean): void {
+    if (!resting || this.shown !== ItemType.FishingRod) return;
+    const rod = this.built.get(ItemType.FishingRod);
+    if (rod === undefined || !rod.visible) return;
+    this.parent.updateWorldMatrix(true, false);
+    this.parent.getWorldQuaternion(rollParent);
+    rollAxis.set(0, 0, 1).applyQuaternion(rollParent);
+    rollReel.set(1, 0, 0).applyAxisAngle(Z_UNIT, rod.rotation.z).applyQuaternion(rollParent);
+    rollWanted.copy(WORLD_DOWN).addScaledVector(rollAxis, -WORLD_DOWN.dot(rollAxis));
+    // Rod pointing straight up or down: there is no "under" to roll to, so it keeps its roll.
+    if (rollWanted.lengthSq() < 0.05) return;
+    rollWanted.normalize();
+    rollCross.crossVectors(rollReel, rollWanted);
+    rod.rotation.z += Math.atan2(rollAxis.dot(rollCross), rollReel.dot(rollWanted));
+  }
 
   /** Shows `held` (or nothing); returns its hold style. */
   show(held: ItemType | undefined, visible = true): HoldStyle {

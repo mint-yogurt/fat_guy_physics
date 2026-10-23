@@ -39,6 +39,30 @@ describe("controlHintsFor", () => {
     for (const item of [ItemType.Coal, ItemType.Metal, ItemType.Candy]) expect(controlHintsFor(item)).toEqual([]);
   });
 
+  it("shows how to place and turn everything placeable, and a log's tap-or-hold", () => {
+    const turning = [
+      { key: "Scroll", action: "turn" },
+      { key: "R", action: "turn freely", hold: true },
+    ];
+    for (const item of [
+      ItemType.Trampoline,
+      ItemType.PresentSmall,
+      ItemType.CandyBucket,
+      ItemType.Ladder,
+      ItemType.Toobifer,
+      ItemType.Plywood,
+      ItemType.Wheel,
+    ]) {
+      expect(controlHintsFor(item), String(item)).toEqual([{ key: "LMB", action: "place" }, ...turning]);
+    }
+    expect(controlHintsFor(ItemType.Log)).toEqual([
+      { key: "LMB", action: "place" },
+      { key: "LMB", action: "bowl", hold: true },
+      { key: "RMB", action: "lob", hold: true },
+      ...turning,
+    ]);
+  });
+
   it("shows the lights' extend and cancel buttons only when they apply", () => {
     const keys = (placing: boolean, canExtend: boolean): string[] =>
       controlHintsFor(ItemType.XmasLights, { placing, canExtend }).map((h) => `${h.key} ${h.action}`);

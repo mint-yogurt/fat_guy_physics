@@ -51,6 +51,18 @@ const PUSH_ACCEL_MAX = 10;
 const PUSH_MAX_SPEED_MIN = 5;
 const PUSH_MAX_SPEED_MAX = 11;
 
+/**
+ * At the speed pushing can reach, the rider stops pushing and just rides,
+ * holding that speed; the push starts again once something (an uphill, a
+ * turn, a lift in the cap) leaves them this far under it.
+ */
+const PUSH_RESUME_GAP = 0.6;
+/** Board and rider follow the ground's angle this fast (1/s) on the ground, and level out at this rate in the air. */
+const TILT_FOLLOW = 20;
+const TILT_LEVEL = 3;
+/** How far from the board's centre, sideways, the ground is read for its roll. */
+const ROLL_REACH = 0.3;
+
 const OLLIE_SPEED = 4.8;
 /** Faster rolling pops higher: each m/s of speed adds this much, up to the cap. */
 const OLLIE_SPEED_PER_MS = 0.28;
@@ -133,8 +145,15 @@ export class SkateState {
   /** Seconds left in a bail; > 0 means down. */
   bailTime = 0;
   airborne = false;
-  /** W is held on the ground: the rider faces forward to push instead of standing sideways. */
+  /** The rider is pushing: faces forward and strokes with a leg, instead of standing sideways. */
   pushing = false;
+  /**
+   * Angle of the ground under the wheels, radians: nose up (+) or down (-)
+   * along the board, and rolled about it. The board and rider are drawn tilted
+   * by these, as a real board follows the ground it is on.
+   */
+  pitch = 0;
+  roll = 0;
   /** Bumped on every bail, for sound and the like. */
   bails = 0;
   /** Bumped on every ollie and every kickflip started, likewise. */
@@ -151,6 +170,9 @@ export class SkateState {
   ejected: BoardLaunch | undefined = undefined;
 
   private slope = 0;
+  private rollSlope = 0;
+  /** W is held but the rider is at the top speed pushing gives: riding it out, not pushing. */
+  private capped = false;
   /** Velocity handed to the sweep this substep: the board's, before anything stopped the rider. */
   private preVx = 0;
   private preVz = 0;
@@ -179,6 +201,11 @@ export class SkateState {
     this.bailTime = 0;
     this.airborne = !player.grounded;
     this.slope = 0;
+    this.rollSlope = 0;
+    this.pitch = 0;
+    this.roll = 0;
+    this.capped = false;
+    this.pushing = false;
     this.flipT = 0;
     this.flipping = false;
     this.ollieBuffer = 0;
@@ -233,40 +260,61 @@ export class SkateState {
       // under the wheels, which is what the board leaves the ground with.
       along -= (GRAVITY * this.slope * dt) / Math.sqrt(1 + this.slope * this.slope);
 
+      // The same ground read across the board, for the way it is banked.
+      const lx = -hz;
+      const lz = hx;
+      const right = groundTop(query, p.x + lx * ROLL_REACH, p.z + lz * ROLL_REACH, p.y + 0.6, 1.5);
+      const left = groundTop(query, p.x - lx * ROLL_REACH, p.z - lz * ROLL_REACH, p.y + 0.6, 1.5);
+      if (right > -Infinity && left > -Infinity) {
+        const measured = Math.max(-1, Math.min(1, (right - left) / (2 * ROLL_REACH)));
+        this.rollSlope += (measured - this.rollSlope) * Math.min(1, dt * 15);
+      }
+      // Nose up on a rise, and the deck's up leaning the way the ground falls away.
+      const follow = Math.min(1, dt * TILT_FOLLOW);
+      this.pitch += (Math.atan(this.slope) - this.pitch) * follow;
+      this.roll += (-Math.atan(this.rollSlope) - this.roll) * follow;
+
       // Manual: right mouse held, rolling, balancing on the back wheels.
       const manualWanted = input.skateTrickHeld && speed > MANUAL_MIN_SPEED;
       this.manual += ((manualWanted ? MANUAL_ANGLE : 0) - this.manual) * Math.min(1, dt * MANUAL_RATE);
 
       // Pushing: a leg stroke, slow to start, quicker and stronger the longer W is held.
+      // Holding W keeps the run ramping up even once the rider is at the top
+      // speed it allows, so the cap lifts and the pushing starts again.
+      const wantsPush = input.moveZ > 0 && this.manual < 0.1;
+      if (wantsPush) this.pushRamp = Math.min(1, this.pushRamp + dt / PUSH_RAMP_SECONDS);
+      else this.pushRamp = Math.max(0, this.pushRamp - dt * PUSH_RAMP_DECAY);
+      const top = PUSH_MAX_SPEED_MIN + (PUSH_MAX_SPEED_MAX - PUSH_MAX_SPEED_MIN) * this.pushRamp;
+      this.capped = wantsPush && (this.capped ? along >= top - PUSH_RESUME_GAP : along >= top);
       const wasPushing = this.pushing;
-      this.pushing = input.moveZ > 0 && this.manual < 0.1;
+      this.pushing = wantsPush && !this.capped;
       if (this.pushing) {
-        this.pushRamp = Math.min(1, this.pushRamp + dt / PUSH_RAMP_SECONDS);
         const strokeBefore = wasPushing ? this.pushPhase : 1;
         this.pushPhase =
           (this.pushPhase + dt * (PUSH_RATE_MIN + (PUSH_RATE_MAX - PUSH_RATE_MIN) * this.pushRamp)) % 1;
         // The leg kicks as the phase starts over, and on the first stroke of a run.
         if (this.pushPhase < strokeBefore) this.pushes = (this.pushes + 1) & 0xff;
         const stroke = Math.max(0, Math.sin(this.pushPhase * TAU));
-        const top = PUSH_MAX_SPEED_MIN + (PUSH_MAX_SPEED_MAX - PUSH_MAX_SPEED_MIN) * this.pushRamp;
-        if (along < top) {
-          const accel = PUSH_ACCEL_MIN + (PUSH_ACCEL_MAX - PUSH_ACCEL_MIN) * this.pushRamp;
-          along += accel * stroke * dt;
-        }
+        const accel = PUSH_ACCEL_MIN + (PUSH_ACCEL_MAX - PUSH_ACCEL_MIN) * this.pushRamp;
+        along += accel * stroke * dt;
       } else {
-        this.pushRamp = Math.max(0, this.pushRamp - dt * PUSH_RAMP_DECAY);
         this.pushPhase = 0;
       }
 
       // Drag: a foot on the ground, and rolling resistance.
       let drag = ROLL_DRAG + (this.manual > 0.1 ? MANUAL_DRAG : 0);
       if (input.moveZ < 0) drag += BRAKE;
-      const slowed = Math.abs(along) * (1 - Math.exp(-ROLL_DRAG_PROPORTIONAL * dt)) + drag * dt;
+      // Riding out the top speed holds it: the push that would be needed to keep it is not drawn.
+      const slowed = this.capped ? 0 : Math.abs(along) * (1 - Math.exp(-ROLL_DRAG_PROPORTIONAL * dt)) + drag * dt;
       along = Math.sign(along) * Math.max(0, Math.abs(along) - slowed);
 
       if (this.ollieBuffer > 0) this.ollie(p, along);
     } else {
       this.pushing = false;
+      this.capped = false;
+      const level = Math.min(1, dt * TILT_LEVEL);
+      this.pitch -= this.pitch * level;
+      this.roll -= this.roll * level;
       this.manual += (0 - this.manual) * Math.min(1, dt * MANUAL_RATE);
       this.pushRamp = Math.max(0, this.pushRamp - dt * PUSH_RAMP_DECAY);
       this.pushPhase = 0;
@@ -309,6 +357,10 @@ export class SkateState {
   private updateDown(p: Player, dt: number): void {
     this.bailTime = Math.max(0, this.bailTime - dt);
     this.pushing = false;
+    this.capped = false;
+    const level = Math.min(1, dt * 8);
+    this.pitch -= this.pitch * level;
+    this.roll -= this.roll * level;
     const down = this.bailTime > BAIL_GET_UP_SECONDS;
     this.bailTilt += ((down ? 1 : 0) - this.bailTilt) * Math.min(1, dt * (down ? 9 : 6));
     if (this.bailTime === 0) this.bailTilt = 0;

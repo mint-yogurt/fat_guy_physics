@@ -39,13 +39,16 @@ export async function createRenderer(canvas: HTMLCanvasElement): Promise<Rendere
 
   const renderer = new WebGPURenderer({
     canvas,
-    antialias: true,
+    // No MSAA: the 3D scene is drawn small by LowResPass (n64Pass.ts) and
+    // blown up with nearest sampling, so edge smoothing would only soften
+    // the blocks. What reaches the canvas is a flat quad and the DOM-aligned
+    // hotbar icons.
+    antialias: false,
     forceWebGL: forcedWebGL,
   });
 
-  // Capped at 2: this is a chunky-voxel game with no thin geometry to
-  // alias, so rendering 9x the pixels on a 3x-DPR display buys nothing and
-  // costs most of the frame budget.
+  // Capped at 2: the canvas only needs to be sharp enough to show the low-res
+  // picture's blocks cleanly, so 9x the pixels on a 3x-DPR display buys nothing.
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   // Floored at 1x1: a tab that has not been laid out yet (freshly opened, or
   // opened in the background) reports innerWidth/innerHeight of 0, and

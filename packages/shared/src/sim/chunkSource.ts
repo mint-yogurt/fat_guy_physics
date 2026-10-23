@@ -1,7 +1,5 @@
 import type { ChunkKey } from "./chunkKey.ts";
-import { FLOATS_PER_VERTEX } from "../voxel/vertexLayout.ts";
-import { Mesher } from "../voxel/greedyMesher.ts";
-import { createChunkGrid } from "../voxel/voxelGrid.ts";
+import { buildGroundTile } from "../worldgen/groundMesh.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
 
 /**
@@ -20,24 +18,18 @@ import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
  * Polling keeps the "how much GPU work this frame" decision in one place.
  */
 
-/** One finished chunk. Every buffer is owned by the receiver. */
+/**
+ * One finished ground tile (one chunk column; `cy` is always 0). Every buffer is owned by
+ * the receiver.
+ */
 export interface ChunkResult {
   key: ChunkKey;
   cx: number;
   cy: number;
   cz: number;
-  /** CHUNK_VOLUME material bytes. */
-  cells: Uint8Array;
-  /**
-   * CHUNK_SIZE^2 packed biome tint bytes, one per column.
-   *
-   * Carried back from the worker rather than recomputed on arrival because
-   * the main thread re-meshes a chunk every time it is dug, and a re-mesh
-   * without the tint would flip the chunk back to its untinted colours the
-   * first time the player touched it.
-   */
-  columnTint: Uint8Array;
-  /** Exactly `vertexCount * FLOATS_PER_VERTEX` long -- no slack. */
+  /** The tile's vertex heights (groundField.ts), which the solid test and raycast read. */
+  lattice: Float32Array;
+  /** Exactly `vertexCount * GROUND_FLOATS_PER_VERTEX` long -- no slack. */
   vertices: Float32Array;
   vertexCount: number;
 }
@@ -53,37 +45,20 @@ export interface ChunkSource {
 }
 
 /**
- * Generates and meshes one chunk. Pure CPU work with no I/O and no shared
+ * Generates and meshes one ground tile. Pure CPU work with no I/O and no shared
  * state beyond the generator's seed, which is what makes it safe to run on a
- * worker.
- *
- * The returned vertex array is a **copy** sized exactly to the vertex count,
- * not a view onto the mesher's scratch. That is deliberate: this value
- * crosses a thread boundary as a transferable, so it has to own its buffer,
- * and a transferable has to be exactly the right size or the receiver pays
- * for the slack forever.
+ * worker. Every buffer in the result is freshly allocated and exactly sized,
+ * because the result crosses a thread boundary as a transferable.
  */
 export function buildChunk(
   generator: TerrainGenerator,
-  mesher: Mesher,
   key: ChunkKey,
   cx: number,
   cy: number,
   cz: number,
 ): ChunkResult {
-  const grid = createChunkGrid();
-  generator.generate(grid, cx, cy, cz);
-  const mesh = mesher.mesh(grid);
-  return {
-    key,
-    cx,
-    cy,
-    cz,
-    cells: grid.cells,
-    columnTint: grid.columnTint ?? new Uint8Array(0),
-    vertices: mesh.vertices.slice(0, mesh.vertexCount * FLOATS_PER_VERTEX),
-    vertexCount: mesh.vertexCount,
-  };
+  const tile = buildGroundTile(generator, cx, cz);
+  return { key, cx, cy, cz, lattice: tile.lattice, vertices: tile.vertices, vertexCount: tile.vertexCount };
 }
 
 /**
@@ -95,7 +70,6 @@ export function buildChunk(
  */
 export class SyncChunkSource implements ChunkSource {
   private readonly generator: TerrainGenerator;
-  private readonly mesher = new Mesher();
   private readonly ready: ChunkResult[] = [];
 
   constructor(seed: number) {
@@ -107,7 +81,7 @@ export class SyncChunkSource implements ChunkSource {
   }
 
   submit(key: ChunkKey, cx: number, cy: number, cz: number): void {
-    this.ready.push(buildChunk(this.generator, this.mesher, key, cx, cy, cz));
+    this.ready.push(buildChunk(this.generator, key, cx, cy, cz));
   }
 
   poll(): ChunkResult | undefined {

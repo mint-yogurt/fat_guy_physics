@@ -80,7 +80,7 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return el;
 }
 
-function itemLabel(stack: ItemStack): string {
+function itemLabel(stack: Readonly<ItemStack>): string {
   const container = containerKindOfItem(stack.type);
   const name = container !== undefined ? CONTAINER_NAMES[container] : itemDisplayName(stack.type);
   return stack.count > 1 ? `${name} x${String(stack.count)}` : name;
@@ -94,6 +94,8 @@ export class InventoryScreen {
   private readonly craftBoxes: SlotEntry[] = [];
   private readonly craftPluses: HTMLSpanElement[] = [];
   private readonly resultSlot: SlotEntry;
+  private readonly craftAllButton: HTMLButtonElement;
+  private readonly craftCycleButton: HTMLButtonElement;
   private readonly containerSlots: SlotEntry[] = [];
 
   private readonly mainPanel: HTMLDivElement;
@@ -148,8 +150,19 @@ export class InventoryScreen {
       this.craftBoxes.push(this.makeSlot(craftRow, this.crafting, i));
     }
     element("span", "craft-sign craft-equals", craftRow).textContent = "=";
-    this.resultSlot = this.makeSlot(craftRow, undefined, 0);
+    const output = element("div", "craft-output", craftRow);
+    this.resultSlot = this.makeSlot(output, undefined, 0);
     this.resultSlot.el.classList.add("result");
+    // ALL crafts as many as the boxes pay for (onto the mouse, up to a stack).
+    this.craftAllButton = element("button", "inv-button craft-all", output);
+    this.craftAllButton.type = "button";
+    this.craftAllButton.textContent = "ALL";
+    this.craftAllButton.addEventListener("click", this.onCraftAll);
+    // Stopgap for the recipe list (see items/crafting.ts): when the boxes could
+    // make several things, this steps through them. "1/4" = showing the first of four.
+    this.craftCycleButton = element("button", "inv-button craft-cycle", craftRow);
+    this.craftCycleButton.type = "button";
+    this.craftCycleButton.addEventListener("click", this.onCraftCycle);
 
     // --- the inventory: backpack rows on top, the hotbar as the bottom row ---
     const pack = element("div", "inv-pack", this.mainPanel);
@@ -268,7 +281,7 @@ export class InventoryScreen {
     if (event.button === 2) {
       // Right click cancels the move.
       const leftover = this.cursor.cancel();
-      if (leftover !== undefined) this.hooks.drop(leftover);
+      if (leftover !== undefined) this.putAway(leftover);
       this.hooks.sound("cancel");
       return;
     }
@@ -276,13 +289,26 @@ export class InventoryScreen {
     const entry = this.entryFor(event.target);
     if (entry === undefined) return;
     if (entry.grid === undefined) {
-      // The crafting result. STUB: there are no recipes, so nothing to take.
-      this.hooks.sound("error");
+      // The crafting result: one craft per click, onto the mouse.
+      this.craft(1);
       return;
     }
     const holding = !this.cursor.empty;
     if (this.cursor.click(entry.grid, entry.index)) this.hooks.sound(holding ? "place" : "pick");
     else if (holding) this.hooks.sound("error");
+  };
+
+  private craft(times: number): void {
+    this.hooks.sound(this.crafting.craft(this.cursor, times) > 0 ? "pick" : "error");
+  }
+
+  private readonly onCraftAll = (): void => {
+    this.craft(Infinity);
+  };
+
+  private readonly onCraftCycle = (): void => {
+    this.crafting.cycle();
+    this.hooks.sound("place");
   };
 
   /** Everything in the open container that fits goes into the inventory. */
@@ -309,6 +335,8 @@ export class InventoryScreen {
       storage?.version ?? "-",
       this.crafting.version,
       this.cursor.version,
+      // What is learned changes the result without touching the boxes.
+      this.crafting.result()?.type ?? "-",
     ].join("|");
     if (signature === this.signature) return;
     this.signature = signature;
@@ -327,6 +355,13 @@ export class InventoryScreen {
       const plus = this.craftPluses[i - 1];
       if (plus !== undefined) plus.hidden = !box.shown;
     }
+
+    const result = this.crafting.result();
+    this.resultSlot.count.textContent = result !== undefined && result.count > 1 ? String(result.count) : "";
+    const options = this.crafting.options.length;
+    this.craftCycleButton.hidden = options < 2;
+    this.craftCycleButton.textContent = `${String(this.crafting.optionIndex + 1)}/${String(options)}`;
+    this.craftAllButton.disabled = result === undefined;
 
     const held = this.cursor.held;
     this.cursorCount.textContent = held !== undefined && held.count > 1 ? String(held.count) : "";
@@ -409,7 +444,9 @@ export class InventoryScreen {
     this.cursorCount.style.transform = `translate(${String(this.mouseX + 8)}px, ${String(this.mouseY + 6)}px)`;
     const hoverStack =
       held === undefined && this.hovered?.shown === true
-        ? this.hovered.grid?.slot(this.hovered.index)
+        ? this.hovered === this.resultSlot
+          ? this.crafting.result()
+          : this.hovered.grid?.slot(this.hovered.index)
         : undefined;
     this.tip.hidden = hoverStack === undefined;
     if (hoverStack !== undefined) {

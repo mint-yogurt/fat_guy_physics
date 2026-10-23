@@ -6,6 +6,7 @@ import {
   type ElasticCollider,
   type ElasticMaterial,
 } from "../sim/elastic.ts";
+import { PLAYER_MASS, PlayerMode, type Player } from "../sim/player.ts";
 import type { Snowball } from "./snowball.ts";
 
 /**
@@ -15,8 +16,9 @@ import type { Snowball } from "./snowball.ts";
  * where it bends), with an end tied to each of two things. An end is tied
  * either to a fixed point (ground, a tree) or to a {@link RopeBody}, a thing
  * that moves (a snowball, a felled log): the rope end follows it, and when the
- * rope is stretched past its length it pulls on it. Walking players are a
- * body kind that does not exist yet.
+ * rope is stretched past its length it pulls on it. The player is one too
+ * ({@link PlayerRopeBody}): a string tied at one end and held in the hand at the
+ * other pulls the walker up short, and drags whatever it is tied to.
  *
  * The chain is simulated with position-based dynamics, compliance included
  * (XPBD): a segment resists being stretched with a stiffness from the
@@ -141,6 +143,13 @@ export interface RopeBody {
   readonly mass: number;
   /** An impulse (N*s) at the tie point: the rope pulling. */
   push(ix: number, iy: number, iz: number): void;
+  /** The most force the rope pulls this body with, newtons; the spec's `maxForce` if absent. */
+  readonly maxPull?: number;
+  /**
+   * A collider the rope passes through without touching, because this body is
+   * it: a rope held in the player's hand does not push on the player's own box.
+   */
+  readonly exempt?: ElasticCollider | undefined;
 }
 
 /** Where one end of a rope is tied: a point in the world, or a thing that moves. */
@@ -341,6 +350,32 @@ export class Rope {
     this.pushOnColliders(colliders, dt);
   }
 
+  /** True for a collider that is one of the things this rope is tied to. */
+  private isExempt(collider: ElasticCollider): boolean {
+    return this.ties[0].body?.exempt === collider || this.ties[1].body?.exempt === collider;
+  }
+
+  /**
+   * Lays this rope along the shape of another one (a longer or shorter one that
+   * it replaces), by how far along each is, so extending a rope does not make it
+   * jump. Nodes keep no speed.
+   */
+  seedFrom(other: Rope): void {
+    const from = other.positions;
+    const last = other.nodeCount - 1;
+    for (let i = 0; i < this.nodeCount; i++) {
+      const at = (i / (this.nodeCount - 1)) * last;
+      const j = Math.min(last - 1, Math.floor(at));
+      const f = at - j;
+      for (let axis = 0; axis < 3; axis++) {
+        const a = from[j * 3 + axis] ?? 0;
+        const b = from[(j + 1) * 3 + axis] ?? 0;
+        this.positions[i * 3 + axis] = a + (b - a) * f;
+      }
+    }
+    this.previous.set(this.positions);
+  }
+
   /**
    * Pushes free nodes, and the middle of each segment, out of the colliders,
    * and remembers which collider holds each one out. The rope goes round the
@@ -356,7 +391,7 @@ export class Rope {
 
     for (let c = 0; c < colliders.length; c++) {
       const collider = colliders[c];
-      if (collider === undefined || !collider.bounds(bounds)) continue;
+      if (collider === undefined || this.isExempt(collider) || !collider.bounds(bounds)) continue;
       const near = bounds.radius + radius + 0.05;
 
       for (let i = 0; i < n; i++) {
@@ -411,7 +446,7 @@ export class Rope {
 
     for (let c = 0; c < colliders.length; c++) {
       const collider = colliders[c];
-      if (collider === undefined) continue;
+      if (collider === undefined || this.isExempt(collider)) continue;
       let fx = 0;
       let fy = 0;
       let fz = 0;
@@ -548,12 +583,19 @@ export class Rope {
     prev[k + 2] = (pos[k + 2] ?? 0) - vz * CONTACT_GRIP;
   }
 
-  /** Pulls each tied body toward the rope by however taut the segment at its end is. */
+  /**
+   * Pulls each tied body toward the rope. The pull is the tension of the whole
+   * rope (how much longer than it was cut it now is), the same at both ends, as
+   * in any cord; the segment at the end alone would read too high or too low on
+   * a long chain while the stretch is still travelling along it.
+   */
   private pullOnBodies(dt: number): void {
     const pos = this.positions;
     const prev = this.previous;
     const n = this.nodeCount;
     const stiffness = this.spec.stiffness * this.spec.segments;
+    const anyBody = this.ties[0].body !== undefined || this.ties[1].body !== undefined;
+    const tension = anyBody ? this.stretchForce : 0;
     for (let end = 0; end < 2; end++) {
       const t = this.ties[end];
       const node = end === 0 ? 0 : n - 1;
@@ -567,8 +609,9 @@ export class Rope {
       const stretch = dist - this.segmentLength;
       let force = stretch > 0 ? stiffness * stretch : 0;
 
-      if (t?.body !== undefined && force > 0 && dist > 1e-9) {
+      if (t?.body !== undefined && tension > 0 && dist > 1e-9) {
         const body = t.body;
+        force = tension;
         const ux = dx / dist;
         const uy = dy / dist;
         const uz = dz / dist;
@@ -580,7 +623,7 @@ export class Rope {
           (((pos[b + 2] ?? 0) - (prev[b + 2] ?? 0)) / dt - tieVel.z) * uz;
         const mass = body.mass;
         force += 2 * PULL_DAMPING * Math.sqrt(this.spec.stiffness * mass) * away;
-        force = Math.min(this.spec.maxForce, Math.max(0, force));
+        force = Math.min(body.maxPull ?? this.spec.maxForce, Math.max(0, force));
         this.tension[end] = force;
         if (force > 0) {
           const impulse = Math.min(force * dt, mass * MAX_PULL_DV);
@@ -818,5 +861,62 @@ export class BallRopeBody implements RopeBody {
     ball.vx += dvx;
     ball.vy += dvy;
     ball.vz += dvz;
+  }
+}
+
+/** Where a rope held in the hand is tied, metres above the feet: about the belt. */
+const HAND_HEIGHT = 1;
+/** ...and how far in front of the player's middle. */
+const HAND_FORWARD = 0.4;
+/**
+ * The most a rope pulls a player with, newtons. A walker leans against 1800 and
+ * stops dead at the rope's max strain anyway (it hardens there, see
+ * `HARDENING`); this is only the ceiling for a player thrown at the end of it.
+ */
+const PLAYER_MAX_PULL = 6000;
+
+/**
+ * A rope end held by the player: it is tied at their hand, follows them, and
+ * pulls them back when the rope is stretched. The other end, tied to a rock,
+ * drags the rock instead.
+ */
+export class PlayerRopeBody implements RopeBody {
+  readonly mass = PLAYER_MASS;
+  readonly maxPull = PLAYER_MAX_PULL;
+
+  /**
+   * `exempt` is the player's own {@link ElasticCollider} (PlayerBody): the rope is
+   * held in their hand, so it does not push on their box.
+   */
+  constructor(
+    private readonly player: Player,
+    readonly exempt?: ElasticCollider,
+  ) {}
+
+  tiePoint(out: RopeVec): boolean {
+    const p = this.player;
+    if (p.mode === PlayerMode.Ragball) {
+      out.x = p.x;
+      out.y = p.y + p.ballRadius;
+      out.z = p.z;
+      return true;
+    }
+    const flat = Math.hypot(p.frontX, p.frontZ);
+    const fx = flat > 1e-6 ? p.frontX / flat : 0;
+    const fz = flat > 1e-6 ? p.frontZ / flat : 0;
+    out.x = p.x + fx * HAND_FORWARD;
+    out.y = p.y + HAND_HEIGHT;
+    out.z = p.z + fz * HAND_FORWARD;
+    return true;
+  }
+
+  tieVelocity(out: RopeVec): void {
+    out.x = this.player.vx;
+    out.y = this.player.vy;
+    out.z = this.player.vz;
+  }
+
+  push(ix: number, iy: number, iz: number): void {
+    this.player.applyImpulse(ix, iy, iz);
   }
 }

@@ -1,5 +1,6 @@
 import { Quaternion, Vector3, type Object3D, type Scene } from "three/webgpu";
 
+import { createBuildHit, type BuildField } from "@fgp/shared/items/building";
 import { ItemType } from "@fgp/shared/items/inventory";
 import type { PickupField } from "@fgp/shared/items/pickupField";
 import { TRAMPOLINE_RADIUS, TRAMPOLINE_RESTITUTION, type TrampolineField } from "@fgp/shared/items/trampoline";
@@ -56,6 +57,7 @@ export class ThrownSticks {
   private readonly flying: Flying[] = [];
   private readonly sceneHit = createSceneHit();
   private readonly pieceHit = createPieceHit();
+  private readonly buildHit = createBuildHit();
 
   constructor(
     private readonly scene: Scene,
@@ -63,6 +65,7 @@ export class ThrownSticks {
     private readonly world: World,
     private readonly pickups: PickupField,
     private readonly trampolines: TrampolineField,
+    private readonly pieces: BuildField,
   ) {}
 
   get count(): number {
@@ -143,6 +146,17 @@ export class ThrownSticks {
     const sceneDistance = scene.kind === HitKind.None ? Infinity : scene.distance;
     const piece = logs?.raycast(tip.x, tip.y, tip.z, ux, uy, uz, length, this.pieceHit);
     const pieceDistance = piece?.piece === undefined ? Infinity : piece.distance;
+
+    // A placed building piece (a ladder, a plank) is neither in the voxels nor
+    // the log system: a stick hitting one bounces off and falls.
+    this.pieces.raycast(tip.x, tip.y, tip.z, ux, uy, uz, Math.min(length, sceneDistance, pieceDistance), this.buildHit);
+    if (this.buildHit.piece !== undefined) {
+      const v = stick.velocity;
+      tip.set(this.buildHit.x - ux * 0.05, this.buildHit.y - uy * 0.05, this.buildHit.z - uz * 0.05);
+      this.onHit?.(tip.x, tip.y, tip.z, "log", -1);
+      this.dropLoose(tip, now, -v.x * 0.15, 1, -v.z * 0.15);
+      return true;
+    }
 
     if (pieceDistance < sceneDistance && piece?.piece !== undefined && logs !== undefined) {
       const v = stick.velocity;

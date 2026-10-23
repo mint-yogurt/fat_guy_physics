@@ -3,7 +3,7 @@ import {
   DoubleSide,
   Float32BufferAttribute,
   Mesh,
-  MeshStandardNodeMaterial,
+  MeshLambertNodeMaterial,
   Quaternion,
   Vector3,
   type Node,
@@ -30,7 +30,7 @@ import {
  * Slime. One look for everything made of it: the goo item, the ball of goo in
  * the hand, and the stain it leaves where it splats. See-through and wet: a
  * lime green that swirls slowly inside itself, clearer in the middle of a
- * lump and more solid at its rim, with the sun glinting off it hard.
+ * lump and more solid at its rim. No specular: a sharp sun reflection does not fit the N64 look.
  *
  * The green is also the colour of the fizz a burst can of mountain lightning
  * sprays, which is why it is exported.
@@ -48,32 +48,38 @@ function gooColour(at: Node<"vec3">, speed: number) {
   return mix(color(GOO_DEEP), color(GOO_COLOR), swirl);
 }
 
-/** Wet and bright: glossy, with a little glow of its own so it does not go dull at dusk. */
-function wet(material: MeshStandardNodeMaterial): void {
-  material.roughness = 0.05;
-  material.metalness = 0;
+/**
+ * See-through and bright, with a little glow of its own so it does not go dull at dusk. Lambert
+ * on purpose: no specular, so no sun glint (a crisp reflection is far finer than the picture).
+ */
+function wet(material: MeshLambertNodeMaterial): void {
   material.transparent = true;
   material.depthWrite = false;
   material.side = DoubleSide;
 }
 
+/** NodeMaterial reads emissiveNode for every lit material; the Lambert typings just omit it. */
+function glow(material: MeshLambertNodeMaterial, node: Node): void {
+  (material as MeshLambertNodeMaterial & { emissiveNode: Node | null }).emissiveNode = node;
+}
+
 /** The goo item and the ball of goo. */
-export function createGooMaterial(): MeshStandardNodeMaterial {
-  const material = new MeshStandardNodeMaterial();
+export function createGooMaterial(): MeshLambertNodeMaterial {
+  const material = new MeshLambertNodeMaterial();
   wet(material);
   const body = gooColour(positionLocal, 0.3);
   const facing = saturate(normalView.dot(positionViewDirection).abs());
   // Edge-on surfaces are the thick of the lump: more solid there than head on.
   const rim = pow(float(1).sub(facing), 2.5);
   material.colorNode = body;
-  material.emissiveNode = body.mul(0.22);
+  glow(material, body.mul(0.22));
   material.opacityNode = float(0.66).add(rim.mul(0.34));
   return material;
 }
 
 /** The splat on the ground or a wall: a blob with a wobbling edge, drawn on a plane with uvs. */
-export function createStainMaterial(): MeshStandardNodeMaterial {
-  const material = new MeshStandardNodeMaterial();
+export function createStainMaterial(): MeshLambertNodeMaterial {
+  const material = new MeshLambertNodeMaterial();
   wet(material);
   material.polygonOffset = true;
   material.polygonOffsetFactor = -2;
@@ -88,7 +94,7 @@ export function createStainMaterial(): MeshStandardNodeMaterial {
   const thick = float(1).sub(smoothstep(0.0, 0.8, radius));
   const swirl = gooColour(vec3(p.x, p.y, 0.5), 0.12);
   material.colorNode = mix(swirl, color(GOO_DEEP), thick.mul(0.35));
-  material.emissiveNode = swirl.mul(0.18);
+  glow(material, swirl.mul(0.18));
   material.opacityNode = blob.mul(float(0.6).add(thick.mul(0.3)));
   return material;
 }

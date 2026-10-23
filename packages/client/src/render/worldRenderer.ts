@@ -10,9 +10,8 @@ import {
 import type { ChunkKey } from "@fgp/shared/sim/chunkKey";
 import type { ChunkResult } from "@fgp/shared/sim/chunkSource";
 import { CHUNK_METERS, type ChunkSink, type PlacedRock, type Prop, type Tree } from "@fgp/shared/sim/world";
-import { FLOATS_PER_VERTEX } from "@fgp/shared/voxel/vertexLayout";
 
-import { applyMeshData, createChunkGeometry, disposeChunkGeometry } from "./chunkGeometry.ts";
+import { createGroundGeometry, disposeGroundGeometry } from "./groundGeometry.ts";
 import type { PropRenderer } from "./propRenderer.ts";
 import type { TreeRenderer } from "./treeRenderer.ts";
 
@@ -49,71 +48,19 @@ export class WorldRenderer implements ChunkSink {
   }
 
   onChunkLoaded(result: ChunkResult): void {
-    // An empty chunk (solid rock, or pure air above the terrain) meshes to
-    // zero vertices. Roughly half of a 4-layer vertical band is one or the
-    // other, so skipping them here rather than adding empty Meshes keeps the
-    // scene graph at about half the size for free.
     if (result.vertexCount === 0) return;
 
-    // No copy: the buffer came from a worker as a transferable and is
-    // already owned by this thread.
-    this.addMesh(result.key, result.cx, result.cy, result.cz, result.vertices, result.vertexCount);
-  }
-
-  /** @param vertices must already be owned by this thread. */
-  private addMesh(
-    key: ChunkKey,
-    cx: number,
-    cy: number,
-    cz: number,
-    vertices: Float32Array,
-    vertexCount: number,
-  ): void {
-    const object = new Mesh(createChunkGeometry(vertices, vertexCount), this.material);
-    object.position.set(cx * CHUNK_METERS, cy * CHUNK_METERS, cz * CHUNK_METERS);
-    // Chunk geometry is already in chunk-local metres and the only transform
-    // is this translation, so there is nothing for three.js to recompute
+    // No copy: the buffer came from a worker as a transferable and is already owned by this
+    // thread. The tile's vertices are tile-local in x and z and absolute in y.
+    const object = new Mesh(createGroundGeometry(result.vertices, result.vertexCount), this.material);
+    object.position.set(result.cx * CHUNK_METERS, 0, result.cz * CHUNK_METERS);
+    // The only transform is this translation, so there is nothing for three.js to recompute
     // after the first frame.
     object.matrixAutoUpdate = false;
     object.updateMatrix();
 
     this.scene.add(object);
-    this.meshes.set(key, object);
-  }
-
-  /**
-   * Replaces an edited chunk's geometry in place.
-   *
-   * `vertices` is the mesher's scratch, so it is copied. Digging can also
-   * take a chunk to zero vertices (scooping out the last of a thin shelf)
-   * or bring one back from zero -- neither is common, but both leave a
-   * visible hole or a ghost block if unhandled.
-   */
-  onChunkRemeshed(
-    key: ChunkKey,
-    cx: number,
-    cy: number,
-    cz: number,
-    vertices: Float32Array,
-    vertexCount: number,
-  ): void {
-    const existing = this.meshes.get(key);
-
-    if (vertexCount === 0) {
-      if (existing !== undefined) this.onChunkUnloaded(key);
-      return;
-    }
-
-    if (existing === undefined) {
-      this.addMesh(key, cx, cy, cz, vertices.slice(0, vertexCount * FLOATS_PER_VERTEX), vertexCount);
-      return;
-    }
-
-    applyMeshData(
-      existing.geometry,
-      vertices.slice(0, vertexCount * FLOATS_PER_VERTEX),
-      vertexCount,
-    );
+    this.meshes.set(result.key, object);
   }
 
   onTreePlaced(tree: Tree): void {
@@ -191,14 +138,14 @@ export class WorldRenderer implements ChunkSink {
     // Not optional. three.js does not free GPU buffers on garbage
     // collection, so a dereferenced geometry leaks its VBO for the lifetime
     // of the page -- and streaming churns hundreds of them per minute.
-    disposeChunkGeometry(object.geometry);
+    disposeGroundGeometry(object.geometry);
   }
 
   /** Drops every chunk mesh. For teardown and for Vite's HMR dispose hook. */
   clear(): void {
     for (const object of this.meshes.values()) {
       this.scene.remove(object);
-      disposeChunkGeometry(object.geometry);
+      disposeGroundGeometry(object.geometry);
     }
     this.meshes.clear();
     this.trees.clear();

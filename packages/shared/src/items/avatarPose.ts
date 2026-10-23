@@ -99,7 +99,24 @@ const HOLD_STYLES: Record<ItemType, HoldStyle> = {
   [ItemType.Goo]: HoldStyle.Ball,
   [ItemType.Metal]: HoldStyle.Ball,
   [ItemType.Candy]: HoldStyle.Ball,
+  // Cradled in both arms, like a log; they do nothing yet.
+  [ItemType.Toobifer]: HoldStyle.Carry,
+  [ItemType.Plywood]: HoldStyle.Carry,
+  [ItemType.Wheel]: HoldStyle.Carry,
+  [ItemType.Ladder]: HoldStyle.Carry,
+  // In the fist, and that is all.
+  [ItemType.Spring]: HoldStyle.Ball,
+  // Not in a hand at all: they are on the feet.
+  [ItemType.SpringShoes]: HoldStyle.Empty,
+  // Gripped at the handle like a stick, tip out. Casting reuses the spear wind-up and lunge, but
+  // the rod never leaves the hand (`leavesHandOnThrow`).
+  [ItemType.FishingRod]: HoldStyle.Blade,
 };
+
+/** Whether a throw of the held item sends it out of the hand (a stick, a log); a cast keeps the rod. */
+export function leavesHandOnThrow(held: ItemType | undefined): boolean {
+  return held !== ItemType.FishingRod;
+}
 
 export function holdStyleOf(held: ItemType | undefined): HoldStyle {
   return held === undefined ? HoldStyle.Empty : HOLD_STYLES[held];

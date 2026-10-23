@@ -51,13 +51,31 @@ function setup(world = new FlatWorld()): { world: FlatWorld; mats: TrampolineFie
 }
 
 describe("placement specs", () => {
-  it("covers the mat and every container, and nothing else yet", () => {
+  it("covers the mat, every container and the building pieces, and nothing else yet", () => {
     expect(placementOf(ItemType.Trampoline)?.round).toBe(true);
     expect(placementOf(ItemType.PresentSmall)?.facesPlayer).toBe(true);
     expect(placementOf(ItemType.CandyBucket)?.hideHeldInFirstPerson).toBe(true);
     expect(placementOf(ItemType.Stick)).toBeUndefined();
     expect(placementOf(undefined)).toBeUndefined();
-    expect(Object.keys(PLACEMENTS)).toHaveLength(4);
+    // The mat, three containers, and the five building pieces (items/building.ts).
+    expect(Object.keys(PLACEMENTS)).toHaveLength(9);
+  });
+
+  it("turns a footprint by the player's spin, on top of the way it faces", () => {
+    const { planner } = setup();
+    const mat = placementOf(ItemType.Trampoline);
+    const gift = placementOf(ItemType.PresentSmall);
+    if (mat === undefined || gift === undefined) throw new Error("no spec");
+    const plain = planner.plan(mat, 5, 5, faraway);
+    expect(plain.yaw).toBe(0);
+    const turned = planner.plan(mat, 5, 5, faraway, Math.PI / 2);
+    expect(turned.yaw).toBeCloseTo(Math.PI / 2, 6);
+    // The quaternion is the same turn.
+    expect(turned.qy).toBeCloseTo(Math.sin(Math.PI / 4), 6);
+    expect(turned.qw).toBeCloseTo(Math.cos(Math.PI / 4), 6);
+
+    const facing = planner.plan(gift, 5, 5, faraway).yaw;
+    expect(planner.plan(gift, 5, 5, faraway, 0.5).yaw).toBeCloseTo(facing + 0.5, 6);
   });
 });
 

@@ -1,6 +1,7 @@
 import type { Prop } from "../sim/world.ts";
+import type { ContainerSave, StackSave } from "../save/snapshot.ts";
 import { OBJECT_SHEET } from "../worldgen/generationSheet.ts";
-import { MAX_STACK, ItemType, itemTypeFromName, type Inventory, type ItemGrid, type ItemStack } from "./inventory.ts";
+import { ITEM_NAMES, MAX_STACK, ItemType, itemTypeFromName, type Inventory, type ItemGrid, type ItemStack } from "./inventory.ts";
 import { PICKUP_REACH } from "./pickupField.ts";
 
 /**
@@ -185,6 +186,43 @@ export class ContainerField {
   /** Drops a container's storage (it was picked up; it was empty). */
   forget(propId: number): void {
     this.storages.delete(propId);
+  }
+
+  /** Changes whenever any container is opened, filled or emptied, for a saver to notice. */
+  get revision(): number {
+    let total = this.storages.size;
+    for (const storage of this.storages.values()) total += storage.version;
+    return total;
+  }
+
+  /**
+   * Every container that has storage, empty ones included: an emptied container must
+   * come back empty, not refilled from its loot.
+   */
+  exportAll(): ContainerSave[] {
+    const out: ContainerSave[] = [];
+    for (const [id, storage] of this.storages) {
+      const slots: (StackSave | null)[] = [];
+      for (let i = 0; i < storage.size; i++) {
+        const stack = storage.slot(i);
+        slots.push(stack === undefined ? null : { item: ITEM_NAMES[stack.type] ?? "", count: stack.count });
+      }
+      out.push({ id, columns: storage.columns, rows: storage.rows, slots });
+    }
+    return out;
+  }
+
+  /** Puts a saved container's contents back (before its prop is drawn, so it is drawn as it was). */
+  restore(save: ContainerSave): void {
+    const storage = new ContainerStorage(save.columns, save.rows);
+    save.slots.forEach((stack, i) => {
+      const type = stack === null ? undefined : itemTypeFromName(stack.item);
+      if (stack !== null && type !== undefined) storage.setSlot(i, { type, count: stack.count });
+    });
+    storage.version = 0;
+    const id = save.id;
+    storage.onEmptyChanged = (empty) => this.onEmptyChanged?.(id, empty);
+    this.storages.set(id, storage);
   }
 }
 

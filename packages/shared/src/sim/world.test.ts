@@ -1,16 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import { chunkKey, keyX, keyY, keyZ } from "./chunkKey.ts";
-import { FLOATS_PER_VERTEX } from "../voxel/vertexLayout.ts";
-import { Material } from "../voxel/voxel.ts";
+import { GROUND_FLOATS_PER_VERTEX } from "../worldgen/groundMesh.ts";
+import { LATTICE_SIDE } from "../worldgen/groundField.ts";
 import { type ChunkResult, SyncChunkSource } from "./chunkSource.ts";
-import { CHUNK_VOLUME } from "./constants.ts";
+import { VOXEL_SIZE } from "./constants.ts";
 import {
   CHUNK_METERS,
   type ChunkSink,
   desiredChunkSet,
-  VERTICAL_CHUNK_MAX,
-  VERTICAL_CHUNK_MIN,
   World,
 } from "./world.ts";
 
@@ -46,7 +44,7 @@ describe("chunkKey", () => {
 });
 
 describe("desiredChunkSet", () => {
-  const layers = VERTICAL_CHUNK_MAX - VERTICAL_CHUNK_MIN + 1;
+  const layers = 1;
 
   function columnsForRadius(radius: number): number {
     let columns = 0;
@@ -58,14 +56,13 @@ describe("desiredChunkSet", () => {
     return columns;
   }
 
-  it("fills a cylinder of the fixed vertical band", () => {
+  it("fills a disc of single-layer tiles", () => {
     const out = desiredChunkSet(0, 0, 6, new Set());
     expect(out.size).toBe(columnsForRadius(6) * layers);
 
     for (const key of out) {
       const y = keyY(key);
-      expect(y).toBeGreaterThanOrEqual(VERTICAL_CHUNK_MIN);
-      expect(y).toBeLessThanOrEqual(VERTICAL_CHUNK_MAX);
+      expect(y).toBe(0);
       expect(keyX(key) ** 2 + keyZ(key) ** 2).toBeLessThanOrEqual(36);
     }
   });
@@ -103,7 +100,6 @@ describe("World streaming", () => {
   class RecordingSink implements ChunkSink {
     readonly loaded: number[] = [];
     readonly unloaded: number[] = [];
-    readonly remeshed: number[] = [];
     /** Summed to prove the buffers handed over are real mesh data. */
     totalVertices = 0;
 
@@ -112,14 +108,11 @@ describe("World streaming", () => {
       this.totalVertices += result.vertexCount;
       // The contract is "exactly vertexCount long, no slack" -- geometry
       // uploads the whole buffer, so slack would render as garbage.
-      expect(result.vertices.length).toBe(result.vertexCount * FLOATS_PER_VERTEX);
-      expect(result.cells.length).toBe(CHUNK_VOLUME);
+      expect(result.vertices.length).toBe(result.vertexCount * GROUND_FLOATS_PER_VERTEX);
+      expect(result.lattice.length).toBe(LATTICE_SIDE * LATTICE_SIDE);
     }
     onChunkUnloaded(key: number): void {
       this.unloaded.push(key);
-    }
-    onChunkRemeshed(key: number): void {
-      this.remeshed.push(key);
     }
     onTreePlaced(): void {}
     onTreeFoliageRemoved(): void {}
@@ -133,7 +126,6 @@ describe("World streaming", () => {
     reset(): void {
       this.loaded.length = 0;
       this.unloaded.length = 0;
-      this.remeshed.length = 0;
     }
   }
 
@@ -225,17 +217,29 @@ describe("World streaming", () => {
     expect(world.loadedCount).toBe(desired.size);
   });
 
-  it("reads voxels back through materialAt and returns Air outside the loaded set", () => {
+  it("answers solid and ground height from the loaded tiles, and empty outside them", () => {
     const world = makeWorld();
     const sink = new RecordingSink();
     world.update(0, 0, sink);
     drainAll(world, sink);
 
-    // Deep underground inside the loaded band is solid; far outside the
-    // radius is Air because the chunk simply is not there.
-    const surfaceY = world.surfaceHeightVoxels(0, 0);
-    expect(world.materialAt(0, surfaceY - 8, 0)).not.toBe(Material.Air);
-    expect(world.materialAt(0, surfaceY + 8, 0)).toBe(Material.Air);
-    expect(world.materialAt(100000, surfaceY - 8, 100000)).toBe(Material.Air);
+    const ground = world.groundHeight(0.05, 0.05);
+    const surfaceY = Math.floor(ground / VOXEL_SIZE);
+    expect(world.isSolid(0, surfaceY - 8, 0)).toBe(true);
+    expect(world.isSolid(0, surfaceY + 8, 0)).toBe(false);
+    expect(world.isSolid(100000, surfaceY - 8, 100000)).toBe(false);
+    expect(world.hasChunkAt(0, 0, 0)).toBe(true);
+    expect(world.hasChunkAt(100000, 0, 100000)).toBe(false);
+  });
+
+  it("gives the same ground height from a loaded tile as straight from the generator", () => {
+    const loaded = makeWorld();
+    const unloaded = makeWorld();
+    const sink = new RecordingSink();
+    loaded.update(0, 0, sink);
+    drainAll(loaded, sink);
+    for (const [x, z] of [[0.3, 0.7], [-1.9, 2.2], [2.5, -3.1], [5.55, 5.55]] as const) {
+      expect(loaded.groundHeight(x, z)).toBeCloseTo(unloaded.groundHeight(x, z), 5);
+    }
   });
 });

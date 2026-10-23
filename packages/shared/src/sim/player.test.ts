@@ -3,11 +3,7 @@ import { describe, expect, it } from "vitest";
 import goldenJson from "../../../../tools/golden/golden.json" with { type: "json" };
 
 import type { SolidQuery } from "./collision.ts";
-import { CHUNK_SIZE } from "./constants.ts";
 import { createPlayerInput, Player, PlayerMode } from "./player.ts";
-import { VERTICAL_CHUNK_MAX, VERTICAL_CHUNK_MIN } from "./world.ts";
-import { floorDiv, floorMod, isSolid, Material } from "../voxel/voxel.ts";
-import { createChunkGrid, gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
 
 /**
@@ -34,14 +30,16 @@ interface GoldenTrace {
 const golden = goldenJson as unknown as { seed: number; playerTrace: GoldenTrace };
 
 /**
- * Terrain-only solidity, generated on demand and cached. Mirrors
- * tools/golden/stub/World.hpp exactly, including the vertical band outside
- * which everything reads as Air -- that is what lets a fall off the world
- * reach the kill plane in both implementations.
+ * Terrain-only solidity for the reference world: every voxel below the surface column's
+ * height is solid, inside the band the reference generated (voxel y 0..159, the old five
+ * 32-voxel layers) and Air outside it -- which is what lets a fall off the world reach the
+ * kill plane in both implementations. (The reference's voxel contents are no longer
+ * generated; this is the same solidity without them.)
  */
+const BAND_TOP = 160;
+
 class TraceQuery implements SolidQuery {
   private readonly generator: TerrainGenerator;
-  private readonly chunks = new Map<string, VoxelGrid>();
 
   constructor(seed: number) {
     // The reference world has no biomes, and with them on the heights are
@@ -55,27 +53,8 @@ class TraceQuery implements SolidQuery {
   }
 
   isSolid(vx: number, vy: number, vz: number): boolean {
-    const cy = floorDiv(vy, CHUNK_SIZE);
-    if (cy < VERTICAL_CHUNK_MIN || cy > VERTICAL_CHUNK_MAX) return false;
-
-    const cx = floorDiv(vx, CHUNK_SIZE);
-    const cz = floorDiv(vz, CHUNK_SIZE);
-    const key = `${cx},${cy},${cz}`;
-    let grid = this.chunks.get(key);
-    if (grid === undefined) {
-      grid = createChunkGrid();
-      this.generator.generate(grid, cx, cy, cz);
-      this.chunks.set(key, grid);
-    }
-    const material = grid.cells[
-      gridIndex(
-        grid,
-        floorMod(vx, CHUNK_SIZE),
-        floorMod(vy, CHUNK_SIZE),
-        floorMod(vz, CHUNK_SIZE),
-      )
-    ] as Material;
-    return isSolid(material);
+    if (vy < 0 || vy >= BAND_TOP) return false;
+    return vy < this.generator.surfaceHeight(vx, vz);
   }
 }
 

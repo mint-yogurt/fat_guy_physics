@@ -3,21 +3,28 @@ import type { ChunkResult, ChunkSource } from "./chunkSource.ts";
 import { CHUNK_SIZE, VOXEL_SIZE } from "./constants.ts";
 import { nowMs } from "./time.ts";
 import { sectionAtHeight, sectionsOf, standingSections } from "./propDamage.ts";
-import { Mesher, type MeshData } from "../voxel/greedyMesher.ts";
-import { floorDiv, floorMod, isHandDiggable, isSolid, Material } from "../voxel/voxel.ts";
-import { gridIndex, type VoxelGrid } from "../voxel/voxelGrid.ts";
 import { createVoxelHit, raycastVoxel } from "../voxel/voxelRaycast.ts";
 import { Biome } from "../voxel/biomeTint.ts";
+import type { PlacedPropSave, WorldEdits } from "../save/snapshot.ts";
 import { createBiomeWeights, type BiomeWeights } from "../worldgen/biome.ts";
 import { DROP_CHANCE, OBJECT_SHEET, type DropRow } from "../worldgen/generationSheet.ts";
+import {
+  gradientInTile,
+  heightInTile,
+  latticeCells,
+  TILE_METERS,
+  tileOf,
+} from "../worldgen/groundField.ts";
+import { groundBlend, type GroundBlend } from "../worldgen/groundMesh.ts";
 import { PROP_METRICS, type PropKind, type PropSection } from "../worldgen/props.ts";
 import { placeVegetation, type Placement } from "../worldgen/spawns.ts";
 import { TerrainGenerator } from "../worldgen/terrainGenerator.ts";
 import { metricsFor, TreeSpecies, treeLightCount, treeShape } from "../worldgen/trees.ts";
 
 /**
- * Chunk streaming and voxel storage. Ports the data half of
- * src/voxel/World.{hpp,cpp}.
+ * Ground-tile streaming and the world's things (trees, props, rocks). Descends from the data
+ * half of src/voxel/World.{hpp,cpp}, from when the ground was voxels; it no longer is (see
+ * DESIGN.md), so the "chunk" here is a tile of heightfield, one column wide.
  *
  * Two things from the C++ are deliberately absent:
  *
@@ -36,13 +43,10 @@ import { metricsFor, TreeSpecies, treeLightCount, treeShape } from "../worldgen/
  */
 
 /**
- * The C++ had 0..3 (12.8 m), enough for its +/-2.4 m bumps. Cliffs and
- * tiered bluffs reach 6.4 m base + ~9 m, so one more layer: 0..4 is 16 m.
- * The extra layer is mostly air and meshes to nothing, but it is a fifth of
- * the chunks generated and tested for, which is why it is not simply 8.
+ * How high above the origin the world is allowed to hold anything (a restored save is clamped
+ * to it). Cliffs and tiered bluffs reach 6.4 m base + ~9 m.
  */
-export const VERTICAL_CHUNK_MIN = 0;
-export const VERTICAL_CHUNK_MAX = 4;
+export const WORLD_CEILING_METERS = 16;
 
 /**
  * Doubled from the C++'s 6 at M13. Six chunks is 19m, which is close enough
@@ -87,22 +91,6 @@ export interface ChunkSink {
    */
   onChunkLoaded(result: ChunkResult): void;
   onChunkUnloaded(key: ChunkKey): void;
-  /**
-   * An already-loaded chunk's geometry changed (digging).
-   *
-   * Unlike onChunkLoaded, `vertices` is a **view onto reusable scratch** and
-   * is invalidated by the next remesh -- edits happen on the main thread
-   * against a shared mesher, so there is no transferable to hand over. Copy
-   * what you keep.
-   */
-  onChunkRemeshed(
-    key: ChunkKey,
-    cx: number,
-    cy: number,
-    cz: number,
-    vertices: Float32Array,
-    vertexCount: number,
-  ): void;
   /**
    * A tree came into range. The sink builds its scene objects from the
    * tree's species and dimensions; no geometry is passed, because a tree is
@@ -265,13 +253,14 @@ export interface PropHit {
 /** A depleting prop (a snowbank) never shrinks below this fraction of its size until it is gone. */
 const DEPLETED_MIN_SCALE = 0.3;
 
-/** The topmost solid voxel of a column; see {@link World.topSolid}. */
-export interface ColumnTop {
-  material: Material;
-  /** World voxel Y of that voxel. */
-  voxelY: number;
-  /** Packed biome tint of the column (voxel/biomeTint.ts). */
-  tint: number;
+/** What the ground is like at a point; see {@link World.groundSurface}. */
+export interface GroundSurface extends GroundBlend {
+  /** Height of the ground there, metres. */
+  height: number;
+}
+
+export function createGroundSurface(): GroundSurface {
+  return { height: 0, grass: 0, dirt: 0, snow: 0, spooky: 0 };
 }
 
 /** Swings to cut through a trunk, and how far a cut may wander. */
@@ -333,6 +322,14 @@ export interface SceneHit {
   centerY: number;
   centerZ: number;
   distance: number;
+  /**
+   * The voxel face the ray came in through (unit, one axis). A tree or a prop
+   * is made of voxels to the ray too, so for those it is only a rough answer:
+   * a caller that wants the round surface works it out from the thing itself.
+   */
+  normalX: number;
+  normalY: number;
+  normalZ: number;
 }
 
 export function createSceneHit(): SceneHit {
@@ -348,6 +345,9 @@ export function createSceneHit(): SceneHit {
     centerY: 0,
     centerZ: 0,
     distance: 0,
+    normalX: 0,
+    normalY: 1,
+    normalZ: 0,
   };
 }
 
@@ -377,9 +377,7 @@ export function desiredChunkSet(
   for (let dx = -radiusChunks; dx <= radiusChunks; dx++) {
     for (let dz = -radiusChunks; dz <= radiusChunks; dz++) {
       if (dx * dx + dz * dz > radiusSq) continue;
-      for (let cy = VERTICAL_CHUNK_MIN; cy <= VERTICAL_CHUNK_MAX; cy++) {
-        out.add(chunkKey(centerX + dx, cy, centerZ + dz));
-      }
+      out.add(chunkKey(centerX + dx, 0, centerZ + dz));
     }
   }
   return out;
@@ -391,24 +389,13 @@ function columnKey(cx: number, cz: number): string {
 
 export class World {
   private readonly generator: TerrainGenerator;
-  private readonly chunks = new Map<ChunkKey, VoxelGrid>();
+  /** Loaded ground tiles' lattices (groundField.ts), by tile key (cy is 0). */
+  private readonly tiles = new Map<ChunkKey, Float32Array>();
   private readonly desired = new Set<ChunkKey>();
   private readonly inFlight = new Set<ChunkKey>();
 
   /** Scratch for the distance sort in submitDesired. Reused, never freed. */
   private readonly submitQueue: ChunkKey[] = [];
-
-  /**
-   * Mesher used only for re-meshing edited chunks on the calling thread.
-   * Streaming meshes on workers, but an edit has to be reflected this frame
-   * -- a round trip to a worker would show the player a hole appearing one
-   * or two frames after they dug it. A dig touches at most a handful of
-   * chunks, so the cost is bounded.
-   */
-  private readonly editMesher = new Mesher();
-
-  /** Reused by digSphere so a held scoop does not allocate per tick. */
-  private readonly dirtyScratch = new Set<ChunkKey>();
 
   private readonly trees = new Map<number, Tree>();
   /** Which chunk spawned which trees, so unloading a chunk unloads them. */
@@ -451,6 +438,8 @@ export class World {
   private readonly propDamage = new Map<number, number[]>();
   /** Which parts of a prop have come off, by prop id, so a regenerated chunk brings it back as it was. */
   private readonly propBroken = new Map<number, number>();
+  /** Bumped by every change a save would need to record; see {@link editRevision}. */
+  private revision = 0;
 
   /** Trees the in-flight raycast might hit. Refilled per raycast. */
   private readonly rayTrees: Tree[] = [];
@@ -466,10 +455,13 @@ export class World {
    */
   private readonly sceneQuery = {
     isSolid: (vx: number, vy: number, vz: number): boolean =>
-      isSolid(this.materialAt(vx, vy, vz)) ||
+      this.isSolid(vx, vy, vz) ||
       this.treeSolidAt(vx, vy, vz) ||
       this.propSolidAt(vx, vy, vz),
   };
+
+  private readonly gradientScratch = { x: 0, z: 0 };
+  private readonly normalScratch = { x: 0, y: 1, z: 0 };
 
   private hasCenter = false;
   private centerX = 0;
@@ -484,7 +476,12 @@ export class World {
   }
 
   get loadedCount(): number {
-    return this.chunks.size;
+    return this.tiles.size;
+  }
+
+  /** Changes whenever the world is edited, so a saver can skip writing an unchanged world. */
+  get editRevision(): number {
+    return this.revision;
   }
 
   /** Chunks submitted but not yet drained. Zero means streaming has settled. */
@@ -496,8 +493,69 @@ export class World {
     return this.loadRadiusChunks;
   }
 
+  /**
+   * Ground height in metres at a world position in metres: the height of the mesh the player
+   * sees and stands on, from the loaded tile when there is one and straight from the
+   * generator otherwise (so it also answers outside the loaded area).
+   */
+  groundHeight(xMeters: number, zMeters: number): number {
+    const cx = tileOf(xMeters);
+    const cz = tileOf(zMeters);
+    const lattice = this.tiles.get(chunkKey(cx, 0, cz));
+    if (lattice === undefined) return this.generator.groundHeight(xMeters, zMeters);
+    return heightInTile(lattice, cx, cz, xMeters, zMeters);
+  }
+
+  /**
+   * The ground's height at the centre of a world voxel column, in voxel units (so a caller
+   * that works in voxels can keep doing so). Smooth, not a whole number: multiply by
+   * VOXEL_SIZE for metres, or just call {@link groundHeight}.
+   */
   surfaceHeightVoxels(worldX: number, worldZ: number): number {
-    return this.generator.surfaceHeight(worldX, worldZ);
+    return this.groundHeight((worldX + 0.5) * VOXEL_SIZE, (worldZ + 0.5) * VOXEL_SIZE) / VOXEL_SIZE;
+  }
+
+  /**
+   * What the ground is at (x, z), in metres: height and how much grass, dirt and snow shows
+   * (for the map). False when that tile is not loaded.
+   */
+  groundSurface(xMeters: number, zMeters: number, out: GroundSurface): boolean {
+    const cx = tileOf(xMeters);
+    const cz = tileOf(zMeters);
+    const lattice = this.tiles.get(chunkKey(cx, 0, cz));
+    if (lattice === undefined) return false;
+    out.height = heightInTile(lattice, cx, cz, xMeters, zMeters);
+    gradientInTile(lattice, cx, cz, xMeters, zMeters, this.gradientScratch);
+    groundBlend(
+      this.generator,
+      xMeters,
+      zMeters,
+      Math.hypot(this.gradientScratch.x, this.gradientScratch.z),
+      out,
+    );
+    return true;
+  }
+
+  /**
+   * The ground's up-facing unit normal at (x, z), from the triangle under the point. Flat
+   * (0, 1, 0) when the tile is not loaded.
+   */
+  groundNormal(xMeters: number, zMeters: number, out: { x: number; y: number; z: number }): void {
+    const cx = tileOf(xMeters);
+    const cz = tileOf(zMeters);
+    const lattice = this.tiles.get(chunkKey(cx, 0, cz));
+    if (lattice === undefined) {
+      out.x = 0;
+      out.y = 1;
+      out.z = 0;
+      return;
+    }
+    gradientInTile(lattice, cx, cz, xMeters, zMeters, this.gradientScratch);
+    const g = this.gradientScratch;
+    const length = Math.hypot(g.x, 1, g.z);
+    out.x = -g.x / length;
+    out.y = 1 / length;
+    out.z = -g.z / length;
   }
 
   /**
@@ -526,8 +584,8 @@ export class World {
    * it early-returns unless the camera actually changed chunk column.
    */
   update(worldX: number, worldZ: number, sink: ChunkSink): number {
-    const centerX = Math.floor(worldX / CHUNK_METERS);
-    const centerZ = Math.floor(worldZ / CHUNK_METERS);
+    const centerX = tileOf(worldX);
+    const centerZ = tileOf(worldZ);
     if (this.hasCenter && centerX === this.centerX && centerZ === this.centerZ) {
       return 0;
     }
@@ -537,9 +595,9 @@ export class World {
 
     desiredChunkSet(centerX, centerZ, this.loadRadiusChunks, this.desired);
 
-    for (const key of this.chunks.keys()) {
+    for (const key of this.tiles.keys()) {
       if (this.desired.has(key)) continue;
-      this.chunks.delete(key);
+      this.tiles.delete(key);
       sink.onChunkUnloaded(key);
       const spawned = this.treesByChunk.get(key);
       if (spawned !== undefined) {
@@ -563,7 +621,7 @@ export class World {
     const queue = this.submitQueue;
     queue.length = 0;
     for (const key of this.desired) {
-      if (this.chunks.has(key) || this.inFlight.has(key)) continue;
+      if (this.tiles.has(key) || this.inFlight.has(key)) continue;
       queue.push(key);
     }
 
@@ -620,16 +678,8 @@ export class World {
         continue;
       }
 
-      this.chunks.set(result.key, {
-        dimX: CHUNK_SIZE,
-        dimY: CHUNK_SIZE,
-        dimZ: CHUNK_SIZE,
-        originX: 0,
-        originY: 0,
-        originZ: 0,
-        cells: result.cells,
-        columnTint: result.columnTint,
-      });
+      // The sink gets the result's buffers; the world keeps its own copy of the small lattice.
+      this.tiles.set(result.key, result.lattice.slice());
       sink.onChunkLoaded(result);
       this.spawnVegetation(result.key, sink);
       uploaded++;
@@ -637,131 +687,146 @@ export class World {
     return uploaded === 0 ? 0 : nowMs() - started;
   }
 
-  /** Air for voxels in unloaded chunks, not just voxels that are actually Air. */
-  materialAt(worldVoxelX: number, worldVoxelY: number, worldVoxelZ: number): Material {
-    const grid = this.chunks.get(
-      chunkKey(
-        floorDiv(worldVoxelX, CHUNK_SIZE),
-        floorDiv(worldVoxelY, CHUNK_SIZE),
-        floorDiv(worldVoxelZ, CHUNK_SIZE),
-      ),
-    );
-    if (grid === undefined) return Material.Air;
-    return grid.cells[
-      gridIndex(
-        grid,
-        floorMod(worldVoxelX, CHUNK_SIZE),
-        floorMod(worldVoxelY, CHUNK_SIZE),
-        floorMod(worldVoxelZ, CHUNK_SIZE),
-      )
-    ] as Material;
-  }
-
   /**
-   * Removes hand-diggable material within `radiusMeters` of a world-space
-   * point, skipping voxels in unloaded chunks (it never force-loads), then
-   * re-meshes only the chunks actually touched. Ports World::digSphere.
-   *
-   * Returns the number of chunks re-meshed, which is 0 when the dig hit
-   * nothing removable -- Rock and Granite need a tool the game does not
-   * have yet, so clicking at a rock face is a legitimate no-op.
+   * Everything players have changed that this class owns, as plain data (see
+   * save/snapshot.ts). Clients and a server both save the world through this.
    */
-  digSphere(centerX: number, centerY: number, centerZ: number, radiusMeters: number, sink: ChunkSink): number {
-    const centerVoxelX = Math.floor(centerX / VOXEL_SIZE);
-    const centerVoxelY = Math.floor(centerY / VOXEL_SIZE);
-    const centerVoxelZ = Math.floor(centerZ / VOXEL_SIZE);
-    const r = Math.ceil(radiusMeters / VOXEL_SIZE);
-    const radiusSq = radiusMeters * radiusMeters;
-
-    const dirty = this.dirtyScratch;
-    dirty.clear();
-
-    for (let dz = -r; dz <= r; dz++) {
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          const wx = centerVoxelX + dx;
-          const wy = centerVoxelY + dy;
-          const wz = centerVoxelZ + dz;
-
-          // Distance from the sphere centre to the voxel's centre, matching
-          // the C++ exactly -- a corner-based test would carve a visibly
-          // different shape.
-          const ox = (wx + 0.5) * VOXEL_SIZE - centerX;
-          const oy = (wy + 0.5) * VOXEL_SIZE - centerY;
-          const oz = (wz + 0.5) * VOXEL_SIZE - centerZ;
-          if (ox * ox + oy * oy + oz * oz > radiusSq) continue;
-
-          const cx = floorDiv(wx, CHUNK_SIZE);
-          const cy = floorDiv(wy, CHUNK_SIZE);
-          const cz = floorDiv(wz, CHUNK_SIZE);
-          const key = chunkKey(cx, cy, cz);
-          const grid = this.chunks.get(key);
-          if (grid === undefined) continue;
-
-          const index = gridIndex(
-            grid,
-            floorMod(wx, CHUNK_SIZE),
-            floorMod(wy, CHUNK_SIZE),
-            floorMod(wz, CHUNK_SIZE),
-          );
-          const material = grid.cells[index] as Material;
-          if (material === Material.Air || !isHandDiggable(material)) continue;
-
-          grid.cells[index] = Material.Air;
-          dirty.add(key);
-        }
+  exportEdits(): WorldEdits {
+    const placedProps: PlacedPropSave[] = [];
+    for (const column of this.placedProps.values()) {
+      for (const prop of column) {
+        placedProps.push({
+          id: prop.id,
+          kind: prop.kind,
+          biome: prop.biome,
+          x: prop.x,
+          y: prop.y,
+          z: prop.z,
+          yaw: prop.yaw,
+          scale: prop.scale,
+          fullScale: prop.fullScale,
+          loot: [...prop.loot],
+          broken: prop.broken,
+        });
       }
     }
-
-    // TODO(voxel-physics, not yet implemented): voxels dug out from
-    // underneath are left hanging with no support check. The named seam for
-    // connectivity analysis is World::digSphere's checkForFloatingVoxelsStub
-    // in the C++; it is a deliberate no-op there too, and belongs here once
-    // the dynamic-body work at M7/M8 gives newly-floating clusters somewhere
-    // to go.
-
-    for (const key of dirty) {
-      const grid = this.chunks.get(key);
-      if (grid === undefined) continue;
-      const mesh = this.editMesher.mesh(grid);
-      sink.onChunkRemeshed(key, keyX(key), keyY(key), keyZ(key), mesh.vertices, mesh.vertexCount);
-    }
-    return dirty.size;
-  }
-
-  /** Whether the chunk containing a world-space point is loaded. */
-  hasChunkAt(worldX: number, worldY: number, worldZ: number): boolean {
-    return this.chunks.has(
-      chunkKey(
-        Math.floor(worldX / CHUNK_METERS),
-        Math.floor(worldY / CHUNK_METERS),
-        Math.floor(worldZ / CHUNK_METERS),
-      ),
-    );
+    return {
+      seed: this.seed,
+      severedTrees: [...this.severedTrees],
+      strippedFoliage: [...this.strippedFoliage],
+      strippedLights: [...this.strippedLights],
+      removedProps: [...this.removedProps],
+      placedProps,
+      nextPlacedPropId: this.nextPlacedPropId,
+      propUses: [...this.propUses].map(([id, uses]) => [id, [...uses]] as const),
+      propDamage: [...this.propDamage].map(([id, damage]) => [id, [...damage]] as const),
+      propBroken: [...this.propBroken],
+    };
   }
 
   /**
-   * {@link SolidQuery} for the collision code. Terrain only: felled logs
-   * and other oriented rigid bodies join this at M8, via a composite query
-   * rather than by being special-cased in here (see the stopgap comment on
-   * the C++ World::isSolidIncludingSnappedLogs).
+   * Loads edits made in an earlier session (already through `sanitizeWorldSave`).
+   * Must come before the first {@link update}: tiles that have already streamed in
+   * were populated without them. Edits from a different seed are ignored, since their
+   * ids mean nothing here.
+   */
+  importEdits(edits: WorldEdits): void {
+    if (this.tiles.size > 0 || this.inFlight.size > 0) {
+      throw new Error("World.importEdits must run before any chunk is requested");
+    }
+    if (edits.seed !== this.seed) return;
+
+    for (const [id, cutAt] of edits.severedTrees) this.severedTrees.set(id, cutAt);
+    for (const [id, mask] of edits.strippedFoliage) this.strippedFoliage.set(id, mask);
+    for (const id of edits.strippedLights) this.strippedLights.add(id);
+    for (const id of edits.removedProps) this.removedProps.add(id);
+    for (const [id, uses] of edits.propUses) this.propUses.set(id, [...uses]);
+    for (const [id, damage] of edits.propDamage) this.propDamage.set(id, [...damage]);
+    for (const [id, mask] of edits.propBroken) this.propBroken.set(id, mask);
+    this.nextPlacedPropId = Math.max(this.nextPlacedPropId, edits.nextPlacedPropId);
+
+    for (const saved of edits.placedProps) {
+      const metrics = PROP_METRICS[saved.kind as PropKind];
+      const prop: Prop = {
+        id: saved.id,
+        kind: saved.kind as PropKind,
+        biome: saved.biome as Biome,
+        x: saved.x,
+        y: saved.y,
+        z: saved.z,
+        scale: saved.scale,
+        fullScale: saved.fullScale,
+        yaw: saved.yaw,
+        tiltX: 0,
+        tiltZ: 0,
+        topsoil: false,
+        loot: saved.loot,
+        radius: metrics.radius * saved.scale,
+        height: metrics.height * saved.scale,
+        broken: saved.broken,
+      };
+      this.fitToWear(prop);
+      const column = columnKey(
+        tileOf(prop.x),
+        tileOf(prop.z),
+      );
+      const list = this.placedProps.get(column);
+      if (list === undefined) this.placedProps.set(column, [prop]);
+      else list.push(prop);
+    }
+    this.revision++;
+  }
+
+  /** Whether the ground tile under a world-space point (metres) is loaded. Height is ignored. */
+  hasChunkAt(worldX: number, _worldY: number, worldZ: number): boolean {
+    return this.tiles.has(chunkKey(tileOf(worldX), 0, tileOf(worldZ)));
+  }
+
+  /**
+   * {@link SolidQuery} for the collision code: a voxel cell is solid when its centre is below
+   * the ground. The collision code still thinks in 10 cm cells (felled logs and building
+   * pieces join through a composite query, see sceneQuery.ts); the ground is the smooth mesh
+   * sampled at those cells' centres. Unloaded tiles are empty, as before.
    */
   isSolid(vx: number, vy: number, vz: number): boolean {
-    return isSolid(this.materialAt(vx, vy, vz));
+    const x = (vx + 0.5) * VOXEL_SIZE;
+    const z = (vz + 0.5) * VOXEL_SIZE;
+    const cx = tileOf(x);
+    const cz = tileOf(z);
+    const lattice = this.tiles.get(chunkKey(cx, 0, cz));
+    if (lattice === undefined) return false;
+    return (vy + 0.5) * VOXEL_SIZE < heightInTile(lattice, cx, cz, x, z);
   }
 
   /**
-   * Meshes a loaded chunk on the calling thread, for a caller that needs
-   * its triangles rather than its voxels -- today, building a static
-   * collision shape for it.
-   *
-   * The returned view is the shared edit mesher's scratch and is
-   * invalidated by the next edit or call. Consume it before yielding.
+   * The triangles of a loaded ground tile as a flat list of x, y, z (tile-local x and z,
+   * absolute y), for building a static collision shape. Same triangles as the rendered mesh.
+   * Undefined when the tile is not loaded.
    */
-  meshChunk(cx: number, cy: number, cz: number): MeshData | undefined {
-    const grid = this.chunks.get(chunkKey(cx, cy, cz));
-    if (grid === undefined) return undefined;
-    return this.editMesher.mesh(grid);
+  groundTriangles(cx: number, cz: number): Float32Array | undefined {
+    const lattice = this.tiles.get(chunkKey(cx, 0, cz));
+    if (lattice === undefined) return undefined;
+    const cells = latticeCells(lattice);
+    const side = cells + 1;
+    const step = TILE_METERS / cells;
+    const out = new Float32Array(cells * cells * 6 * 3);
+    let at = 0;
+    const emit = (i: number, j: number): void => {
+      out[at++] = i * step;
+      out[at++] = lattice[i + side * j] as number;
+      out[at++] = j * step;
+    };
+    for (let j = 0; j < cells; j++) {
+      for (let i = 0; i < cells; i++) {
+        emit(i, j);
+        emit(i + 1, j + 1);
+        emit(i + 1, j);
+        emit(i, j);
+        emit(i, j + 1);
+        emit(i + 1, j + 1);
+      }
+    }
+    return out;
   }
 
   // --- vegetation --------------------------------------------------------
@@ -792,31 +857,6 @@ export class World {
       if (dx * dx + dz * dz <= radiusSq) out.push(prop);
     }
     return out;
-  }
-
-  /**
-   * Topmost solid terrain voxel in a column, for top-down views (the map).
-   * Fills `out` and returns true; false when the column has no loaded solid
-   * voxel. Terrain only -- trees and props are separate objects.
-   */
-  topSolid(vx: number, vz: number, out: ColumnTop): boolean {
-    const cx = floorDiv(vx, CHUNK_SIZE);
-    const cz = floorDiv(vz, CHUNK_SIZE);
-    const lx = floorMod(vx, CHUNK_SIZE);
-    const lz = floorMod(vz, CHUNK_SIZE);
-    for (let cy = VERTICAL_CHUNK_MAX; cy >= VERTICAL_CHUNK_MIN; cy--) {
-      const grid = this.chunks.get(chunkKey(cx, cy, cz));
-      if (grid === undefined) continue;
-      for (let ly = CHUNK_SIZE - 1; ly >= 0; ly--) {
-        const material = grid.cells[gridIndex(grid, lx, ly, lz)] as Material;
-        if (!isSolid(material)) continue;
-        out.material = material;
-        out.voxelY = cy * CHUNK_SIZE + ly;
-        out.tint = grid.columnTint?.[lx + grid.dimX * lz] ?? 0;
-        return true;
-      }
-    }
-    return false;
   }
 
   get treeCount(): number {
@@ -1010,17 +1050,17 @@ export class World {
       height: metrics.height * scale,
       broken: 0,
     };
-    const cx = floorDiv(Math.floor(x / VOXEL_SIZE), CHUNK_SIZE);
-    const cz = floorDiv(Math.floor(z / VOXEL_SIZE), CHUNK_SIZE);
+    const cx = tileOf(x);
+    const cz = tileOf(z);
     const column = columnKey(cx, cz);
     const list = this.placedProps.get(column);
     if (list === undefined) this.placedProps.set(column, [prop]);
     else list.push(prop);
 
     this.props.set(prop.id, prop);
-    // Owned by the chunk of the ground it stands on, so it goes when that chunk does.
-    const groundVoxelY = Math.floor(y / VOXEL_SIZE + 1e-6) - 1;
-    const ownerKey = chunkKey(cx, floorDiv(groundVoxelY, CHUNK_SIZE), cz);
+    this.revision++;
+    // Owned by the tile of the ground it stands on, so it goes when that tile does.
+    const ownerKey = chunkKey(cx, 0, cz);
     let owned = this.treesByChunk.get(ownerKey);
     if (owned === undefined) {
       owned = [];
@@ -1040,11 +1080,12 @@ export class World {
     const prop = this.props.get(propId);
     if (prop === undefined) return undefined;
     this.props.delete(propId);
+    this.revision++;
     this.propUses.delete(propId);
     this.propDamage.delete(propId);
     this.propBroken.delete(propId);
     const column = this.placedProps.get(
-      columnKey(floorDiv(Math.floor(prop.x / VOXEL_SIZE), CHUNK_SIZE), floorDiv(Math.floor(prop.z / VOXEL_SIZE), CHUNK_SIZE)),
+      columnKey(tileOf(prop.x), tileOf(prop.z)),
     );
     const at = column?.findIndex((p) => p.id === propId) ?? -1;
     if (column !== undefined && at >= 0) column.splice(at, 1);
@@ -1090,6 +1131,7 @@ export class World {
       if (entry === undefined || (uses[i] ?? 0) <= 0) continue;
       if (random() >= DROP_CHANCE[entry.rarity]) continue;
       uses[i] = (uses[i] ?? 0) - 1;
+      this.revision++;
       if (PROP_METRICS[prop.kind].depletes === true) {
         if (this.fitToWear(prop)) this.removeProp(propId, sink);
         else sink.onPropChanged?.(prop);
@@ -1118,6 +1160,7 @@ export class World {
       this.propDamage.set(propId, damage);
     }
     damage[index] = (damage[index] ?? 0) + amount;
+    this.revision++;
     if ((damage[index] ?? 0) < (sections[index] as PropSection).hits) {
       return { section: index, broken: [], drops: [], gone: false };
     }
@@ -1168,6 +1211,7 @@ export class World {
 
     const damage = (this.propDamage.get(propId)?.[0] ?? 0) + amount;
     this.propDamage.set(propId, [damage]);
+    this.revision++;
     if (damage < breakable.hits) return { destroyed: false, released: [] };
 
     prop.broken = 1;
@@ -1385,6 +1429,20 @@ export class World {
     out.centerY = (hit.y + 0.5) * VOXEL_SIZE;
     out.centerZ = (hit.z + 0.5) * VOXEL_SIZE;
     out.distance = hit.distance;
+    out.normalX = hit.nx;
+    out.normalY = hit.ny;
+    out.normalZ = hit.nz;
+    if (out.kind === HitKind.Terrain) {
+      // The ground is smooth, so the face the voxel ray came through is only a stand-in for
+      // how the surface really faces. Hits on the ground's top (not its cliff walls, where
+      // the voxel face is just as good) take the triangle's normal.
+      if (hit.ny > 0.5) {
+        this.groundNormal(out.centerX, out.centerZ, this.normalScratch);
+        out.normalX = this.normalScratch.x;
+        out.normalY = this.normalScratch.y;
+        out.normalZ = this.normalScratch.z;
+      }
+    }
     return out;
   }
 
@@ -1405,6 +1463,7 @@ export class World {
 
     tree.foliageMask &= ~bit;
     this.strippedFoliage.set(treeId, (this.strippedFoliage.get(treeId) ?? 0) | bit);
+    this.revision++;
     sink.onTreeFoliageRemoved(tree, cluster);
     return true;
   }
@@ -1419,6 +1478,7 @@ export class World {
     const count = tree.lights;
     tree.lights = 0;
     this.strippedLights.add(treeId);
+    this.revision++;
     sink.onTreeLightsRemoved(tree);
     return count;
   }
@@ -1476,6 +1536,7 @@ export class World {
     tree.severed = true;
     tree.chopHits = 0;
     this.severedTrees.set(tree.id, cut);
+    this.revision++;
     if (carried !== 0) {
       this.strippedFoliage.set(tree.id, (this.strippedFoliage.get(tree.id) ?? 0) | carried);
     }

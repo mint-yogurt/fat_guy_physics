@@ -1,4 +1,4 @@
-import { MAX_STACK, type ItemGrid, type ItemStack } from "./inventory.ts";
+import { MAX_STACK, type ItemGrid, type ItemStack, type ItemType } from "./inventory.ts";
 
 /**
  * The stack on the mouse while the inventory screen is open.
@@ -55,6 +55,18 @@ export class ItemCursor {
     }
     this.version++;
     return true;
+  }
+
+  /**
+   * Adds freshly made items to the stack on the mouse (crafting). The caller has
+   * checked it is empty or the same item and that it stays within a stack. Made
+   * items came from nowhere, so a cancel sends them to the inventory, not back
+   * to whichever slot the stack on the mouse was lifted from.
+   */
+  give(type: ItemType, count: number): void {
+    this.held = { type, count: (this.held?.count ?? 0) + count };
+    this.fromGrid = undefined;
+    this.version++;
   }
 
   /**

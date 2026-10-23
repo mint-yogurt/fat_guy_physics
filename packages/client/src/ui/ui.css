@@ -337,6 +337,7 @@ body {
 .inv-panel[hidden],
 .inv-slot[hidden],
 .craft-sign[hidden],
+.craft-cycle[hidden],
 .inv-tip[hidden] {
   display: none;
 }
@@ -424,13 +425,45 @@ body {
 
 .craft-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
 }
 
+/* Centred on the boxes, which are one slot tall. */
 .craft-sign {
   font-size: 20px;
+  line-height: var(--slot);
   opacity: 0.7;
+}
+
+/* The result with the ALL button under it. */
+.craft-output {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: var(--slot);
+}
+
+.craft-all,
+.craft-cycle {
+  margin-top: 0;
+  padding: 3px 0;
+}
+
+.craft-all:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.craft-all:disabled:hover {
+  background: rgba(232, 240, 247, 0.12);
+}
+
+.craft-cycle {
+  width: auto;
+  margin-top: calc((var(--slot) - 24px) / 2);
+  padding: 3px 8px;
+  white-space: nowrap;
 }
 
 .craft-equals {

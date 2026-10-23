@@ -53,6 +53,13 @@ const FALLBACK_COLORS: Record<ItemType, number> = {
   [ItemType.Goo]: 0x62e03c,
   [ItemType.Metal]: 0x9aa0a8,
   [ItemType.Candy]: 0xd94a6a,
+  [ItemType.Toobifer]: 0xb98a52,
+  [ItemType.Plywood]: 0xd6b27a,
+  [ItemType.Wheel]: 0x2a2a2e,
+  [ItemType.Ladder]: 0x9a6a3a,
+  [ItemType.Spring]: 0x9aa0a8,
+  [ItemType.SpringShoes]: 0xc83a3a,
+  [ItemType.FishingRod]: 0x8a6033,
   [ItemType.PresentSmall]: 0xc83a3a,
   [ItemType.PresentBig]: 0x2f9a4a,
   [ItemType.CandyBucket]: 0xd9741a,
@@ -154,6 +161,36 @@ export class PickupRenderer {
     if (type === ItemType.Candy) {
       const pivot = new Group();
       pivot.add(this.assets.candy.clone());
+      return pivot;
+    }
+    if (type === ItemType.Spring) {
+      const pivot = new Group();
+      pivot.add(this.assets.spring.clone());
+      return pivot;
+    }
+    if (type === ItemType.SpringShoes) {
+      const pivot = new Group();
+      pivot.add(this.assets.springShoeItem.clone());
+      return pivot;
+    }
+    if (type === ItemType.FishingRod) {
+      const pivot = new Group();
+      pivot.add(this.assets.fishingRod.clone());
+      return pivot;
+    }
+    const wood =
+      type === ItemType.Toobifer
+        ? this.assets.toobifer
+        : type === ItemType.Plywood
+          ? this.assets.plywood
+          : type === ItemType.Wheel
+            ? this.assets.wheel
+            : type === ItemType.Ladder
+              ? this.assets.ladder
+              : undefined;
+    if (wood !== undefined) {
+      const pivot = new Group();
+      pivot.add(wood.clone());
       return pivot;
     }
     if (type === ItemType.Goo) {

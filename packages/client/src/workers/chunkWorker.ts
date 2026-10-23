@@ -1,7 +1,6 @@
 /// <reference lib="webworker" />
 
 import { buildChunk } from "@fgp/shared/sim/chunkSource";
-import { Mesher } from "@fgp/shared/voxel/greedyMesher";
 import { TerrainGenerator } from "@fgp/shared/worldgen/terrainGenerator";
 
 /**
@@ -42,8 +41,7 @@ export interface ChunkWorkerDone {
   cx: number;
   cy: number;
   cz: number;
-  cells: Uint8Array;
-  columnTint: Uint8Array;
+  lattice: Float32Array;
   vertices: Float32Array;
   vertexCount: number;
 }
@@ -51,7 +49,6 @@ export interface ChunkWorkerDone {
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 
 let generator: TerrainGenerator | undefined;
-const mesher = new Mesher();
 
 scope.onmessage = (event: MessageEvent<ChunkWorkerRequest>): void => {
   const message = event.data;
@@ -68,15 +65,14 @@ scope.onmessage = (event: MessageEvent<ChunkWorkerRequest>): void => {
     throw new Error("chunk worker received a job before init");
   }
 
-  const result = buildChunk(generator, mesher, message.key, message.cx, message.cy, message.cz);
+  const result = buildChunk(generator, message.key, message.cx, message.cy, message.cz);
 
   // Transfer rather than copy. Both buffers are freshly allocated per chunk
   // and the worker has no further use for them, so handing over ownership is
   // free; structured-cloning them instead would mean memcpy-ing ~45KB per
   // chunk, ~20MB over a full initial load.
   scope.postMessage(result satisfies ChunkWorkerDone, [
-    result.cells.buffer,
-    result.columnTint.buffer,
+    result.lattice.buffer,
     result.vertices.buffer,
   ]);
 };
