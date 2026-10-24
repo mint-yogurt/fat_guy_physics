@@ -42,7 +42,8 @@ export class TrickBanner {
     const { image } = this;
     this.animation?.cancel();
     image.hidden = false;
-    if (image.naturalWidth > 0) image.style.width = `${image.naturalWidth * SCALE}px`;
+    // In UI units, so it follows the UI scale (ui.css --u).
+    if (image.naturalWidth > 0) image.style.width = `calc(${String(image.naturalWidth * SCALE)} * var(--u))`;
     const place = "translate(-50%, -50%)";
     this.animation = image.animate(
       [

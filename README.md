@@ -47,7 +47,11 @@ look anywhere, Space jumps off.
 
 ### On-screen UI
 
-Only the hotbar and what is relevant right now are shown:
+Only the hotbar and what is relevant right now are shown. All of the UI is
+drawn at 250% (`--ui-scale` at the top of
+[`ui.css`](packages/client/src/ui/ui.css); every UI length there is in its
+`--u` unit), shrunk only when the window is too small to fit the inventory
+screen at that size:
 
 - **Bottom right**, a keycap per button with its action under it, for
   whatever is in the hand (bare hands: LMB scoop, RMB chup; stick, log,
@@ -123,6 +127,9 @@ round them), the grave-topsoil tool, post-processing, multiplayer.
   **eggnog** and **mowden lightning** are in the game and in the Christmas
   loot (except goo, which is in no loot table yet), but only the can, goo and
   eggnog do anything, and only the can (-> metal) is an ingredient yet.
+- **Parachute**: no sounds yet (opening, canopy flutter), and only the local
+  player's canopy is drawn from the sim (`Player.glide`); a remote player would
+  need `glide.open`/`heading` in its snapshot.
 - The ladder (`ladder.glb`) is an item with no use yet; so are toobifers
   (2x4s), plywood, wheels and springs, beyond being crafting materials.
 - **Spring shoes wear out**: they should break after a limited number of
@@ -132,10 +139,8 @@ round them), the grave-topsoil tool, post-processing, multiplayer.
   type + count today, so a worn pair needs somewhere to keep it), a break
   event with a sound and a puff, and a wear readout on the slot. The pair is
   also stackable like any item, which a pair with wear should not be.
-- Crafting UI: putting one material in the boxes should list everything it can
-  make from the recipes the player knows, with what each needs. For now the
-  result box shows one recipe and a small `1/4` button cycles the rest
-  (stub, see `items/crafting.ts`).
+- Gear: the GEAR panel left of the inventory is empty; worn items (the
+  parachute first) should move there (`items/gear.ts` says how).
 - Harvesting snow in the Christmas region, and snowball item controls
   (throw, roll like the log item).
 - A visible map-viewing animation while the player is looking at the map
@@ -260,28 +265,39 @@ extends a ladder), and a free/snap toggle for position.
 freezes the player. The inventory is an 8x4 grid (`INVENTORY_COLUMNS` /
 `INVENTORY_ROWS` in `inventory.ts`): three backpack rows with the hotbar as
 the bottom row. Click a slot to pick its stack up, click another to put it
-down; a different item there is swapped, the same item is combined (up to
-255), and right click cancels the move and puts the stack back. Closing the
-screen puts the stack and the crafting boxes back in the inventory (or drops
-what does not fit).
+down (or drag it there and let go); a different item there is swapped, the same
+item is combined (up to 255), and right click cancels the move and puts the
+stack back. Closing the screen puts the stack and the crafting box back in the
+inventory (or drops what does not fit). Left of the inventory is **GEAR**, one
+slot wide and empty for now (where worn things will go); right of it is
+**RECIPES** (below).
 
-The pane above the grid is **crafting**, `_ + _ = _`: a box is added whenever
-the last one is filled, for recipes with many ingredients. Put the materials in
-the boxes and the product shows in the result box (its count in the corner).
-Click the result to craft once: the material is used up and the product lands
-on the mouse; click again to craft more (it stacks on the mouse, up to 255), or
-press **ALL** under it to craft as many as the boxes pay for. Put the stack in a
-slot, or just close the screen and it goes to the first free space (it is
-dropped if there is none). The boxes must hold exactly a recipe's ingredients,
-at least as many as it asks for; extra material just stays in its box.
+The pane above the grid is **crafting**: the **crafting box**, `=`, and the
+output wheel. Drop a stack anywhere on the box and it slides into place: one
+stack sits in the middle, two on opposite corners, three in a triangle, four in
+the corners; past four the box grows from 2x2 to 3x3 slots (up to 9 stacks).
+The same item dropped again joins its stack. Click a stack in the box to take
+it back out. The box must hold exactly a recipe's ingredients, at least as many
+as it asks for; extra material just stays in the box.
+
+The **wheel** right of the `=` shows everything the box can make, like a slot
+machine reel: the chosen product sits in the framed middle row, the others
+above and below it. The arrow buttons (or the mouse wheel over it, or clicking
+a neighbour) turn it one step. Click the middle product to craft once: the
+material is used up and the product lands on the mouse; click again to craft
+more (it stacks on the mouse, up to 255), or press **ALL** to craft as many as
+the box pays for. Put the stack in a slot, or just close the screen and it goes
+to the first free space (it is dropped if there is none).
 
 Recipes are **learned**: one is known once every item it *takes* has been in
 your inventory at least once (what it makes does not matter), and only known
-recipes show up. What you have held is saved with the player. When the boxes
-match several known recipes (a log is 4 sticks, 2 toobifers, 1 plywood or 4
-wheels) the result shows the first, and a small `1/4` button beside it steps
-through the rest; that is a stopgap for a proper list of everything a material
-can make (see TODO). Recipes are the `RECIPES` table in `items/crafting.ts`:
+recipes show up anywhere. What you have held is saved with the player, so a
+recipe once learned stays learned. The **RECIPES** panel lists every known
+recipe with a picture of what it makes; click one to see what it takes, each
+line `AMOUNT item` with a green check if you have that many (inventory, box and
+mouse together) or a red cross if not. With something in the crafting box the
+list narrows to the recipes that use everything in it. Recipes are the
+`RECIPES` table in `items/crafting.ts`:
 
 | Takes | Makes |
 |---|---|
@@ -294,6 +310,7 @@ can make (see TODO). Recipes are the `RECIPES` table in `items/crafting.ts`:
 | 1 stick + 1 wheel + 3 xmas lights | 1 fishing rod |
 | 10 leaves | 1 toilet paper |
 | 12 toilet paper + 4 metal | 1 trampoline |
+| 4 xmas lights + 12 toilet paper | 1 parachute |
 
 **Spring shoes** (`spring_shoes`) are worn while they are the selected hotbar
 item: one shoe (`spring shoes.glb`, not resized) is snapped by the top face of
@@ -314,6 +331,27 @@ loop in `main.ts`):
   mat's own rebound.
 
 The **spring** is a plain ingredient: held, and nothing else.
+
+**Parachute** (`parachute`, `parachute.glb`) is worn while it is the selected
+hotbar item; no mouse button does anything with it. It opens by itself once
+you start to fall, even from the top of a jump (not while rising), fills in
+0.15 s, and from then on you sink at a
+steady 3 m/s and are carried along at 5.5 m/s, so a jump-off from higher goes
+farther (about 1.8 m forward per metre of height left). The way you travel
+starts as the way you were going and turns only slowly (28 degrees a second)
+towards where you look; A / D slide you a little sideways and W / S trim the
+speed by a quarter. Landing or putting it away closes it. Rules in
+`items/parachute.ts` (`Glide`, called from `Player.updateWalking`); numbers
+at the top of that file. Open, it is a canopy (`render/parachuteView.ts`)
+with four strings of xmas lights (half the length of a full string, same
+mesh and lit bulbs) from its corners, the two on the left meeting in your
+left hand and the two on the right in your right, with both arms up. A hang
+glider is meant to be the faster, steerable version.
+
+**Gear** is a stub: the parachute is meant to move off the hotbar onto a gear
+bar. `items/gear.ts` has `GEAR_SLOT_OF` (empty; give the parachute
+`GearSlot.Back` to switch it) and `isWorn`, the one question main.ts asks, so
+the day the bar exists nothing else changes.
 
 The hotbar's **empty slots act like slot 1, bare hands** (scoop, chup); only
 slot 1 shows the icon. When the last of a stack is used up while a mouse button
@@ -1012,8 +1050,7 @@ untouched props) are not saved because they do not need to be.
 - No networking yet: the avatar pose and `AvatarBody` are the hooks for it.
 - A thrown or swung stick has nothing to hurt yet: there are no creatures.
 - There is no drop action (items only land on the ground when the inventory
-  is too full to take back a stack), no split-stack or shift-click, and the
-  crafting list UI is a stub (the `1/4` cycle button).
+  is too full to take back a stack), no split-stack or shift-click.
 - The default load radius is unmeasured on real hardware; check FPS before
   trusting it.
 

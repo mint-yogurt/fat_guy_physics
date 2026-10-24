@@ -1,6 +1,12 @@
 :root {
+  /* The UI's size, like browser zoom: every UI length in this file is N * var(--u).
+     --u is --ui-scale px, shrunk on a window too small to fit the inventory
+     screen at that size (about 760 x 460 unscaled). Items drawn in the canvas
+     take their size from the DOM rects, so they follow. */
+  --ui-scale: 2.5;
+  --u: min(calc(var(--ui-scale) * 1px), calc(100vh / 460), calc(100vw / 760));
   --hud-fg: #e8f0f7;
-  --hud-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  --hud-shadow: 0 var(--u) calc(2 * var(--u)) rgba(0, 0, 0, 0.9);
 }
 
 * {
@@ -31,15 +37,15 @@ body {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  font: 13px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font: calc(13 * var(--u))/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace;
   color: var(--hud-fg);
   text-shadow: var(--hud-shadow);
 }
 
 #stats {
   position: absolute;
-  top: 10px;
-  left: 10px;
+  top: calc(10 * var(--u));
+  left: calc(10 * var(--u));
   white-space: pre;
 }
 
@@ -54,8 +60,8 @@ body {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 14px;
-  height: 14px;
+  width: calc(14 * var(--u));
+  height: calc(14 * var(--u));
   transform: translate(-50%, -50%);
 }
 
@@ -71,29 +77,29 @@ body {
 #crosshair::before {
   left: 50%;
   top: 0;
-  width: 2px;
+  width: calc(2 * var(--u));
   height: 100%;
-  margin-left: -1px;
+  margin-left: calc(-1 * var(--u));
 }
 
 #crosshair::after {
   top: 50%;
   left: 0;
-  height: 2px;
+  height: calc(2 * var(--u));
   width: 100%;
-  margin-top: -1px;
+  margin-top: calc(-1 * var(--u));
 }
 
 /* What E would pick up, just under the crosshair. */
 #prompt {
   position: absolute;
   left: 50%;
-  top: calc(50% + 22px);
+  top: calc(50% + calc(22 * var(--u)));
   transform: translateX(-50%);
-  padding: 2px 8px;
+  padding: calc(2 * var(--u)) calc(8 * var(--u));
   background: rgba(10, 14, 20, 0.42);
-  border-radius: 3px;
-  font-size: 12px;
+  border-radius: calc(3 * var(--u));
+  font-size: calc(12 * var(--u));
   white-space: pre;
 }
 
@@ -111,22 +117,22 @@ body {
 #hint {
   position: absolute;
   left: 50%;
-  top: 16px;
+  top: calc(16 * var(--u));
   transform: translateX(-50%);
-  padding: 3px 10px;
+  padding: calc(3 * var(--u)) calc(10 * var(--u));
   background: rgba(10, 14, 20, 0.5);
-  border-radius: 3px;
-  font-size: 12px;
+  border-radius: calc(3 * var(--u));
+  font-size: calc(12 * var(--u));
   white-space: pre;
 }
 
 /* What the item in the hand does: a keycap per input, its action under it. */
 #item-controls {
   position: absolute;
-  right: 16px;
-  bottom: 14px;
+  right: calc(16 * var(--u));
+  bottom: calc(14 * var(--u));
   display: flex;
-  gap: 10px;
+  gap: calc(10 * var(--u));
   align-items: flex-start;
 }
 
@@ -134,24 +140,24 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  min-width: 56px;
+  gap: calc(4 * var(--u));
+  min-width: calc(56 * var(--u));
 }
 
 .keycap {
-  padding: 3px 9px;
-  min-width: 44px;
+  padding: calc(3 * var(--u)) calc(9 * var(--u));
+  min-width: calc(44 * var(--u));
   text-align: center;
   font-weight: 700;
   letter-spacing: 0.04em;
   background: rgba(10, 14, 20, 0.62);
-  border: 1px solid rgba(232, 240, 247, 0.75);
-  border-bottom-width: 3px;
-  border-radius: 4px;
+  border: calc(1 * var(--u)) solid rgba(232, 240, 247, 0.75);
+  border-bottom-width: calc(3 * var(--u));
+  border-radius: calc(4 * var(--u));
 }
 
 .hint-action {
-  font-size: 12px;
+  font-size: calc(12 * var(--u));
   white-space: nowrap;
 }
 
@@ -161,8 +167,8 @@ body {
 
 #controls {
   position: absolute;
-  top: 10px;
-  right: 12px;
+  top: calc(10 * var(--u));
+  right: calc(12 * var(--u));
   text-align: right;
   opacity: 0.75;
   line-height: 1.7;
@@ -175,21 +181,21 @@ body {
 
 #hotbar {
   position: absolute;
-  bottom: 14px;
+  bottom: calc(14 * var(--u));
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  gap: 4px;
+  gap: calc(4 * var(--u));
 }
 
 .slot {
   position: relative;
-  width: 56px;
-  height: 56px;
+  width: calc(56 * var(--u));
+  height: calc(56 * var(--u));
   /* No background: the canvas sits beneath the DOM, so the translucent
      backdrop is drawn there with the item (see render/hotbarItems.ts). */
-  border: 1px solid rgba(232, 240, 247, 0.22);
-  border-radius: 3px;
+  border: calc(1 * var(--u)) solid rgba(232, 240, 247, 0.22);
+  border-radius: calc(3 * var(--u));
 }
 
 .slot.selected {
@@ -198,17 +204,17 @@ body {
 
 .slot-key {
   position: absolute;
-  top: 3px;
-  left: 6px;
+  top: calc(3 * var(--u));
+  left: calc(6 * var(--u));
   opacity: 0.45;
-  font-size: 11px;
+  font-size: calc(11 * var(--u));
 }
 
 .slot-icon {
   position: absolute;
-  inset: 8px;
-  width: 38px;
-  height: 38px;
+  inset: calc(8 * var(--u));
+  width: calc(38 * var(--u));
+  height: calc(38 * var(--u));
   object-fit: contain;
   image-rendering: pixelated;
   pointer-events: none;
@@ -216,9 +222,9 @@ body {
 
 .slot-count {
   position: absolute;
-  right: 5px;
-  bottom: 3px;
-  font-size: 12px;
+  right: calc(5 * var(--u));
+  bottom: calc(3 * var(--u));
+  font-size: calc(12 * var(--u));
 }
 
 #charcreate {
@@ -228,7 +234,7 @@ body {
   align-items: center;
   justify-content: center;
   background: #0b0e13;
-  font: 14px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font: calc(14 * var(--u))/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
   color: var(--hud-fg);
   overflow-y: auto;
 }
@@ -238,24 +244,24 @@ body {
 #charcreate .cc-wrap {
   display: flex;
   flex-wrap: wrap;
-  gap: 40px 64px;
+  gap: calc(40 * var(--u)) calc(64 * var(--u));
   justify-content: center;
   align-items: flex-start;
   margin: auto;
-  padding: 24px;
+  padding: calc(24 * var(--u));
 }
 
 #charcreate .controls {
-  max-width: 440px;
+  max-width: calc(440 * var(--u));
 }
 
 #charcreate .controls h1 {
-  margin-bottom: 8px;
+  margin-bottom: calc(8 * var(--u));
 }
 
 #charcreate .controls h2 {
-  margin-top: 12px;
-  font-size: 12px;
+  margin-top: calc(12 * var(--u));
+  font-size: calc(12 * var(--u));
   font-weight: 400;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -265,7 +271,7 @@ body {
 #charcreate .controls dl {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: 2px 14px;
+  gap: calc(2 * var(--u)) calc(14 * var(--u));
 }
 
 #charcreate .controls dt {
@@ -276,12 +282,12 @@ body {
 #charcreate .panel {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  min-width: 300px;
+  gap: calc(14 * var(--u));
+  min-width: calc(300 * var(--u));
 }
 
 #charcreate h1 {
-  font-size: 20px;
+  font-size: calc(20 * var(--u));
   font-weight: 400;
   letter-spacing: 0.06em;
 }
@@ -290,32 +296,32 @@ body {
 #charcreate .row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: calc(10 * var(--u));
 }
 
 #charcreate .row > span {
-  width: 42px;
+  width: calc(42 * var(--u));
   opacity: 0.55;
 }
 
 #charcreate input {
   flex: 1;
-  padding: 5px 7px;
+  padding: calc(5 * var(--u)) calc(7 * var(--u));
   background: #151a22;
-  border: 1px solid rgba(232, 240, 247, 0.25);
+  border: calc(1 * var(--u)) solid rgba(232, 240, 247, 0.25);
   color: inherit;
   font: inherit;
 }
 
 .swatches {
   display: flex;
-  gap: 6px;
+  gap: calc(6 * var(--u));
 }
 
 .swatch {
-  width: 30px;
-  height: 26px;
-  border: 1px solid rgba(232, 240, 247, 0.25);
+  width: calc(30 * var(--u));
+  height: calc(26 * var(--u));
+  border: calc(1 * var(--u)) solid rgba(232, 240, 247, 0.25);
   background: #151a22;
   color: inherit;
   font: inherit;
@@ -324,12 +330,12 @@ body {
 
 .swatch.on {
   border-color: var(--hud-fg);
-  border-width: 2px;
+  border-width: calc(2 * var(--u));
 }
 
 #charcreate button#cc-play {
-  margin-top: 6px;
-  padding: 9px;
+  margin-top: calc(6 * var(--u));
+  padding: calc(9 * var(--u));
   background: #2f6fb0;
   border: 0;
   color: #fff;
@@ -349,8 +355,8 @@ body {
   width: min(86vh, 90vw);
   height: min(86vh, 90vw);
   transform: translate(-50%, -50%);
-  border: 3px solid #2b2418;
-  box-shadow: 0 0 0 2px #7a6a45, 0 8px 40px rgba(0, 0, 0, 0.7);
+  border: calc(3 * var(--u)) solid #2b2418;
+  box-shadow: 0 0 0 calc(2 * var(--u)) #7a6a45, 0 calc(8 * var(--u)) calc(40 * var(--u)) rgba(0, 0, 0, 0.7);
   background: #0b0e13;
 }
 
@@ -371,14 +377,26 @@ body {
   pointer-events: auto;
   user-select: none;
   cursor: default;
-  --slot: 46px;
+  --slot: calc(46 * var(--u));
+  --gap: calc(4 * var(--u));
+  --pad: calc(12 * var(--u));
+  /* Space between the crafting box's border and its stacks. */
+  --box-pad: calc(4 * var(--u));
+  /* The main panel's outer width; RECIPES is half of it. */
+  --main-w: calc(8 * var(--slot) + 7 * var(--gap) + 2 * var(--pad) + 2 * var(--u));
+}
+
+/* A container's panel adds up to ~320 px (unscaled): shrink to fit it. */
+#inventory.with-container {
+  --u: min(calc(var(--ui-scale) * 1px), calc(100vh / 460), calc(100vw / 1080));
 }
 
 #inventory[hidden],
 .inv-panel[hidden],
 .inv-slot[hidden],
-.craft-sign[hidden],
-.craft-cycle[hidden],
+.recipe[hidden],
+.recipe-needs[hidden],
+.recipe-empty[hidden],
 .inv-tip[hidden] {
   display: none;
 }
@@ -386,40 +404,57 @@ body {
 .inv-row {
   display: flex;
   align-items: stretch;
-  gap: 14px;
+  gap: calc(14 * var(--u));
   max-width: 98vw;
 }
 
 .inv-panel {
-  padding: 10px 12px 12px;
-  border: 1px solid rgba(232, 240, 247, 0.4);
-  border-radius: 4px;
+  flex: none;
+  padding: calc(10 * var(--u)) var(--pad) var(--pad);
+  border: var(--u) solid rgba(232, 240, 247, 0.4);
+  border-radius: calc(4 * var(--u));
 }
 
-/* A third for crafting, two thirds for the grid. */
 .inv-main {
-  display: grid;
-  grid-template-rows: 1fr 2fr;
-  gap: 8px;
-  height: min(404px, 94vh);
+  display: flex;
+  flex-direction: column;
+  gap: calc(8 * var(--u));
+  width: var(--main-w);
 }
 
 .inv-container {
   align-self: center;
 }
 
+/* As thin as one inventory slot. */
+.inv-gear {
+  width: calc(var(--slot) + 14 * var(--u));
+  padding-left: calc(6 * var(--u));
+  padding-right: calc(6 * var(--u));
+  text-align: center;
+}
+
+/* Half the main panel's width, as tall as the row: contain: size keeps the
+   list from stretching the row, so it scrolls instead. */
+.inv-recipes {
+  display: flex;
+  flex-direction: column;
+  width: calc(var(--main-w) / 2);
+  contain: size;
+}
+
 .inv-button {
   display: block;
   width: 100%;
-  margin-top: 8px;
-  padding: 5px 0;
+  margin-top: calc(8 * var(--u));
+  padding: calc(5 * var(--u)) 0;
   font: inherit;
-  font-size: 12px;
+  font-size: calc(12 * var(--u));
   letter-spacing: 0.06em;
   color: inherit;
   background: rgba(232, 240, 247, 0.12);
-  border: 1px solid rgba(232, 240, 247, 0.4);
-  border-radius: 4px;
+  border: var(--u) solid rgba(232, 240, 247, 0.4);
+  border-radius: calc(4 * var(--u));
   cursor: pointer;
 }
 
@@ -427,9 +462,18 @@ body {
   background: rgba(232, 240, 247, 0.28);
 }
 
+.inv-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.inv-button:disabled:hover {
+  background: rgba(232, 240, 247, 0.12);
+}
+
 .inv-title {
-  margin-bottom: 6px;
-  font-size: 12px;
+  margin-bottom: calc(6 * var(--u));
+  font-size: calc(12 * var(--u));
   opacity: 0.6;
   letter-spacing: 0.06em;
 }
@@ -437,12 +481,12 @@ body {
 .inv-grid {
   display: grid;
   grid-template-columns: repeat(var(--columns, 8), var(--slot));
-  gap: 4px;
+  gap: var(--gap);
 }
 
 .inv-gap {
   grid-column: 1 / -1;
-  height: 6px;
+  height: calc(6 * var(--u));
 }
 
 .inv-slot {
@@ -459,60 +503,187 @@ body {
 }
 
 .inv-slot .slot-icon {
-  inset: 6px;
-  width: calc(var(--slot) - 12px);
-  height: calc(var(--slot) - 12px);
+  inset: calc(6 * var(--u));
+  width: calc(var(--slot) - 12 * var(--u));
+  height: calc(var(--slot) - 12 * var(--u));
 }
 
+/* --- crafting: [box] = [wheel] [arrows + ALL] --- */
 .craft-row {
   display: flex;
-  align-items: flex-start;
-  gap: 6px;
+  align-items: center;
+  gap: calc(8 * var(--u));
 }
 
-/* Centred on the boxes, which are one slot tall. */
+/* Room for the biggest (3x3) box, so nothing moves when it grows. */
+.craft-area {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(3 * var(--slot) + 2 * var(--gap) + 2 * (var(--box-pad) + var(--u)));
+  height: calc(3 * var(--slot) + 2 * var(--gap) + 2 * (var(--box-pad) + var(--u)));
+}
+
+/* --cells x --cells slots (2, or 3 past four stacks); the stacks inside are
+   placed by --x/--y (slot centres, from shared craftLayout) and slide there. */
+.craft-box {
+  position: relative;
+  flex: none;
+  width: calc(var(--cells, 2) * (var(--slot) + var(--gap)) - var(--gap) + 2 * (var(--box-pad) + var(--u)));
+  height: calc(var(--cells, 2) * (var(--slot) + var(--gap)) - var(--gap) + 2 * (var(--box-pad) + var(--u)));
+  border: var(--u) dashed rgba(232, 240, 247, 0.45);
+  border-radius: calc(4 * var(--u));
+  transition: width 0.18s ease-out, height 0.18s ease-out;
+}
+
+/* (--x, --y) is the stack's centre in slots from the box's inside corner. */
+.craft-item {
+  position: absolute;
+  left: calc(var(--box-pad) + var(--x) * (var(--slot) + var(--gap)) - var(--gap) / 2 - var(--slot) / 2);
+  top: calc(var(--box-pad) + var(--y) * (var(--slot) + var(--gap)) - var(--gap) / 2 - var(--slot) / 2);
+  transition: left 0.18s ease-out, top 0.18s ease-out;
+}
+
 .craft-sign {
-  font-size: 20px;
-  line-height: var(--slot);
+  font-size: calc(20 * var(--u));
   opacity: 0.7;
 }
 
-/* The result with the ALL button under it. */
-.craft-output {
+/* The output wheel: three options tall, the chosen one in the middle row. */
+.craft-wheel {
+  position: relative;
+  flex: none;
+  width: calc(var(--slot) + 2 * var(--u));
+  height: calc(3 * var(--slot) + 2 * var(--gap));
+  overflow: hidden;
+  border-radius: calc(4 * var(--u));
+}
+
+.wheel-strip {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  width: var(--slot);
+  gap: var(--gap);
+  padding: 0 var(--u);
+  transform: translateY(calc((1 - var(--at, 0)) * (var(--slot) + var(--gap))));
+  transition: transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.15);
 }
 
-.craft-all,
-.craft-cycle {
+.wheel-option {
+  flex: none;
+  border-color: rgba(232, 240, 247, 0.12);
+}
+
+/* The window's middle row: fixed while the options slide through it. */
+.wheel-frame {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(var(--slot) + var(--gap) - var(--u));
+  height: calc(var(--slot) + 2 * var(--u));
+  border: calc(2 * var(--u)) solid rgba(232, 240, 247, 0.85);
+  border-radius: calc(4 * var(--u));
+  pointer-events: none;
+}
+
+.craft-controls {
+  display: flex;
+  flex-direction: column;
+  gap: calc(6 * var(--u));
+  width: calc(40 * var(--u));
+}
+
+.craft-controls .inv-button {
   margin-top: 0;
-  padding: 3px 0;
+  padding: calc(4 * var(--u)) 0;
 }
 
-.craft-all:disabled {
-  opacity: 0.4;
-  cursor: default;
+.wheel-arrow {
+  font-size: calc(11 * var(--u));
+  line-height: 1;
 }
 
-.craft-all:disabled:hover {
-  background: rgba(232, 240, 247, 0.12);
+/* --- recipes --- */
+.recipe-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: calc(4 * var(--u));
+  scrollbar-width: thin;
+  scrollbar-color: rgba(232, 240, 247, 0.45) transparent;
 }
 
-.craft-cycle {
-  width: auto;
-  margin-top: calc((var(--slot) - 24px) / 2);
-  padding: 3px 8px;
+.recipe-list::-webkit-scrollbar {
+  width: calc(4 * var(--u));
+}
+
+.recipe-list::-webkit-scrollbar-thumb {
+  background: rgba(232, 240, 247, 0.45);
+  border-radius: calc(2 * var(--u));
+}
+
+.recipe-head {
+  display: flex;
+  align-items: center;
+  gap: calc(6 * var(--u));
+  padding: calc(2 * var(--u));
+  border: var(--u) solid transparent;
+  border-radius: calc(3 * var(--u));
+  cursor: pointer;
+}
+
+.recipe-head:hover,
+.recipe.open .recipe-head {
+  border-color: rgba(232, 240, 247, 0.45);
+}
+
+/* The picture is drawn in the canvas over this box. */
+.recipe-icon {
+  position: relative;
+  flex: none;
+  width: calc(30 * var(--u));
+  height: calc(30 * var(--u));
+}
+
+.recipe-icon .slot-count {
+  right: 0;
+  bottom: 0;
+  font-size: calc(10 * var(--u));
+}
+
+.recipe-name {
+  font-size: calc(12 * var(--u));
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.craft-equals {
-  margin-left: 4px;
+.recipe-needs {
+  padding: calc(2 * var(--u)) 0 calc(6 * var(--u)) calc(38 * var(--u));
+  font-size: calc(11 * var(--u));
 }
 
-.inv-slot.result {
-  border-color: rgba(232, 240, 247, 0.55);
+.recipe-need {
+  display: flex;
+  justify-content: space-between;
+  gap: calc(6 * var(--u));
+}
+
+.need-mark {
+  font-weight: 700;
+}
+
+.need-ok {
+  color: #5fd35f;
+}
+
+.need-bad {
+  color: #ff5a5a;
+}
+
+.recipe-empty {
+  padding: calc(4 * var(--u));
+  font-size: calc(11 * var(--u));
+  opacity: 0.55;
 }
 
 .inv-cursor-count {
@@ -520,7 +691,7 @@ body {
   left: 0;
   top: 0;
   pointer-events: none;
-  font-size: 12px;
+  font-size: calc(12 * var(--u));
   font-weight: 700;
 }
 
@@ -528,11 +699,11 @@ body {
   position: absolute;
   left: 0;
   top: 0;
-  padding: 2px 8px;
+  padding: calc(2 * var(--u)) calc(8 * var(--u));
   background: rgba(10, 14, 20, 0.85);
-  border: 1px solid rgba(232, 240, 247, 0.35);
-  border-radius: 3px;
+  border: var(--u) solid rgba(232, 240, 247, 0.35);
+  border-radius: calc(3 * var(--u));
   pointer-events: none;
-  font-size: 12px;
+  font-size: calc(12 * var(--u));
   white-space: nowrap;
 }

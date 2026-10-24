@@ -19,6 +19,7 @@ import {
   type RailSource,
 } from "./climb.ts";
 import { VOXEL_SIZE } from "./constants.ts";
+import { CHUTE_ACCEL, Glide } from "../items/parachute.ts";
 import { SkateState } from "./skate.ts";
 
 /**
@@ -138,6 +139,9 @@ export class Player {
   skating = false;
   readonly skate = new SkateState();
   private wasSkating = false;
+  /** Wearing a parachute (set each frame by whoever owns the inventory); Walking only. See items/parachute.ts. */
+  gliding = false;
+  readonly glide = new Glide();
   /** Holding a rail (a ladder): see sim/climb.ts. */
   readonly climb = new ClimbState();
   /** Where rails are found; unset, nothing can be climbed. */
@@ -328,6 +332,7 @@ export class Player {
 
     // A rail is held by a walker only; tucking into a ball or mounting a board lets go.
     if (skating || this.mode !== PlayerMode.Walking) this.climb.release();
+    if (skating || this.mode !== PlayerMode.Walking || this.climb.active) this.glide.reset();
     if (this.climb.cooldown > 0) this.climb.cooldown -= dt;
     if (this.climb.active && !this.refreshRail()) this.letGo(0);
     if (
@@ -509,14 +514,16 @@ export class Player {
 
   private updateWalking(input: PlayerInput, dt: number, query: SolidQuery): void {
     const wishLen = this.computeWishDirection(input);
-    const wishVelX = wishLen > 1e-5 ? (this.wishX / wishLen) * this.walkSpeed : 0;
-    const wishVelZ = wishLen > 1e-5 ? (this.wishZ / wishLen) * this.walkSpeed : 0;
+    // Under an open canopy the heading steers, not the keys; see items/parachute.ts.
+    const chute = this.glide.update(this, input, dt, this.gliding);
+    const wishVelX = chute ? this.glide.wishX : wishLen > 1e-5 ? (this.wishX / wishLen) * this.walkSpeed : 0;
+    const wishVelZ = chute ? this.glide.wishZ : wishLen > 1e-5 ? (this.wishZ / wishLen) * this.walkSpeed : 0;
 
     // Steering works on the player's own velocity, not on a shove they were given.
     const deltaX = wishVelX - (this.vx - this.knockX);
     const deltaZ = wishVelZ - (this.vz - this.knockZ);
     const deltaLen = Math.hypot(deltaX, deltaZ);
-    const maxChange = (this.grounded ? GROUND_ACCEL : AIR_ACCEL) * dt;
+    const maxChange = (chute ? CHUTE_ACCEL : this.grounded ? GROUND_ACCEL : AIR_ACCEL) * dt;
     if (deltaLen <= maxChange || deltaLen < 1e-5) {
       this.vx += deltaX;
       this.vz += deltaZ;
@@ -527,6 +534,7 @@ export class Player {
     if (this.knockX !== 0 || this.knockZ !== 0) this.wearOffKnock(dt);
 
     this.vy += GRAVITY * dt;
+    if (chute) this.vy = this.glide.sink(this.vy);
     if (input.jumpPressed && this.grounded) {
       this.vy = this.jumpSpeed;
     }

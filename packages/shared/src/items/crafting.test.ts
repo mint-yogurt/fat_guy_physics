@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   CRAFT_MAX_BOXES,
-  CRAFT_MIN_BOXES,
+  CRAFT_SMALL_BOX,
   CraftingBench,
   RECIPES,
   RecipeBook,
-  recipesUsing,
+  countIn,
+  craftLayout,
+  recipesFor,
 } from "./crafting.ts";
 import { Inventory, ItemType } from "./inventory.ts";
 import { ItemCursor } from "./itemCursor.ts";
@@ -18,18 +20,64 @@ function bookWith(...types: ItemType[]): RecipeBook {
   return book;
 }
 
-describe("crafting bench boxes", () => {
-  it("shows two boxes, and another each time the last is filled", () => {
+describe("crafting box", () => {
+  it("is 2x2 for up to four stacks and 3x3 past that, every stack on its own spot inside it", () => {
+    for (let n = 0; n <= CRAFT_MAX_BOXES; n++) {
+      const layout = craftLayout(n);
+      expect(layout.cells).toBe(n <= CRAFT_SMALL_BOX ? 2 : 3);
+      expect(layout.spots).toHaveLength(n);
+      for (const [x, y] of layout.spots) {
+        expect(x).toBeGreaterThanOrEqual(0.5);
+        expect(y).toBeGreaterThanOrEqual(0.5);
+        expect(x).toBeLessThanOrEqual(layout.cells - 0.5);
+        expect(y).toBeLessThanOrEqual(layout.cells - 0.5);
+      }
+      // Never two stacks overlapping (a slot apart, give or take rounding).
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const [ax, ay] = layout.spots[i]!;
+          const [bx, by] = layout.spots[j]!;
+          expect(Math.hypot(ax - bx, ay - by)).toBeGreaterThan(0.999);
+        }
+      }
+    }
+  });
+
+  it("centres one stack, puts two on opposite corners, three in an equilateral triangle, four in the corners", () => {
+    expect(craftLayout(1).spots).toEqual([[1, 1]]);
+    expect(craftLayout(2).spots).toEqual([
+      [0.5, 0.5],
+      [1.5, 1.5],
+    ]);
+    const [a, b, c] = craftLayout(3).spots as [number, number][];
+    const side = (p: [number, number], q: [number, number]): number => Math.hypot(p[0] - q[0], p[1] - q[1]);
+    expect(side(a!, b!)).toBeCloseTo(1);
+    expect(side(b!, c!)).toBeCloseTo(1);
+    expect(side(c!, a!)).toBeCloseTo(1);
+    expect(craftLayout(4).spots).toHaveLength(4);
+  });
+
+  it("keeps stacks in the order they went in, as others come and go", () => {
     const bench = new CraftingBench(new RecipeBook());
-    expect(bench.visibleBoxes).toBe(CRAFT_MIN_BOXES);
-    bench.setSlot(0, { type: ItemType.Stick, count: 1 });
-    expect(bench.visibleBoxes).toBe(2);
-    bench.setSlot(1, { type: ItemType.Rock, count: 1 });
-    expect(bench.visibleBoxes).toBe(3);
-    bench.setSlot(2, { type: ItemType.Leaf, count: 1 });
-    expect(bench.visibleBoxes).toBe(4);
-    bench.setSlot(5, { type: ItemType.Leaf, count: 1 });
-    expect(bench.visibleBoxes).toBe(CRAFT_MAX_BOXES);
+    bench.setSlot(bench.dropIndex(ItemType.Stick), { type: ItemType.Stick, count: 1 });
+    bench.setSlot(bench.dropIndex(ItemType.Rock), { type: ItemType.Rock, count: 1 });
+    bench.setSlot(bench.dropIndex(ItemType.Leaf), { type: ItemType.Leaf, count: 1 });
+    expect(bench.arrangement()).toEqual([0, 1, 2]);
+    bench.setSlot(0, undefined);
+    // The coal fills the gap the stick left, but goes in last.
+    bench.setSlot(bench.dropIndex(ItemType.Coal), { type: ItemType.Coal, count: 1 });
+    expect(bench.arrangement()).toEqual([1, 2, 0]);
+    expect(bench.types()).toEqual([ItemType.Rock, ItemType.Leaf, ItemType.Coal]);
+    expect(bench.stackCount).toBe(3);
+  });
+
+  it("drops a stack onto one of the same item, and refuses a tenth kind", () => {
+    const bench = new CraftingBench(new RecipeBook());
+    bench.setSlot(0, { type: ItemType.Stick, count: 3 });
+    expect(bench.dropIndex(ItemType.Stick)).toBe(0);
+    expect(bench.dropIndex(ItemType.Rock)).toBe(1);
+    for (let i = 0; i < CRAFT_MAX_BOXES; i++) bench.setSlot(i, { type: ItemType.Rock, count: 255 });
+    expect(bench.dropIndex(ItemType.Leaf)).toBe(-1);
   });
 
   it("makes nothing from things no recipe uses, and gives back what was put in", () => {
@@ -40,7 +88,8 @@ describe("crafting bench boxes", () => {
     const inventory = new Inventory();
     for (const stack of bench.takeAll()) inventory.tryAdd(stack.type, stack.count);
     expect(inventory.slot(1)).toEqual({ type: ItemType.Stick, count: 4 });
-    expect(bench.visibleBoxes).toBe(CRAFT_MIN_BOXES);
+    expect(bench.stackCount).toBe(0);
+    expect(countIn(inventory, ItemType.Stick)).toBe(4);
   });
 });
 
@@ -82,16 +131,29 @@ describe("recipes", () => {
 
   it("list what a material can make, from the known recipes only", () => {
     const logOnly = bookWith(ItemType.Log);
-    expect(recipesUsing(logOnly, ItemType.Log).map((r) => r.output.type)).toEqual([
+    expect(recipesFor(logOnly, [ItemType.Log]).map((r) => r.output.type)).toEqual([
       ItemType.Stick,
       ItemType.Toobifer,
       ItemType.Plywood,
       ItemType.Wheel,
     ]);
     // The ladder is not known yet: no toobifer has been held.
-    expect(recipesUsing(logOnly, ItemType.Stick)).toEqual([]);
+    expect(recipesFor(logOnly, [ItemType.Stick])).toEqual([]);
     const withToobifer = bookWith(ItemType.Stick, ItemType.Toobifer);
-    expect(recipesUsing(withToobifer, ItemType.Stick).map((r) => r.output.type)).toEqual([ItemType.Ladder]);
+    expect(recipesFor(withToobifer, [ItemType.Stick]).map((r) => r.output.type)).toEqual([ItemType.Ladder]);
+  });
+
+  it("list every known recipe with nothing in the box, and narrow as more kinds go in", () => {
+    const book = bookWith(ItemType.Log, ItemType.Stick, ItemType.Plywood, ItemType.Wheel, ItemType.Toobifer);
+    const all = recipesFor(book);
+    expect(all.length).toBe(RECIPES.filter((r) => book.knows(r)).length);
+    expect(recipesFor(book, [ItemType.Stick]).map((r) => r.output.type)).toEqual([
+      ItemType.Ladder,
+      ItemType.Skateboard,
+    ]);
+    expect(recipesFor(book, [ItemType.Stick, ItemType.Wheel]).map((r) => r.output.type)).toEqual([
+      ItemType.Skateboard,
+    ]);
   });
 });
 
@@ -107,15 +169,27 @@ describe("crafting", () => {
     expect(known.options).toHaveLength(4);
   });
 
-  it("cycles through the things one material can make", () => {
+  it("turns the wheel through the things one material can make, stopping at the ends", () => {
     const bench = new CraftingBench(bookWith(ItemType.Log));
     bench.setSlot(0, { type: ItemType.Log, count: 1 });
+    expect(bench.step(-1)).toBe(false);
     const seen: ItemType[] = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 4; i++) {
       seen.push(bench.result()!.type);
-      bench.cycle();
+      bench.step(1);
     }
-    expect(seen).toEqual([ItemType.Stick, ItemType.Toobifer, ItemType.Plywood, ItemType.Wheel, ItemType.Stick]);
+    expect(seen).toEqual([ItemType.Stick, ItemType.Toobifer, ItemType.Plywood, ItemType.Wheel]);
+    expect(bench.step(1)).toBe(false);
+    expect(bench.step(-2)).toBe(true);
+    expect(bench.result()?.type).toBe(ItemType.Toobifer);
+  });
+
+  it("keeps the wheel where it was when more of the material goes in", () => {
+    const bench = new CraftingBench(bookWith(ItemType.Log));
+    bench.setSlot(0, { type: ItemType.Log, count: 1 });
+    bench.step(2); // plywood
+    bench.setSlot(0, { type: ItemType.Log, count: 5 });
+    expect(bench.result()?.type).toBe(ItemType.Plywood);
   });
 
   it("takes the material and puts one craft on the cursor, and again on each click", () => {
@@ -142,8 +216,7 @@ describe("crafting", () => {
     const bench = new CraftingBench(bookWith(ItemType.Log));
     const cursor = new ItemCursor();
     bench.setSlot(0, { type: ItemType.Log, count: 3 });
-    bench.cycle();
-    bench.cycle(); // plywood
+    bench.step(2); // plywood
     bench.craft(cursor);
     bench.craft(cursor);
     expect(cursor.held).toEqual({ type: ItemType.Plywood, count: 2 });
@@ -154,7 +227,7 @@ describe("crafting", () => {
     const bench = new CraftingBench(bookWith(ItemType.Log));
     const cursor = new ItemCursor();
     bench.setSlot(0, { type: ItemType.Log, count: 10 });
-    bench.cycle(); // toobifers, 2 a log
+    bench.step(1); // toobifers, 2 a log
     expect(bench.craft(cursor, Infinity)).toBe(10);
     expect(cursor.held).toEqual({ type: ItemType.Toobifer, count: 20 });
     expect(bench.slot(0)).toBeUndefined();
@@ -255,6 +328,17 @@ describe("crafting", () => {
     expect(hand.held).toEqual({ type: ItemType.SpringShoes, count: 1 });
   });
 
+  it("makes a parachute from four strings of lights and twelve rolls of toilet paper", () => {
+    const bench = new CraftingBench(bookWith(ItemType.XmasLights, ItemType.ToiletPaper));
+    const cursor = new ItemCursor();
+    bench.setSlot(0, { type: ItemType.XmasLights, count: 4 });
+    bench.setSlot(1, { type: ItemType.ToiletPaper, count: 11 });
+    expect(bench.result()).toBeUndefined();
+    bench.setSlot(1, { type: ItemType.ToiletPaper, count: 12 });
+    expect(bench.craft(cursor)).toBe(1);
+    expect(cursor.held).toEqual({ type: ItemType.Parachute, count: 1 });
+  });
+
   it("turns ten leaves into a roll of toilet paper, and a dozen rolls and some metal into a trampoline", () => {
     const bench = new CraftingBench(bookWith(ItemType.Leaf, ItemType.ToiletPaper, ItemType.Metal));
     const cursor = new ItemCursor();
@@ -280,7 +364,7 @@ describe("crafting", () => {
     const bench = new CraftingBench(book);
     const cursor = new ItemCursor();
     bench.setSlot(0, { type: ItemType.Log, count: 1 });
-    bench.cycle(); // toobifers
+    bench.step(1); // toobifers
     expect(bench.craft(cursor)).toBe(1);
     expect(book.has(ItemType.Toobifer)).toBe(true);
     const ladder = RECIPES.find((r) => r.output.type === ItemType.Ladder)!;

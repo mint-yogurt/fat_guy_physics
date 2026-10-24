@@ -91,6 +91,7 @@ export type AvatarBody = Pick<
   | "skateTilt"
   | "climbing"
   | "climb"
+  | "glide"
 >;
 
 export interface Appearance {
@@ -162,6 +163,10 @@ const CLIMB_HIGH = new Vector3(0.25, 0.97, 0.2);
 const CLIMB_LOW = new Vector3(0.65, 0.45, 0.4);
 /** Radians of the climbing cycle per metre climbed: one cycle is a couple of rungs. */
 const CLIMB_STRIDE = 9;
+// Under an open parachute: both hands up on the lines, a little out from the shoulders (right arm; the left mirrors Z).
+const GLIDE_AIM = new Vector3(0.12, 0.96, 0.25).normalize();
+/** How fast (1/s) the arms go up, and the body comes round to the glide heading, as the canopy fills. */
+const GLIDE_BLEND_RATE = 8;
 /** How far the body is drawn in toward the rungs while climbing, metres: the sim keeps the (wide) collision box off them. */
 const CLIMB_BODY_SHIFT = 0.3;
 
@@ -287,6 +292,8 @@ export class PlayerModel {
   private readonly armQuat = new Quaternion();
   private readonly offQuat = new Quaternion();
 
+  /** How far the parachute is open and held up, 0..1: the arms go up on its lines. */
+  private glideWeight = 0;
   private holdWeight = 0;
   private carryWeight = 0;
   private bladeWeight = 0;
@@ -509,6 +516,8 @@ export class PlayerModel {
 
     this.tuck +=
       Math.min(1, dt * RETRACT_RATE) * ((ragball ? 1 : 0) - this.tuck);
+    const gliding = !ragball && player.glide.open > 0.02;
+    this.glideWeight += Math.min(1, dt * GLIDE_BLEND_RATE) * ((gliding ? 1 : 0) - this.glideWeight);
 
     // On a board the rider leans with it, onto the angle of the ground under the
     // wheels: about the board's lateral and long axes, the whole body as one.
@@ -560,6 +569,11 @@ export class PlayerModel {
         // Facing the rungs, not the camera: the head turns freely, the body does not.
         const turn = Math.atan2(-wall.z, -wall.x) - facing;
         facing += (turn - Math.PI * 2 * Math.round(turn / (Math.PI * 2))) * this.climbW;
+      }
+      if (this.glideWeight > 0.001) {
+        // Under a canopy the body faces the way it is carried, which the look direction only steers slowly.
+        const turn = player.glide.heading * (Math.PI / 180) - facing;
+        facing += (turn - Math.PI * 2 * Math.round(turn / (Math.PI * 2))) * this.glideWeight;
       }
       this.spin.rotation.set(0, -facing, player.skateTilt * 1.5);
     }
@@ -725,6 +739,7 @@ export class PlayerModel {
     blendDir(aim, aim, vb, this.shakeWeight);
     blendDir(aim, aim, THROW_AIM, lunge);
     this.logThrow(aim, 1, bowlThrough, lobThrough);
+    blendDir(aim, aim, GLIDE_AIM, this.glideWeight);
 
     // Climbing: the hands take the rungs by turns, over the head.
     const reach = 0.5 + 0.5 * Math.sin(this.climbPhase * CLIMB_STRIDE);
@@ -738,6 +753,7 @@ export class PlayerModel {
     blendDir(vb, SCOOP_UP, SCOOP_DOWN, dip * (1 - lift));
     blendDir(left, left, mirror(vb, vb, -1), this.scoopWeight);
     this.logThrow(left, -1, bowlThrough, lobThrough);
+    blendDir(left, left, mirror(va, GLIDE_AIM, -1), this.glideWeight);
 
     this.rightPose =
       Math.max(
@@ -749,8 +765,10 @@ export class PlayerModel {
         lunge,
         both,
         this.climbW,
+        this.glideWeight,
       ) * active;
-    this.leftPose = Math.max(this.carryWeight, this.scoopWeight, both, this.climbW) * active;
+    this.leftPose =
+      Math.max(this.carryWeight, this.scoopWeight, both, this.climbW, this.glideWeight) * active;
   }
 
   /** Lays the bowl and lob wind-ups and follow-throughs onto one arm's aim. */
@@ -784,7 +802,11 @@ export class PlayerModel {
     const arm = this.handArm;
     const style = this.held.show(pose.held, false);
     const shown =
-      arm !== undefined && style !== HoldStyle.Empty && this.tuck < 0.3 && this.climbW < 0.4;
+      arm !== undefined &&
+      style !== HoldStyle.Empty &&
+      this.tuck < 0.3 &&
+      this.climbW < 0.4 &&
+      this.glideWeight < 0.3;
     // A thrown stick or log is out of the hand for the start of the follow-through.
     const throwable =
       (style === HoldStyle.Blade ||
@@ -843,6 +865,18 @@ export class PlayerModel {
 
   set visible(value: boolean) {
     this.root.visible = value;
+  }
+
+  /**
+   * Where a hand is in the world as of the last `update`, for lines that end in it (a parachute's).
+   * Undefined if the model has no such arm.
+   */
+  handWorld(left: boolean, out: Vector3): Vector3 | undefined {
+    const limb = left ? this.offArm : this.handArm;
+    if (limb === undefined) return undefined;
+    this.handPoint(limb, left ? this.offQuat : this.armQuat, out);
+    this.spin.updateWorldMatrix(true, false);
+    return this.spin.localToWorld(out);
   }
 
   /** A named point on the item in the hand (the fishing rod's line tip), for the line to start from. */

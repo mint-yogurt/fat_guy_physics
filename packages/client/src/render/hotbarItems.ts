@@ -35,6 +35,8 @@ import { SPIN_SPEED } from "./pickupRenderer.ts";
 
 /** The longest side of an item, in CSS pixels. */
 const ITEM_PX = 40;
+/** A hotbar item's longest side as a share of its slot (40 in a 56 slot, before the UI scale). */
+const HOTBAR_ITEM_FILL = 40 / 56;
 /** Tilted toward the camera, so the top of a spinning item can be seen. */
 const TILT = 0.5;
 const BACKDROP = new Color(0x0a0e14);
@@ -157,6 +159,8 @@ export class HotbarItems {
       content.add(assets.leaves.clone());
     } else if (type === ItemType.ToiletPaper) {
       content.add(assets.toiletPaper.clone());
+    } else if (type === ItemType.Parachute) {
+      content.add(assets.parachuteItem.clone());
     } else if (type === ItemType.Goo) {
       content.add(assets.goo.clone());
     } else if (type === ItemType.XmasLights) {
@@ -220,7 +224,8 @@ export class HotbarItems {
       slot.backdropMaterial.opacity =
         view.backdropOpacity ?? (view.selected ? BACKDROP_OPACITY_SELECTED : BACKDROP_OPACITY);
       slot.backdrop.position.z = view.backdropDepth ?? BACKDROP_DEPTH;
-      slot.spin.scale.setScalar((view.itemPx ?? ITEM_PX) / ITEM_PX);
+      // Sized from the slot, so the item follows the UI scale (ui.css `--ui-scale`).
+      slot.spin.scale.setScalar((view.itemPx ?? view.width * HOTBAR_ITEM_FILL) / ITEM_PX);
 
       if (view.item !== slot.shown) {
         if (slot.holder !== undefined) slot.spin.remove(slot.holder);

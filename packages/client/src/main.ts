@@ -96,6 +96,7 @@ import {
   type RopeTie,
   type RopeVec,
 } from "@fgp/shared/items/rope";
+import { isWorn } from "@fgp/shared/items/gear";
 import { SpringStride } from "@fgp/shared/items/springShoes";
 import {
   createSnowballHit,
@@ -140,6 +141,7 @@ import { LooseBoardsView, SkateboardView } from "./render/skateboardView.ts";
 import { TreeLightsView } from "./render/treeLights.ts";
 import { RopesView } from "./render/ropeView.ts";
 import { FishingView } from "./render/fishingView.ts";
+import { ParachuteView } from "./render/parachuteView.ts";
 import { PaperTrails } from "./render/paperTrail.ts";
 import { SnowballsView, SnowPuffs } from "./render/snowballView.ts";
 import { GOO_SPRAY_COLORS, GooStains } from "./render/gooMaterial.ts";
@@ -585,6 +587,10 @@ async function start(): Promise<void> {
   const fishingFrame = createFishingFrame();
   const fishingInput = { active: false, cast: false, reel: false };
   const fishingView = new FishingView(scene, itemAssets.ropeParts, fishing);
+  /** An open parachute's canopy and lines (items/parachute.ts), and the hands they end in. */
+  const parachuteView = new ParachuteView(scene, itemAssets.parachute, itemAssets.ropeParts);
+  const chuteLeft = new Vector3();
+  const chuteRight = new Vector3();
   /** Where the line leaves the rod as drawn, world space, as of the last frame; unset until the rod has been seen. */
   const rodTip = new Vector3();
   let rodTipSeen = false;
@@ -719,6 +725,7 @@ async function start(): Promise<void> {
     inventory.tryAdd(ItemType.CandyBucket, 2);
     inventory.tryAdd(ItemType.Leaf, 30);
     inventory.tryAdd(ItemType.ToiletPaper, 10);
+    inventory.tryAdd(ItemType.Parachute);
   }
   if (DEBUG) hud.set("DEBUG", "ON");
 
@@ -748,6 +755,7 @@ async function start(): Promise<void> {
     requireElement<HTMLDivElement>("#inventory"),
     inventory,
     crafting,
+    recipes,
     itemCursor,
     heldSources,
     {
@@ -1479,6 +1487,8 @@ async function start(): Promise<void> {
     // the hotbar by then: the rider's fall plays out on the skate state.
     const boardEquipped = inventory.selectedItem()?.type === ItemType.Skateboard;
     springShoesOn = inventory.selectedItem()?.type === ItemType.SpringShoes;
+    // Gear, once there is a gear bar: pass its contents as the third argument (items/gear.ts).
+    player.gliding = isWorn(ItemType.Parachute, inventory.selectedItem()?.type);
     player.skating = boardEquipped || player.skate.isDown;
     const skateView = player.skating && player.mode === PlayerMode.Walking;
     if (skateView !== wasSkateView) {
@@ -2363,6 +2373,7 @@ async function start(): Promise<void> {
     ropesView.publishLights(eyeX, eyeY, eyeZ, () => {
       treeLights.offerLights();
       fishingView.offerLights();
+      parachuteView.offerLights();
     });
 
     // --- pick up: E, on whatever is under the crosshair or at your feet ---
@@ -2608,14 +2619,27 @@ async function start(): Promise<void> {
     playerModel.visible = playerCamera.perspective !== CameraPerspective.FirstPerson;
     // The arm is the first-person stand-in for it: only while walking, since
     // a ragball has no hand to show.
+    // Not under an open parachute either: the hands are up on its lines, out of sight.
     arm.visible =
       playerCamera.perspective === CameraPerspective.FirstPerson &&
-      player.mode === PlayerMode.Walking;
+      player.mode === PlayerMode.Walking &&
+      player.glide.open < 0.02;
     arm.update(rawDt, {
       pose: avatarPose,
       walk: Math.min(1, Math.hypot(player.vx, player.vz) / player.walkSpeed),
       grounded: player.grounded,
     });
+
+    // The hands are the model's, which is posed (though not drawn) in first person too.
+    if (
+      player.glide.open > 0.01 &&
+      playerModel.handWorld(true, chuteLeft) !== undefined &&
+      playerModel.handWorld(false, chuteRight) !== undefined
+    ) {
+      parachuteView.update(player.glide.open, player.glide.heading * (Math.PI / 180), chuteLeft, chuteRight);
+    } else {
+      parachuteView.update(0, 0, chuteLeft, chuteRight);
+    }
 
     const wantCameraY = renderY + rideLift;
     cameraY =

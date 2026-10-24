@@ -61,6 +61,7 @@ const FALLBACK_COLORS: Record<ItemType, number> = {
   [ItemType.SpringShoes]: 0xc83a3a,
   [ItemType.FishingRod]: 0x8a6033,
   [ItemType.ToiletPaper]: 0xf4f1e8,
+  [ItemType.Parachute]: 0xe8e0c8,
   [ItemType.PresentSmall]: 0xc83a3a,
   [ItemType.PresentBig]: 0x2f9a4a,
   [ItemType.CandyBucket]: 0xd9741a,
@@ -187,6 +188,11 @@ export class PickupRenderer {
     if (type === ItemType.ToiletPaper) {
       const pivot = new Group();
       pivot.add(this.assets.toiletPaper.clone());
+      return pivot;
+    }
+    if (type === ItemType.Parachute) {
+      const pivot = new Group();
+      pivot.add(this.assets.parachuteItem.clone());
       return pivot;
     }
     const wood =

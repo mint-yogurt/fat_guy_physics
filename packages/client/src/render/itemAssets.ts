@@ -73,6 +73,10 @@ import { bulbGlassMaterial, buildCoil, readRopeParts, type RopeParts } from "./r
  *    parts themselves are in `paperParts` (render/paperFlap.ts), which also builds the one in the hand.
  *  - goo: the puddle of it lying flat, centred, about 32cm across: the item as it
  *    looks in a slot or on the ground. gooBall: the ball of it in the hand, 16cm.
+ *  - parachute: `parachuteItem` is the canopy as a little dome, centred, PARACHUTE_ITEM_SIZE across: the
+ *    item (slot, ground, fist). `parachute` is the open one: the canopy stood up in the body frame
+ *    (X forward, Y up, Z to the right), CANOPY_SCALE times as authored, with the plane of its four rope
+ *    points at y=0 and those points in `corners`.
  */
 
 /**
@@ -98,6 +102,9 @@ const ROD_ITEM_SIZE = 0.9;
 const HELD_ROD_LENGTH = 2.2;
 /** The child of the held rod that sits where the fishing line leaves it. */
 export const ROD_TIP_NAME = "rod_tip";
+/** The parachute as an item, across, and its open canopy as a multiple of the authored size. */
+const PARACHUTE_ITEM_SIZE = 0.4;
+const CANOPY_SCALE = 1.7;
 /** A bunch of leaves, longest side, metres. */
 const LEAVES_SIZE = 0.4;
 /** Diameter of the ball of goo in the hand, metres. */
@@ -121,6 +128,13 @@ const STICK_AUTHORED_LENGTH = 29.74;
 
 /** How big a log reads on the ground, as a fraction of log.glb's 0.76m. */
 const LOG_SCALE = 0.7;
+
+/** An open parachute, see the notes above. */
+export interface ParachuteAssets {
+  readonly canopy: Object3D;
+  /** Where its four lines are tied, in the canopy's frame: front left, back left, front right, back right. */
+  readonly corners: readonly [Vector3, Vector3, Vector3, Vector3];
+}
 
 export interface ItemAssets {
   /** Shaft along +Z, butt at the origin, in metres. */
@@ -162,6 +176,10 @@ export interface ItemAssets {
   readonly fishingRod: Object3D;
   /** The fishing rod in a hand (see the notes above); the line leaves from its ROD_TIP_NAME child. */
   readonly fishingRodHeld: Object3D;
+  /** The parachute as an item: a small dome. */
+  readonly parachuteItem: Object3D;
+  /** The open canopy and where its lines are tied. */
+  readonly parachute: ParachuteAssets;
   /** Goo as an item: the flat puddle of it. */
   readonly goo: Object3D;
   /** Goo in the hand: a ball of it. */
@@ -264,6 +282,43 @@ function shoeSoleTop(scene: Object3D): Vector3 {
   return top;
 }
 
+/**
+ * The open parachute from its file. The canopy's material is cut from both sides (it is a single
+ * sheet) and lit like the props. The tie points are the file's four nodes whose names start with
+ * "rope" and are told apart by where they are, not by their names (the file spells them four ways):
+ * +X is the front, +Y the left.
+ */
+function readParachute(scene: Object3D): ParachuteAssets {
+  pixelLit(scene);
+  const ties: Object3D[] = [];
+  scene.traverse((object) => {
+    if (object.name.startsWith("rope")) ties.push(object);
+    if (!(object instanceof Mesh)) return;
+    faceOutward(object.geometry);
+    object.castShadow = false;
+    for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+      material.side = DoubleSide;
+    }
+  });
+  if (ties.length !== 4) throw new Error(`parachute.glb: expected 4 rope points, found ${ties.length}`);
+  const rimHeight = ties.reduce((sum, tie) => sum + tie.position.z, 0) / ties.length;
+  const corner = (front: boolean, left: boolean): Vector3 => {
+    const tie = ties.find((t) => t.position.x > 0 === front && t.position.y > 0 === left);
+    if (tie === undefined) throw new Error("parachute.glb: the rope points are not one at each corner");
+    const { x, y } = tie.position;
+    return new Vector3(x, 0, -y).multiplyScalar(CANOPY_SCALE);
+  };
+  scene.rotation.x = -Math.PI / 2;
+  scene.scale.setScalar(CANOPY_SCALE);
+  scene.position.y = -rimHeight * CANOPY_SCALE;
+  const canopy = new Group();
+  canopy.add(scene);
+  return {
+    canopy,
+    corners: [corner(true, true), corner(false, true), corner(true, false), corner(false, false)],
+  };
+}
+
 export async function loadItemAssets(): Promise<ItemAssets> {
   const loader = new GLTFLoader();
   const [
@@ -290,6 +345,7 @@ export async function loadItemAssets(): Promise<ItemAssets> {
     rodFile,
     leavesFile,
     paperFile,
+    parachuteFile,
   ] = await Promise.all([
     loader.loadAsync("/meshes/stick.glb"),
     loader.loadAsync("/meshes/log.glb"),
@@ -315,6 +371,7 @@ export async function loadItemAssets(): Promise<ItemAssets> {
     loader.loadAsync("/meshes/leaves.glb"),
     // The toilet paper: roll, flap, hand mark.
     loader.loadAsync("/meshes/tp.glb"),
+    loader.loadAsync("/meshes/parachute.glb"),
   ]);
 
   const stickScale = STICK_LENGTH / STICK_AUTHORED_LENGTH;
@@ -508,6 +565,19 @@ export async function loadItemAssets(): Promise<ItemAssets> {
   const toiletPaperRoll = new Group();
   toiletPaperRoll.add(standing);
 
+  // The parachute is authored Z-up: a thin dome, and an empty at each corner where a line is tied.
+  // Stood up (x, y, z) -> (x, z, -y) its +X is forward and its +Y (the left of the file) is -Z, the
+  // character's left, so it is already in the body frame.
+  const parachute = readParachute(parachuteFile.scene);
+  const parachuteItem = new Group();
+  const packed = parachuteFile.scene.clone();
+  packed.position.set(0, 0, 0);
+  packed.scale.setScalar(1);
+  packed.rotation.x = -Math.PI / 2;
+  packed.scale.setScalar(fitScale(packed, PARACHUTE_ITEM_SIZE));
+  parachuteItem.add(packed);
+  recentre(parachuteItem, packed);
+
   const ropeParts = readRopeParts(lightsFile.scene);
   const ropeCoil = buildCoil(ropeParts);
 
@@ -532,6 +602,8 @@ export async function loadItemAssets(): Promise<ItemAssets> {
     springShoeItem,
     fishingRod,
     fishingRodHeld,
+    parachuteItem,
+    parachute,
     goo,
     gooBall,
     ropeCoil,

@@ -113,6 +113,8 @@ const HOLD_STYLES: Record<ItemType, HoldStyle> = {
   [ItemType.FishingRod]: HoldStyle.Blade,
   // In the fist, rolled and put exactly as a rock is.
   [ItemType.ToiletPaper]: HoldStyle.Ball,
+  // Packed up in the fist until it opens; open, both hands are up on its lines (playerModel.ts).
+  [ItemType.Parachute]: HoldStyle.Ball,
 };
 
 /** Whether a throw of the held item sends it out of the hand (a stick, a log); a cast keeps the rod. */

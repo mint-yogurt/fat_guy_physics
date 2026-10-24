@@ -167,6 +167,12 @@ const BUILDERS: Record<ItemType, Builder> = {
   // On the feet, not in a hand: see playerModel.ts.
   [ItemType.SpringShoes]: () => new Group(),
   [ItemType.FishingRod]: ({ assets }) => assets.fishingRodHeld.clone(),
+  // Packed up in the fist. Open, it is drawn by parachuteView.ts and both hands are up on its lines.
+  [ItemType.Parachute]: ({ assets }) => {
+    const bundle = new Group();
+    bundle.add(assets.parachuteItem.clone());
+    return bundle;
+  },
   // In the hand it is a ball of it; as an item (slot, ground) it is the puddle.
   [ItemType.Goo]: ({ assets }) => {
     const ball = new Group();
